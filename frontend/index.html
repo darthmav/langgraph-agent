@@ -1,0 +1,957 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ambiguity 3-Agent Console</title>
+<style>
+:root {
+  /* Base palette - dark, professional */
+  --bg: #0a0b0d;
+  --bg-2: #101216;
+  --bg-3: #15181e;
+  --line: #1e232c;
+  --line-2: #2a313d;
+  --ink: #dde3ec;
+  --ink-2: #8b95a6;
+  --ink-3: #5a6474;
+  
+  /* Agent-specific colors - revamped for Part 2 */
+  --planner: #4ea3ff;      /* Blue - strategic thinking */
+  --researcher: #76d13a;   /* Green - knowledge gathering */
+  --builder: #ff6a8a;      /* Pink/red - execution */
+  
+  /* Status colors */
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+  
+  /* Gradients for Part 2 pop */
+  --gradient-1: linear-gradient(135deg, #4ea3ff 0%, #76d13a 50%, #ff6a8a 100%);
+  --gradient-2: linear-gradient(90deg, #4ea3ff, #76d13a, #ff6a8a, #4ea3ff);
+  --glow-planner: 0 0 20px #4ea3ff44, 0 0 40px #4ea3ff22;
+  --glow-researcher: 0 0 20px #76d13a44, 0 0 40px #76d13a22;
+  --glow-builder: 0 0 20px #ff6a8a44, 0 0 40px #ff6a8a22;
+  
+  /* Typography */
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+  overflow: hidden;
+}
+
+/* Animated background gradient */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.4;
+  background:
+    radial-gradient(1200px 600px at 10% -20%, #14304a55, transparent 60%),
+    radial-gradient(1000px 500px at 110% 120%, #3a1f4d44, transparent 60%),
+    radial-gradient(800px 400px at 50% 50%, #144a3a22, transparent 50%);
+  animation: bg-shift 20s ease-in-out infinite;
+}
+
+@keyframes bg-shift {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.05); }
+}
+
+/* Layout */
+body {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  grid-template-rows: 52px auto 1fr;
+  grid-template-areas:
+    "brand top"
+    "warn warn"
+    "crew main";
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+}
+
+/* Brand */
+#brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+  position: relative;
+  z-index: 2;
+}
+
+#brand b {
+  font: 700 14px var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: var(--gradient-1);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: text-shimmer 8s linear infinite;
+}
+
+@keyframes text-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+#brand span {
+  font: 11px var(--mono);
+  color: var(--ink-3);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 0 var(--ok);
+  animation: pulse 2.6s infinite;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 #4ade8099; }
+  70% { box-shadow: 0 0 0 10px #4ade8000; }
+  100% { box-shadow: 0 0 0 0 #4ade8000; }
+}
+
+/* Top bar */
+#top {
+  grid-area: top;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+  position: relative;
+  z-index: 2;
+}
+
+.tab {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: var(--ink-3);
+  cursor: pointer;
+  font: 600 11px var(--mono);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  border-radius: 6px;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.tab[data-p="overview"] { color: #b48cff; }
+.tab[data-p="planner"] { color: var(--planner); }
+.tab[data-p="researcher"] { color: var(--researcher); }
+.tab[data-p="builder"] { color: var(--builder); }
+.tab[data-p="state"] { color: var(--ink-2); }
+
+.tab::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: currentColor;
+  transform: translateX(-50%);
+  transition: width 0.2s;
+}
+
+.tab:hover {
+  color: var(--ink-2);
+  background: #ffffff08;
+}
+
+.tab:hover::after {
+  width: 60%;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  background: #ffffff0f;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+
+.tab[aria-selected="true"]::after {
+  width: 80%;
+}
+
+/* Animated rainbow for active tab */
+.tab.active-rainbow {
+  background-image: var(--gradient-2);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rainbow 6s linear infinite;
+}
+
+@keyframes rainbow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 300% 50%; }
+}
+
+#stats {
+  font: 11px var(--mono);
+  color: var(--ink-3);
+  display: flex;
+  gap: 18px;
+  margin-left: auto;
+}
+
+#stats b {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+/* Crew sidebar */
+#crew {
+  grid-area: crew;
+  border-right: 1px solid var(--line);
+  background: var(--bg-2);
+  overflow-y: auto;
+  position: relative;
+  z-index: 2;
+}
+
+.hd {
+  font: 600 10px var(--mono);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 14px 18px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.agent-card {
+  margin: 0 12px 10px;
+  padding: 12px 13px;
+  border-radius: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--agent-color, var(--ink-3));
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.agent-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--agent-color, transparent), transparent);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.agent-card:hover::before {
+  opacity: 1;
+}
+
+.agent-card:hover {
+  border-color: var(--line-2);
+  border-left-color: var(--agent-color, var(--ink-3));
+  transform: translateX(3px);
+  box-shadow: 0 4px 12px #00000044;
+}
+
+.agent-card.active {
+  background: #ffffff0d;
+  box-shadow: 0 0 0 1px var(--agent-color, var(--line-2)) inset, 0 4px 16px #00000066;
+}
+
+.agent-card .name {
+  font: 600 14px var(--sans);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--agent-color, var(--ink));
+}
+
+.agent-card .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--agent-color, var(--ink-3));
+  flex: none;
+  box-shadow: 0 0 8px var(--agent-color, transparent);
+}
+
+.agent-card .status {
+  font: 11px var(--mono);
+  color: var(--ink-3);
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-card .status-badge {
+  font: 9px var(--mono);
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #ffffff0d;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+}
+
+.agent-card .progress {
+  margin-top: 8px;
+  height: 3px;
+  background: #ffffff10;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.agent-card .progress-bar {
+  height: 100%;
+  background: var(--agent-color, var(--ink-3));
+  width: 0%;
+  transition: width 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Main content */
+#main {
+  grid-area: main;
+  overflow: hidden;
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel {
+  display: none;
+  flex: 1;
+  overflow: auto;
+  padding: 20px;
+}
+
+.panel.on {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Panel headers */
+.panel h2 {
+  font: 600 11px var(--mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel h2::before {
+  content: "";
+  width: 3px;
+  height: 14px;
+  background: var(--gradient-1);
+  border-radius: 2px;
+}
+
+/* Action bar */
+.bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+input, textarea, select {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 10px 13px;
+  border-radius: 8px;
+  font: 13px var(--sans);
+  outline: none;
+  transition: all 0.2s;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--planner);
+  box-shadow: 0 0 0 3px #4ea3ff1a;
+}
+
+input::placeholder {
+  color: var(--ink-3);
+}
+
+.grow {
+  flex: 1;
+  min-width: 200px;
+}
+
+button.go {
+  background: var(--planner);
+  color: #04121f;
+  border: 0;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font: 600 12px var(--sans);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px #4ea3ff33;
+}
+
+button.go:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px #4ea3ff44;
+}
+
+button.go:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+}
+
+button.go.planner { background: var(--planner); box-shadow: 0 2px 8px #4ea3ff33; }
+button.go.researcher { background: var(--researcher); box-shadow: 0 2px 8px #76d13a33; }
+button.go.builder { background: var(--builder); box-shadow: 0 2px 8px #ff6a8a33; }
+
+button.ghost {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  box-shadow: none;
+}
+
+button.ghost:hover {
+  border-color: var(--line-2);
+  color: var(--ink);
+  transform: none;
+}
+
+/* State display */
+.state-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.state-card {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.state-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--gradient-1);
+}
+
+.state-card h3 {
+  font: 600 11px var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 8px;
+}
+
+.state-card .value {
+  font: 13px var(--sans);
+  color: var(--ink-2);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Messages/Log */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 300px;
+}
+
+.msg {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font: 12.5px var(--sans);
+  line-height: 1.5;
+  max-width: 85%;
+  animation: msg-in 0.3s ease-out;
+}
+
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.msg.planner {
+  background: #14304a;
+  border-left: 3px solid var(--planner);
+  align-self: flex-start;
+}
+
+.msg.researcher {
+  background: #1a3a14;
+  border-left: 3px solid var(--researcher);
+  align-self: flex-start;
+}
+
+.msg.builder {
+  background: #3a1420;
+  border-left: 3px solid var(--builder);
+  align-self: flex-end;
+}
+
+.msg.system {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+  font: 11px var(--mono);
+  align-self: center;
+  max-width: 100%;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #ffffff12;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Warning banner */
+#warn {
+  grid-area: warn;
+  display: none;
+  background: #3a1618;
+  border-bottom: 1px solid #f8717155;
+  padding: 10px 16px;
+  font: 12px var(--mono);
+  color: #ffb4b4;
+}
+
+/* Loading spinner */
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid #ffffff10;
+  border-top-color: var(--planner);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+</style>
+</head>
+<body>
+
+<div id="brand">
+  <span class="pulse"></span>
+  <b>Ambiguity</b>
+  <span>3-Agent Console</span>
+</div>
+
+<div id="top">
+  <button class="tab active-rainbow" data-p="overview" aria-selected="true">Overview</button>
+  <button class="tab" data-p="planner">Planner</button>
+  <button class="tab" data-p="researcher">Researcher</button>
+  <button class="tab" data-p="builder">Builder</button>
+  <button class="tab" data-p="state">State</button>
+  <div id="stats">
+    <span>steps <b id="stat-steps">0</b></span>
+    <span>files <b id="stat-files">0</b></span>
+    <span>status <b id="stat-status">idle</b></span>
+  </div>
+</div>
+
+<div id="warn">
+  ⚠️ Backend not connected — start the 3-Agent server
+</div>
+
+<aside id="crew">
+  <div class="hd">Agents</div>
+  <div class="agent-card" style="--agent-color: var(--planner)" data-agent="planner">
+    <div class="name"><span class="dot"></span>Planner</div>
+    <div class="status">
+      <span class="status-badge">STANDBY</span>
+      <span>Reasoning & routing</span>
+    </div>
+    <div class="progress"><div class="progress-bar"></div></div>
+  </div>
+  <div class="agent-card" style="--agent-color: var(--researcher)" data-agent="researcher">
+    <div class="name"><span class="dot"></span>Researcher</div>
+    <div class="status">
+      <span class="status-badge">STANDBY</span>
+      <span>GraphRAG queries</span>
+    </div>
+    <div class="progress"><div class="progress-bar"></div></div>
+  </div>
+  <div class="agent-card" style="--agent-color: var(--builder)" data-agent="builder">
+    <div class="name"><span class="dot"></span>Builder</div>
+    <div class="status">
+      <span class="status-badge">STANDBY</span>
+      <span>Implementation</span>
+    </div>
+    <div class="progress"><div class="progress-bar"></div></div>
+  </div>
+  <div style="padding: 12px 18px; font: 11px var(--mono); color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 10px;">
+    <div>LLM: <span id="llm-info" style="color: var(--ink-2)">qwen3.5:397b-cloud</span></div>
+    <div style="margin-top: 6px;">GraphRAG: <span id="graphrag-info" style="color: var(--ok)">● indexed</span></div>
+  </div>
+</aside>
+
+<main id="main">
+  <!-- Overview Panel -->
+  <section class="panel on" data-p="overview">
+    <h2>System Overview</h2>
+    <div class="bar">
+      <input id="goal-input" class="grow" placeholder="Enter your goal (e.g., 'Create a hello.txt file with Hello World')">
+      <button class="go planner" id="run-btn">Run</button>
+      <button class="go ghost" id="clear-btn">Clear</button>
+    </div>
+    <div class="messages" id="overview-messages">
+      <div class="msg system">
+        3-Agent System ready. Enter a goal above to begin.
+      </div>
+    </div>
+  </section>
+
+  <!-- Planner Panel -->
+  <section class="panel" data-p="planner">
+    <h2>Planner Agent</h2>
+    <div class="state-card" style="margin-bottom: 16px;">
+      <h3>Current Plan</h3>
+      <div class="value" id="planner-plan">(no plan yet)</div>
+    </div>
+    <div class="state-card">
+      <h3>Next Agent</h3>
+      <div class="value" id="planner-next">—</div>
+    </div>
+  </section>
+
+  <!-- Researcher Panel -->
+  <section class="panel" data-p="researcher">
+    <h2>Researcher Agent</h2>
+    <div class="bar">
+      <input id="research-query" class="grow" placeholder="Query knowledge base...">
+      <button class="go researcher" id="research-btn">Search</button>
+    </div>
+    <div class="state-card">
+      <h3>Research Findings</h3>
+      <div class="value" id="researcher-findings">(no research yet)</div>
+    </div>
+  </section>
+
+  <!-- Builder Panel -->
+  <section class="panel" data-p="builder">
+    <h2>Builder Agent</h2>
+    <div class="state-card" style="margin-bottom: 16px;">
+      <h3>Implementation Report</h3>
+      <div class="value" id="builder-report">(no implementation yet)</div>
+    </div>
+    <div class="state-card">
+      <h3>Files Changed</h3>
+      <div class="value" id="builder-files">—</div>
+    </div>
+  </section>
+
+  <!-- State Panel -->
+  <section class="panel" data-p="state">
+    <h2>System State</h2>
+    <div class="state-grid">
+      <div class="state-card">
+        <h3>Goal</h3>
+        <div class="value" id="state-goal">(empty)</div>
+      </div>
+      <div class="state-card">
+        <h3>Plan</h3>
+        <div class="value" id="state-plan">(empty)</div>
+      </div>
+      <div class="state-card">
+        <h3>Research</h3>
+        <div class="value" id="state-research">(empty)</div>
+      </div>
+      <div class="state-card">
+        <h3>Builder Report</h3>
+        <div class="value" id="state-builder">(empty)</div>
+      </div>
+      <div class="state-card">
+        <h3>Blockers</h3>
+        <div class="value" id="state-blockers">(empty)</div>
+      </div>
+      <div class="state-card">
+        <h3>Step Count</h3>
+        <div class="value" id="state-steps">0</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const API_BASE = window.location.origin;
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+// State
+let currentState = {
+  goal: "",
+  plan: "",
+  research: "",
+  builder_report: "",
+  next_agent: "Planner",
+  research_status: "",
+  blockers: "",
+  files_changed: [],
+  step_count: 0,
+  messages: []
+};
+
+let isRunning = false;
+
+// Tab switching
+$$(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    $$(".tab").forEach(t => t.setAttribute("aria-selected", "false"));
+    tab.setAttribute("aria-selected", "true");
+    $$(".panel").forEach(p => p.classList.remove("on"));
+    $(`.panel[data-p="${tab.dataset.p}"]`).classList.add("on");
+  });
+});
+
+// Add message to overview
+function addMessage(text, type = "system") {
+  const msg = document.createElement("div");
+  msg.className = `msg ${type}`;
+  msg.textContent = text;
+  const container = $("#overview-messages");
+  container.appendChild(msg);
+  container.scrollTop = container.scrollHeight;
+}
+
+// Update agent cards
+function updateAgentCard(agent, status, progress = 0) {
+  const card = $(`[data-agent="${agent}"]`);
+  if (!card) return;
+  
+  const badge = card.querySelector(".status-badge");
+  const bar = card.querySelector(".progress-bar");
+  
+  badge.textContent = status;
+  bar.style.width = `${progress}%`;
+  
+  if (status === "ACTIVE") {
+    card.classList.add("active");
+  } else {
+    card.classList.remove("active");
+  }
+}
+
+// Update stats
+function updateStats() {
+  $("#stat-steps").textContent = currentState.step_count;
+  $("#stat-files").textContent = currentState.files_changed.length;
+  $("#stat-status").textContent = isRunning ? "running" : "idle";
+}
+
+// Update all displays
+function updateDisplays() {
+  // Planner
+  $("#planner-plan").textContent = currentState.plan || "(no plan yet)";
+  $("#planner-next").textContent = currentState.next_agent || "—";
+  
+  // Researcher
+  $("#researcher-findings").textContent = currentState.research || "(no research yet)";
+  
+  // Builder
+  $("#builder-report").textContent = currentState.builder_report || "(no implementation yet)";
+  $("#builder-files").textContent = currentState.files_changed.length ? 
+    currentState.files_changed.join(", ") : "—";
+  
+  // State
+  $("#state-goal").textContent = currentState.goal || "(empty)";
+  $("#state-plan").textContent = currentState.plan || "(empty)";
+  $("#state-research").textContent = currentState.research || "(empty)";
+  $("#state-builder").textContent = currentState.builder_report || "(empty)";
+  $("#state-blockers").textContent = currentState.blockers || "(empty)";
+  $("#state-steps").textContent = currentState.step_count;
+  
+  updateStats();
+}
+
+// Run the 3-Agent system
+async function runGoal() {
+  const goal = $("#goal-input").value.trim();
+  if (!goal) return;
+  
+  if (isRunning) return;
+  isRunning = true;
+  
+  $("#run-btn").disabled = true;
+  $("#run-btn").textContent = "Running...";
+  addMessage(`Starting: ${goal}`, "system");
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal })
+    });
+    
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    
+    const result = await response.json();
+    currentState = { ...currentState, ...result };
+    
+    // Add messages
+    if (result.messages) {
+      result.messages.forEach(msg => addMessage(msg, "system"));
+    }
+    
+    updateDisplays();
+    addMessage("✓ Task completed", "system");
+    
+  } catch (err) {
+    addMessage(`✕ Error: ${err.message}`, "system");
+  } finally {
+    isRunning = false;
+    $("#run-btn").disabled = false;
+    $("#run-btn").textContent = "Run";
+    updateStats();
+  }
+}
+
+// Clear state
+function clearState() {
+  currentState = {
+    goal: "",
+    plan: "",
+    research: "",
+    builder_report: "",
+    next_agent: "Planner",
+    research_status: "",
+    blockers: "",
+    files_changed: [],
+    step_count: 0,
+    messages: []
+  };
+  $("#goal-input").value = "";
+  $("#overview-messages").innerHTML = '<div class="msg system">Cleared. Enter a new goal.</div>';
+  updateDisplays();
+}
+
+// Research query
+async function doResearch() {
+  const query = $("#research-query").value.trim();
+  if (!query) return;
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, top_k: 5 })
+    });
+    
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    
+    const result = await response.json();
+    $("#researcher-findings").textContent = JSON.stringify(result, null, 2);
+    
+  } catch (err) {
+    alert(`Search failed: ${err.message}`);
+  }
+}
+
+// Event listeners
+$("#run-btn").addEventListener("click", runGoal);
+$("#clear-btn").addEventListener("click", clearState);
+$("#research-btn").addEventListener("click", doResearch);
+$("#goal-input").addEventListener("keypress", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    runGoal();
+  }
+});
+
+// Poll for status
+async function pollStatus() {
+  try {
+    const response = await fetch(`${API_BASE}/api/status`);
+    if (response.ok) {
+      const status = await response.json();
+      $("#llm-info").textContent = status.llm || "unknown";
+      $("#graphrag-info").innerHTML = status.graphrag ? 
+        '<span style="color: var(--ok)">● indexed</span>' : 
+        '<span style="color: var(--warn)">● not indexed</span>';
+    }
+  } catch {}
+}
+
+// Initial poll
+pollStatus();
+setInterval(pollStatus, 10000);
+
+// Keyboard shortcuts
+document.addEventListener("keydown", e => {
+  if (e.key === "F5") {
+    e.preventDefault();
+    pollStatus();
+  }
+});
+</script>
+</body>
+</html>

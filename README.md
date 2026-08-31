@@ -4,6 +4,21 @@
 
 A fully local, zero-fee multi-agent system for software development experiments. Built with LangGraph + GraphRAG + MCP.
 
+## 🎨 Web Console (NEW!)
+
+Beautiful Part 2 revamped frontend with animated gradients, agent-specific colors, and real-time state visualization.
+
+```bash
+# Quick launch
+./launch_console.sh
+
+# Or manually
+python serve.py
+# Open: http://localhost:8080
+```
+
+See [`frontend/README.md`](frontend/README.md) for full documentation.
+
 ## Architecture
 
 ```
