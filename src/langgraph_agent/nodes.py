@@ -6,15 +6,53 @@ Implements the 3-Agent System specification with strict prompts and tool binding
 - Builder: filesystem, git, terminal tools only
 """
 
+import asyncio
 import re
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from langgraph_agent.config import get_llm
+from langgraph_agent.mcp_client import mcp_client
 from langgraph_agent.state import AgentState, ResearchStatus
 
-# System prompts from the 3-Agent System documentation
-PLANNER_PROMPT = """You are the Planner agent in a three-agent software system.
+
+def _call_mcp_tool_sync(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """Call an MCP tool from a synchronous LangGraph node.
+
+    The MCP client is async, so this helper bridges sync and async contexts.
+    """
+
+    async def _call() -> Any:
+        async with mcp_client() as client:
+            return await client.call_tool(tool_name, arguments)
+
+    try:
+        return asyncio.run(_call())
+    except RuntimeError:
+        # Already running inside an event loop (e.g., some test runners).
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(_call())
+
+
+def _load_prompt(name: str, fallback: str) -> str:
+    """Load a system prompt from the prompts/ directory.
+
+    Falls back to the inline string so the module works even if the prompt
+    files are not present (e.g., during distribution).
+    """
+    from pathlib import Path
+
+    try:
+        prompt_path = Path(__file__).parent.parent.parent / "prompts" / f"{name}.txt"
+        return prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        return fallback
+
+
+# System prompts from the 3-Agent System documentation.
+# Loaded from prompts/ when available, with inline fallbacks.
+_PLANNER_PROMPT_INLINE = """You are the Planner agent in a three-agent software system.
 The other agents are Researcher and Builder. You are not them.
 
 Your only job:
@@ -57,7 +95,7 @@ Builder
 [assumptions, risks, why this next agent, what to skip]
 """
 
-RESEARCHER_PROMPT = """You are the Researcher agent in a three-agent software system.
+_RESEARCHER_PROMPT_INLINE = """You are the Researcher agent in a three-agent software system.
 The other agents are Planner and Builder. You are not them.
 
 Your only job:
@@ -97,7 +135,7 @@ OR
 no_relevant_knowledge
 """
 
-BUILDER_PROMPT = """You are the Builder agent in a three-agent software system.
+_BUILDER_PROMPT_INLINE = """You are the Builder agent in a three-agent software system.
 The other agents are Planner and Researcher. You are not them.
 
 Your only job:
@@ -130,6 +168,10 @@ Output exactly this format after you finish using tools:
 [none | what is blocked and what information is needed]
 """
 
+PLANNER_PROMPT = _load_prompt("planner", _PLANNER_PROMPT_INLINE)
+RESEARCHER_PROMPT = _load_prompt("researcher", _RESEARCHER_PROMPT_INLINE)
+BUILDER_PROMPT = _load_prompt("builder", _BUILDER_PROMPT_INLINE)
+
 
 def _get_state_injection(state: AgentState) -> str:
     """Create the state injection block sent every turn.
@@ -137,18 +179,27 @@ def _get_state_injection(state: AgentState) -> str:
     As specified in the documentation:
     Empty fields should explicitly say `(empty)`.
     """
+
+    def _fmt(key: str, default: str = "(empty)") -> str:
+        value = state.get(key)
+        if value is None or value == "" or value == []:
+            return default
+        if isinstance(value, list):
+            return ", ".join(str(v) for v in value)
+        return str(value)
+
     return f"""## Current state
-Goal: {state.get("goal", "(empty)")}
-Plan: {state.get("plan", "(empty)")}
-Research: {state.get("research", "(empty)")}
-Builder report: {state.get("builder_report", "(empty)")}
-Blockers: {state.get("blockers", "(empty)")}
-Files changed: {state.get("files_changed", [])}
+Goal: {_fmt("goal")}
+Plan: {_fmt("plan")}
+Research: {_fmt("research")}
+Builder report: {_fmt("builder_report")}
+Blockers: {_fmt("blockers")}
+Files changed: {_fmt("files_changed")}
 Step: {state.get("step_count", 0)}
 """
 
 
-def _parse_planner_output(content: str) -> dict:
+def _parse_planner_output(content: str) -> dict[str, Any]:
     """Parse Planner output into structured format.
 
     Expected format:
@@ -191,7 +242,7 @@ def _parse_planner_output(content: str) -> dict:
     return result
 
 
-def _parse_researcher_output(content: str) -> dict:
+def _parse_researcher_output(content: str) -> dict[str, Any]:
     """Parse Researcher output into structured format.
 
     Expected format:
@@ -244,7 +295,7 @@ def _parse_researcher_output(content: str) -> dict:
     return result
 
 
-def _parse_builder_output(content: str) -> dict:
+def _parse_builder_output(content: str) -> dict[str, Any]:
     """Parse Builder output into structured format.
 
     Expected format:
@@ -322,35 +373,44 @@ def researcher_node(state: AgentState) -> AgentState:
     - Output strict format with status
     - Status guides next steps (ready_for_builder | need_replan | no_relevant_knowledge)
 
-    Uses local GraphRAG directly. Falls back to LLM if KB is empty.
+    Calls the GraphRAG MCP tool (`search_knowledge_graph`) rather than importing
+    the knowledge base directly, preserving the documented tool boundary.
+    Falls back to the LLM if the knowledge base is empty or the MCP tool fails.
     """
     # Build messages with state injection
     state_injection = _get_state_injection(state)
     plan = state.get("plan", "")
 
-    # Try to use GraphRAG directly
-    graphrag_results = None
+    # Call GraphRAG through the MCP tool boundary
+    graphrag_results: dict[str, Any] | None = None
 
     try:
-        from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
-        kb = GraphRAGKnowledgeBase()
-        results = kb.search(plan, top_k=5)
-        
+        search_response: dict[str, Any] = _call_mcp_tool_sync(
+            "search_knowledge_graph", {"query": plan, "top_k": 5}
+        )
+        results = search_response.get("results", [])
+
         # Check if we got real results
         if results and len(results) > 0 and results[0].get("score", 0) > 0.3:
             graphrag_results = {"results": results, "source": "local_graphrag"}
-            
-            # Try to get graph info too
+
+            # Try to get graph info too via the MCP query tool
             try:
                 first_doc = results[0].get("id", "")
                 if first_doc:
-                    entity = first_doc.split("/")[-1].split(".")[0] if "/" in first_doc else plan.split()[0] if plan else "code"
-                    graph_results = kb.query_graph(entity, hops=2)
-                    graphrag_results["graph"] = graph_results
+                    entity = (
+                        first_doc.split("/")[-1].split(".")[0]
+                        if "/" in first_doc
+                        else plan.split()[0] if plan else "code"
+                    )
+                    graph_response = _call_mcp_tool_sync(
+                        "query_knowledge_graph", {"entity": entity, "hops": 2}
+                    )
+                    graphrag_results["graph"] = graph_response
             except Exception:
                 pass  # Graph query is optional
     except Exception as e:
-        # GraphRAG not available, will use LLM fallback
+        # GraphRAG MCP tool unavailable or failed; will use LLM fallback
         graphrag_results = {"error": str(e)}
 
     # Check if we got real results from GraphRAG
@@ -362,8 +422,9 @@ def researcher_node(state: AgentState) -> AgentState:
     )
 
     if has_real_results:
+        assert graphrag_results is not None
         # Format GraphRAG results into Researcher output format
-        results = graphrag_results["results"]
+        results = graphrag_results.get("results", [])
         research_findings = "## Key Findings\n"
 
         for i, result in enumerate(results[:3], 1):
@@ -377,11 +438,11 @@ def researcher_node(state: AgentState) -> AgentState:
         research_findings += "\n## Relevant Context\n"
         research_findings += f"Found {len(results)} relevant documents in knowledge base.\n"
 
-        if graphrag_results.get("graph") and graphrag_results["graph"].get("subgraph_nodes", 0) > 0:
-            g = graphrag_results["graph"]
+        graph_response = graphrag_results.get("graph", {})
+        if graph_response and graph_response.get("subgraph_nodes", 0) > 0:
             research_findings += (
-                f"\nKnowledge graph has {g['subgraph_nodes']} nodes "
-                f"and {g['subgraph_edges']} relationships.\n"
+                f"\nKnowledge graph has {graph_response['subgraph_nodes']} nodes "
+                f"and {graph_response['subgraph_edges']} relationships.\n"
             )
 
         research_findings += "\n## Recommendations for Builder\n"
@@ -434,7 +495,6 @@ def builder_node(state: AgentState) -> AgentState:
 
     Uses direct file operations. Falls back to LLM if tools fail.
     """
-    from pathlib import Path
     import re
 
     # Build messages with state injection
@@ -447,6 +507,7 @@ def builder_node(state: AgentState) -> AgentState:
     files_changed = []
     builder_report_parts = []
     execution_error = None
+    blockers = ""
 
     try:
         # Pattern: "Create <filename>" or "Builder creates <filename>" etc.
@@ -496,19 +557,26 @@ def builder_node(state: AgentState) -> AgentState:
             for filename in create_matches:
                 # Clean up filename
                 filename = filename.strip().strip('`"\'')
-                
+
                 # Get content (use first match or default)
                 content = content_matches[0] if content_matches else f"Content for {filename}"
-                
-                # Create parent directories if needed
-                file_path = Path(filename)
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Write the file
+
+                # Write the file through the MCP filesystem tool, preserving
+                # the documented tool boundary (Builder only uses filesystem/git
+                # tools, never direct file operations or GraphRAG).
                 try:
-                    file_path.write_text(content, encoding="utf-8")
-                    files_changed.append(filename)
-                    builder_report_parts.append(f"Created {filename} with content: {content[:50]}...")
+                    result = _call_mcp_tool_sync(
+                        "filesystem_write", {"path": filename, "content": content}
+                    )
+                    if result.get("success"):
+                        files_changed.append(filename)
+                        builder_report_parts.append(
+                            f"Created {filename} with content: {content[:50]}..."
+                        )
+                    else:
+                        error = result.get("error", "Unknown filesystem_write error")
+                        builder_report_parts.append(f"Failed to create {filename}: {error}")
+                        execution_error = error
                 except Exception as e:
                     builder_report_parts.append(f"Failed to create {filename}: {e}")
                     execution_error = str(e)
@@ -532,14 +600,26 @@ def builder_node(state: AgentState) -> AgentState:
         llm = get_llm()
         response = llm.invoke(messages)
         parsed = _parse_builder_output(response.content)
-        
+
         if not files_changed:
             builder_report = parsed.get("changes_made", response.content)
             files_changed = parsed.get("files_modified", [])
 
+        # Capture any blockers reported by the LLM, but treat "none" as no
+        # blockers so the graph can finish cleanly.
+        parsed_blockers = parsed.get("next_steps_blockers", "")
+        if parsed_blockers and parsed_blockers.strip().lower() not in {"none", "n/a", ""}:
+            blockers = parsed_blockers
+
+    # If direct execution failed and no actionable blocker was parsed, set one
+    # so the graph can loop back to Planner or Researcher per the specification.
+    if execution_error and not blockers:
+        blockers = f"Execution failed: {execution_error}. Need replan or additional information."
+
     # Update state
     state["builder_report"] = builder_report
     state["files_changed"] = files_changed
+    state["blockers"] = blockers
     state["messages"].append(f"[Builder] Implementation complete. Files: {len(files_changed)}")
     state["step_count"] = state.get("step_count", 0) + 1
 

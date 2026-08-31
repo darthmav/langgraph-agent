@@ -20,7 +20,7 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from langgraph_agent import create_agent_graph, AgentState
-from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+from langgraph_agent.graphrag_server import get_knowledge_base
 
 # Initialize graph and knowledge base
 graph = create_agent_graph()
@@ -40,14 +40,14 @@ class Handler(SimpleHTTPRequestHandler):
             
             try:
                 if kb is None:
-                    kb = GraphRAGKnowledgeBase()
+                    kb = get_knowledge_base()
                 kb_indexed = kb.collection.count() > 0 if kb.collection else False
                 embedding_model = getattr(kb, 'embedder_model_name', 'all-MiniLM-L6-v2')
             except Exception:
                 kb_indexed = False
             
             self.send_json({
-                "llm": os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud"),
+                "llm": os.getenv("OLLAMA_MODEL", "qwen3:8b"),
                 "embedding": embedding_model,
                 "graphrag": kb_indexed,
             })
@@ -77,7 +77,7 @@ class Handler(SimpleHTTPRequestHandler):
             # Use local GraphRAG directly instead of MCP client
             global kb
             if kb is None:
-                kb = GraphRAGKnowledgeBase()
+                kb = get_knowledge_base()
             
             query = data.get("query", "")
             top_k = data.get("top_k", 5)

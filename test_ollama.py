@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Minimal cloud LLM test - uses cloud credits efficiently."""
+"""Minimal local Ollama LLM test using the documented default model."""
 
 import os
 from langgraph_agent import create_agent_graph, AgentState
 
-# Use cloud LLM
+# Use the local model recommended by the 3-Agent System guide.
 os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
-os.environ["OLLAMA_MODEL"] = "qwen3.5:397b-cloud"
+os.environ["OLLAMA_MODEL"] = "qwen3:8b"
 
 graph = create_agent_graph()
 
 # Simple file creation task
 state: AgentState = {
-    "goal": "Create cloud_test.txt with content 'Cloud LLM works!'",
+    "goal": "Create ollama_test.txt with content 'Local Ollama LLM works!'",
     "messages": [],
     "plan": "",
     "research": "",
@@ -24,7 +24,7 @@ state: AgentState = {
     "step_count": 0,
 }
 
-print("Running 3-Agent with cloud LLM (qwen3.5:397b-cloud)...")
+print("Running 3-Agent with local Ollama LLM (qwen3:8b)...")
 result = graph.invoke(state, {"recursion_limit": 5})
 
 print("\n=== RESULTS ===")
@@ -35,7 +35,7 @@ print(f"Messages: {result.get('messages', [])}")
 
 # Verify file was created
 from pathlib import Path
-if Path("cloud_test.txt").exists():
-    print(f"\n✓ File created! Content: {Path('cloud_test.txt').read_text()!r}")
+if Path("ollama_test.txt").exists():
+    print(f"\n✓ File created! Content: {Path('ollama_test.txt').read_text()!r}")
 else:
     print("\n✗ File not created")

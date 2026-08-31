@@ -583,6 +583,140 @@ button.ghost:hover {
   color: #ffb4b4;
 }
 
+/* Architecture Diagram */
+.architecture-diagram {
+  background: #0d1117;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.flow-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.flow-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 18px;
+  background: #161b22;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  min-width: 120px;
+  transition: all 0.3s;
+}
+
+.flow-node.planner-node { border-color: var(--planner); }
+.flow-node.researcher-node { border-color: var(--researcher); }
+.flow-node.builder-node { border-color: var(--builder); }
+
+.flow-node.active {
+  background: #1c2128;
+  box-shadow: 0 0 20px rgba(0, 100, 255, 0.2);
+  transform: scale(1.05);
+}
+
+.flow-node .node-icon {
+  font-size: 28px;
+  margin-bottom: 6px;
+}
+
+.flow-node .node-name {
+  font: 600 14px var(--sans);
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.flow-node .node-desc {
+  font: 10px var(--mono);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.flow-arrow {
+  font-size: 24px;
+  color: var(--ink-3);
+  opacity: 0.5;
+}
+
+.feedback-loop {
+  text-align: center;
+  font: 10px var(--mono);
+  color: var(--ink-3);
+  margin: 12px 0;
+  padding: 6px;
+  background: #ffffff05;
+  border-radius: 6px;
+}
+
+.knowledge-layer {
+  background: #1a1f26;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-top: 16px;
+}
+
+.layer-title {
+  font: 600 11px var(--mono);
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.layer-components {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  font: 11px var(--sans);
+  color: var(--ink-3);
+  flex-wrap: wrap;
+}
+
+.layer-components .component {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.layer-components .separator {
+  color: var(--line);
+  opacity: 0.5;
+}
+
+.layer-status {
+  text-align: center;
+  font: 10px var(--mono);
+  color: var(--ink-3);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.llm-info-bar {
+  text-align: center;
+  font: 10px var(--mono);
+  color: var(--ink-3);
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.llm-info-bar #diag-llm {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
 /* Loading spinner */
 .spinner {
   width: 20px;
@@ -650,7 +784,7 @@ button.ghost:hover {
     <div class="progress"><div class="progress-bar"></div></div>
   </div>
   <div style="padding: 12px 18px; font: 11px var(--mono); color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 10px;">
-    <div>LLM: <span id="llm-info" style="color: var(--ink-2)">qwen3.5:397b-cloud</span></div>
+    <div>System LLM: <span id="llm-info" style="color: var(--ink-2)">qwen3:8b</span></div>
     <div style="margin-top: 6px;">Embedding: <span id="embedding-info" style="color: var(--ink-2)">all-MiniLM-L6-v2</span></div>
     <div style="margin-top: 6px;">GraphRAG: <span id="graphrag-info" style="color: var(--ok)">● indexed</span></div>
   </div>
@@ -660,6 +794,45 @@ button.ghost:hover {
   <!-- Overview Panel -->
   <section class="panel on" data-p="overview">
     <h2>System Overview</h2>
+    
+    <!-- Architecture Diagram -->
+    <div class="architecture-diagram">
+      <div class="flow-row">
+        <div class="flow-node planner-node">
+          <span class="node-icon">🧠</span>
+          <span class="node-name">Planner</span>
+          <span class="node-desc">Reasoning & routing</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node researcher-node">
+          <span class="node-icon">📚</span>
+          <span class="node-name">Researcher</span>
+          <span class="node-desc">GraphRAG queries</span>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node builder-node">
+          <span class="node-icon">🔨</span>
+          <span class="node-name">Builder</span>
+          <span class="node-desc">Implementation</span>
+        </div>
+      </div>
+      <div class="feedback-loop">↺ Feedback Loop (replan if blocked)</div>
+      <div class="knowledge-layer">
+        <div class="layer-title">GraphRAG Knowledge Layer</div>
+        <div class="layer-components">
+          <span class="component">🔗 Knowledge Graph</span>
+          <span class="separator">|</span>
+          <span class="component">📐 Embedding: <span id="diag-embedding">all-MiniLM-L6-v2</span></span>
+          <span class="separator">|</span>
+          <span class="component">💾 Vector Store</span>
+        </div>
+        <div class="layer-status">Status: <span id="diag-graphrag" style="color: var(--ok)">● indexed</span></div>
+      </div>
+      <div class="llm-info-bar">
+        System LLM: <span id="diag-llm">qwen3:8b</span>
+      </div>
+    </div>
+    
     <div class="bar">
       <input id="goal-input" class="grow" placeholder="Enter your goal (e.g., 'Create a hello.txt file with Hello World')">
       <button class="go planner" id="run-btn">Run</button>
@@ -797,8 +970,13 @@ function updateAgentCard(agent, status, progress = 0) {
   
   if (status === "ACTIVE") {
     card.classList.add("active");
+    // Also highlight the architecture diagram node
+    const diagramNode = $(`.flow-node.${agent}-node`);
+    if (diagramNode) diagramNode.classList.add("active");
   } else {
     card.classList.remove("active");
+    const diagramNode = $(`.flow-node.${agent}-node`);
+    if (diagramNode) diagramNode.classList.remove("active");
   }
 }
 
@@ -838,56 +1016,34 @@ function updateDisplays() {
 async function runGoal() {
   const goal = $("#goal-input").value.trim();
   if (!goal) return;
-
+  
   if (isRunning) return;
   isRunning = true;
-
+  
   $("#run-btn").disabled = true;
   $("#run-btn").textContent = "Running...";
   addMessage(`Starting: ${goal}`, "system");
-
-  // Show Planner active
-  updateAgentCard("planner", "ACTIVE", 30);
-
+  
   try {
     const response = await fetch(`${API_BASE}/api/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ goal })
     });
-
+    
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
+    
     const result = await response.json();
     currentState = { ...currentState, ...result };
-
-    // Parse messages to show which agents ran
+    
+    // Add messages
     if (result.messages) {
-      result.messages.forEach(msg => {
-        // Detect agent from message
-        let agentType = "system";
-        if (msg.includes("[Planner]")) agentType = "planner";
-        else if (msg.includes("[Researcher]")) agentType = "researcher";
-        else if (msg.includes("[Builder]")) agentType = "builder";
-        
-        addMessage(msg, agentType);
-        
-        // Update agent cards based on activity
-        if (agentType === "planner") {
-          updateAgentCard("planner", "COMPLETED", 100);
-          updateAgentCard("researcher", "ACTIVE", 50);
-        } else if (agentType === "researcher") {
-          updateAgentCard("researcher", "COMPLETED", 100);
-          updateAgentCard("builder", "ACTIVE", 50);
-        } else if (agentType === "builder") {
-          updateAgentCard("builder", "COMPLETED", 100);
-        }
-      });
+      result.messages.forEach(msg => addMessage(msg, "system"));
     }
-
+    
     updateDisplays();
     addMessage("✓ Task completed", "system");
-
+    
   } catch (err) {
     addMessage(`✕ Error: ${err.message}`, "system");
   } finally {
@@ -895,13 +1051,6 @@ async function runGoal() {
     $("#run-btn").disabled = false;
     $("#run-btn").textContent = "Run";
     updateStats();
-    
-    // Reset agent cards
-    setTimeout(() => {
-      updateAgentCard("planner", "STANDBY", 0);
-      updateAgentCard("researcher", "STANDBY", 0);
-      updateAgentCard("builder", "STANDBY", 0);
-    }, 2000);
   }
 }
 
@@ -963,9 +1112,16 @@ async function pollStatus() {
     const response = await fetch(`${API_BASE}/api/status`);
     if (response.ok) {
       const status = await response.json();
+      // Update sidebar
       $("#llm-info").textContent = status.llm || "unknown";
       $("#embedding-info").textContent = status.embedding || "all-MiniLM-L6-v2";
       $("#graphrag-info").innerHTML = status.graphrag ?
+        '<span style="color: var(--ok)">● indexed</span>' :
+        '<span style="color: var(--warn)">● not indexed</span>';
+      // Update architecture diagram
+      $("#diag-llm").textContent = status.llm || "unknown";
+      $("#diag-embedding").textContent = status.embedding || "all-MiniLM-L6-v2";
+      $("#diag-graphrag").innerHTML = status.graphrag ?
         '<span style="color: var(--ok)">● indexed</span>' :
         '<span style="color: var(--warn)">● not indexed</span>';
     }

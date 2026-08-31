@@ -17,16 +17,11 @@ from typing import Any
 
 import chromadb
 import networkx as nx
-import numpy as np
 from mcp.server import MCPServer
-
-Server = MCPServer
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
 
 # Force CPU for sentence-transformers (GPU 1060 3GB not compatible)
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer  # noqa: E402
 
 
 class GraphRAGKnowledgeBase:
@@ -125,14 +120,23 @@ class GraphRAGKnowledgeBase:
             include=["documents", "metadatas", "distances"]
         )
 
+        ids = results.get("ids") or [[]]
+        documents = results.get("documents") or [[]]
+        metadatas = results.get("metadatas") or [[]]
+        distances = results.get("distances") or [[]]
+
+        # Guard against empty collections / no hits
+        if not ids or not ids[0]:
+            return []
+
         # Enrich with graph context
         enriched_results = []
-        for i, doc_id in enumerate(results["ids"][0]):
+        for i, doc_id in enumerate(ids[0]):
             result = {
                 "id": doc_id,
-                "content": results["documents"][0][i],
-                "metadata": results["metadatas"][0][i],
-                "score": 1 - results["distances"][0][i],  # Convert distance to similarity
+                "content": documents[0][i] if documents[0] else "",
+                "metadata": metadatas[0][i] if metadatas[0] else {},
+                "score": 1 - distances[0][i] if distances[0] else 0.0,
             }
 
             # Add graph neighbors
@@ -180,147 +184,48 @@ class GraphRAGKnowledgeBase:
         }
 
 
+# Cached knowledge base instance so repeated MCP calls and test runs do not
+# reload the embedding model and Chroma store every time.
+_kb_instance: GraphRAGKnowledgeBase | None = None
+
+
+def get_knowledge_base() -> GraphRAGKnowledgeBase:
+    """Return the singleton GraphRAG knowledge base instance."""
+    global _kb_instance
+    if _kb_instance is None:
+        _kb_instance = GraphRAGKnowledgeBase()
+    return _kb_instance
+
+
 # Create MCP server
 server = MCPServer("graphrag")
-kb = GraphRAGKnowledgeBase()
 
 
 # Register tools with the server
-@server.tool(name="search_knowledge_base")
+@server.tool(name="search_knowledge_graph")
 def search_tool(query: str, top_k: int = 5) -> str:
     """Search the knowledge base for relevant documents and passages."""
-    results = kb.search(query, top_k)
+    results = get_knowledge_base().search(query, top_k)
     return json.dumps(results, indent=2)
 
 
 @server.tool(name="query_knowledge_graph")
 def query_tool(entity: str, hops: int = 2) -> str:
     """Query the knowledge graph for entity relationships."""
-    result = kb.query_graph(entity, hops)
+    result = get_knowledge_base().query_graph(entity, hops)
     return json.dumps(result, indent=2)
 
 
 @server.tool(name="add_to_knowledge_base")
 def add_tool(doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> str:
     """Add a document to the knowledge base."""
-    kb.add_document(doc_id, content, metadata)
+    get_knowledge_base().add_document(doc_id, content, metadata)
     return f"Added document '{doc_id}' to knowledge base"
 
 
-def list_tools_impl() -> list[Tool]:
-    """List available GraphRAG tools."""
-    return [
-        Tool(
-            name="search_knowledge_base",
-            description="Search the knowledge base for relevant documents and passages. "
-                       "Use for questions about codebase, architecture, documentation.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Number of results (default 5)",
-                        "default": 5
-                    }
-                },
-                "required": ["query"]
-            }
-        ),
-        Tool(
-            name="query_knowledge_graph",
-            description="Query the knowledge graph for entity relationships. "
-                       "Use to find how concepts, files, or components are related.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "entity": {
-                        "type": "string",
-                        "description": "Entity to search for"
-                    },
-                    "hops": {
-                        "type": "integer",
-                        "description": "Number of hops to traverse (default 2)",
-                        "default": 2
-                    }
-                },
-                "required": ["entity"]
-            }
-        ),
-        Tool(
-            name="add_to_knowledge_base",
-            description="Add a document to the knowledge base. "
-                       "Use to index new files or documentation.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "doc_id": {
-                        "type": "string",
-                        "description": "Unique document ID (e.g., file path)"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Document content"
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "Optional metadata"
-                    }
-                },
-                "required": ["doc_id", "content"]
-            }
-        ),
-    ]
-
-
-async def call_tool_impl(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Call a GraphRAG tool."""
-    if name == "search_knowledge_base":
-        results = kb.search(
-            arguments["query"],
-            arguments.get("top_k", 5)
-        )
-        return [TextContent(
-            type="text",
-            text=json.dumps(results, indent=2)
-        )]
-
-    elif name == "query_knowledge_graph":
-        result = kb.query_graph(
-            arguments["entity"],
-            arguments.get("hops", 2)
-        )
-        return [TextContent(
-            type="text",
-            text=json.dumps(result, indent=2)
-        )]
-
-    elif name == "add_to_knowledge_base":
-        kb.add_document(
-            arguments["doc_id"],
-            arguments["content"],
-            arguments.get("metadata")
-        )
-        return [TextContent(
-            type="text",
-            text=f"Added document '{arguments['doc_id']}' to knowledge base"
-        )]
-
-    else:
-        raise ValueError(f"Unknown tool: {name}")
-
-
-async def main():
+async def main() -> None:
     """Run the GraphRAG MCP server."""
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    server.run(transport="stdio")
 
 
 if __name__ == "__main__":

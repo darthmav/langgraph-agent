@@ -11,13 +11,18 @@ Usage:
         tools = await client.list_tools()
 
         # Call GraphRAG search
-        result = await client.call_tool("search_knowledge_base", {"query": "Planner agent"})
+        result = await client.call_tool("search_knowledge_graph", {"query": "Planner agent"})
 """
 
-import asyncio
+from __future__ import annotations
+
 import os
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
 
 
 class MCPClient:
@@ -35,17 +40,17 @@ class MCPClient:
         self.server_urls = server_urls or self._default_servers()
         self._connected = False
         self._tools: dict[str, Any] = {}
-        self._kb = None
+        self._kb: GraphRAGKnowledgeBase | None = None
 
     def _default_servers(self) -> list[str]:
         """Get default MCP server URLs from environment."""
-        servers = []
-        if os.getenv("MCP_GRAPHRAG_URL"):
-            servers.append(os.getenv("MCP_GRAPHRAG_URL"))
-        if os.getenv("MCP_FILESYSTEM_URL"):
-            servers.append(os.getenv("MCP_FILESYSTEM_URL"))
-        if os.getenv("MCP_GIT_URL"):
-            servers.append(os.getenv("MCP_GIT_URL"))
+        servers: list[str] = []
+        if url := os.getenv("MCP_GRAPHRAG_URL"):
+            servers.append(url)
+        if url := os.getenv("MCP_FILESYSTEM_URL"):
+            servers.append(url)
+        if url := os.getenv("MCP_GIT_URL"):
+            servers.append(url)
         return servers
 
     async def connect(self) -> None:
@@ -70,7 +75,7 @@ class MCPClient:
         tools = {}
 
         # Always provide GraphRAG tools (local or stub)
-        tools["search_knowledge_base"] = self._graphrag_search
+        tools["search_knowledge_graph"] = self._graphrag_search
         tools["query_knowledge_graph"] = self._graphrag_query_graph
         tools["add_to_knowledge_base"] = self._graphrag_add
 
@@ -109,16 +114,16 @@ class MCPClient:
 
     # GraphRAG implementations (use local knowledge base when available)
 
-    async def _graphrag_search(self, args: dict) -> dict:
-        """Search the knowledge base (lazy init)."""
+    async def _graphrag_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Search the knowledge base (cached singleton)."""
         query = args.get("query", "")
         top_k = args.get("top_k", 5)
 
-        # Lazy init GraphRAG
+        # Use the cached knowledge base singleton to avoid reloading models.
         if self._kb is None:
             try:
-                from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
-                self._kb = GraphRAGKnowledgeBase()
+                from langgraph_agent.graphrag_server import get_knowledge_base
+                self._kb = get_knowledge_base()
             except Exception:
                 self._kb = None
 
@@ -131,10 +136,17 @@ class MCPClient:
                 "source": "stub",
             }
 
-    async def _graphrag_query_graph(self, args: dict) -> dict:
+    async def _graphrag_query_graph(self, args: dict[str, Any]) -> dict[str, Any]:
         """Query the knowledge graph."""
         entity = args.get("entity", "")
         hops = args.get("hops", 2)
+
+        if self._kb is None:
+            try:
+                from langgraph_agent.graphrag_server import get_knowledge_base
+                self._kb = get_knowledge_base()
+            except Exception:
+                self._kb = None
 
         if self._kb:
             result = self._kb.query_graph(entity, hops)
@@ -150,11 +162,18 @@ class MCPClient:
                 "note": "Run 'python scripts/index_knowledge.py' to build the knowledge base",
             }
 
-    async def _graphrag_add(self, args: dict) -> dict:
+    async def _graphrag_add(self, args: dict[str, Any]) -> dict[str, Any]:
         """Add a document to the knowledge base."""
         doc_id = args.get("doc_id", "")
         content = args.get("content", "")
         metadata = args.get("metadata", {})
+
+        if self._kb is None:
+            try:
+                from langgraph_agent.graphrag_server import get_knowledge_base
+                self._kb = get_knowledge_base()
+            except Exception:
+                self._kb = None
 
         if self._kb:
             self._kb.add_document(doc_id, content, metadata)
@@ -168,7 +187,7 @@ class MCPClient:
 
     # Real filesystem implementations
 
-    async def _filesystem_read(self, args: dict) -> dict:
+    async def _filesystem_read(self, args: dict[str, Any]) -> dict[str, Any]:
         """Read file contents."""
         from pathlib import Path
 
@@ -179,21 +198,23 @@ class MCPClient:
         except Exception as e:
             return {"success": False, "error": str(e), "path": path}
 
-    async def _filesystem_write(self, args: dict) -> dict:
-        """Write file contents."""
+    async def _filesystem_write(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Write file contents, creating parent directories if needed."""
         from pathlib import Path
 
         path = args.get("path", "")
         content = args.get("content", "")
         try:
-            Path(path).write_text(content, encoding="utf-8")
+            file_path = Path(path)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
             return {"success": True, "path": path, "bytes_written": len(content)}
         except Exception as e:
             return {"success": False, "error": str(e), "path": path}
 
     # Real git implementations
 
-    async def _git_status(self, args: dict) -> dict:
+    async def _git_status(self, args: dict[str, Any]) -> dict[str, Any]:
         """Git status."""
         import subprocess
 
@@ -208,7 +229,7 @@ class MCPClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _git_diff(self, args: dict) -> dict:
+    async def _git_diff(self, args: dict[str, Any]) -> dict[str, Any]:
         """Git diff."""
         import subprocess
 
@@ -225,13 +246,13 @@ class MCPClient:
 
 
 @asynccontextmanager
-async def mcp_client(server_urls: list[str] | None = None):
+async def mcp_client(server_urls: list[str] | None = None) -> AsyncGenerator[MCPClient, None]:
     """Async context manager for MCP client.
 
     Usage:
         async with mcp_client() as client:
             tools = await client.list_tools()
-            result = await client.call_tool("search_knowledge_base", {"query": "Planner"})
+            result = await client.call_tool("search_knowledge_graph", {"query": "Planner"})
     """
     client = MCPClient(server_urls)
     try:

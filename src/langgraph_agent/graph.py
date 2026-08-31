@@ -6,9 +6,10 @@ Implements the 3-Agent System architecture:
 - Step count limit to prevent infinite loops
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from langgraph.graph import END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from langgraph_agent.nodes import builder_node, planner_node, researcher_node
 from langgraph_agent.state import AgentState, ResearchStatus
@@ -17,7 +18,7 @@ from langgraph_agent.state import AgentState, ResearchStatus
 MAX_STEPS = 8
 
 
-def create_agent_graph() -> StateGraph:
+def create_agent_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
     """Create and compile the 3-agent system graph.
 
     Graph structure:
@@ -43,17 +44,16 @@ def create_agent_graph() -> StateGraph:
     # Set entry point
     graph_builder.set_entry_point("planner")
 
-    # Route from Planner based on next_agent field
-    # First turn: always go to Researcher to ensure knowledge gathering
-    # Subsequent turns: respect the Planner's routing decision
+    # Route from Planner based on next_agent field.
+    # The Planner decides on every turn whether knowledge is needed.
     def route_from_planner(state: AgentState) -> Literal["researcher", "builder"]:
-        # Check if this is the first turn (research not yet done)
-        if not state.get("research"):
-            return "researcher"  # Always research first
-        
-        # On subsequent turns, respect the Planner's decision
+        # Respect the Planner's explicit routing decision on every turn.
+        # The Planner chooses Researcher when knowledge is needed and Builder
+        # when the task is already fully specified.
         next_agent = state.get("next_agent", "Researcher")
-        return next_agent.lower()
+        if next_agent.lower() == "builder":
+            return "builder"
+        return "researcher"
 
     graph_builder.add_conditional_edges(
         "planner",
@@ -82,11 +82,11 @@ def create_agent_graph() -> StateGraph:
     )
 
     # Route from Builder based on blockers and step count
-    def route_from_builder(state: AgentState) -> Literal["planner", "researcher", END]:
+    def route_from_builder(state: AgentState) -> Literal["planner", "researcher", "__end__"]:
         # Check step limit
         if state.get("step_count", 0) >= MAX_STEPS:
             state["messages"].append(f"[Graph] Max steps ({MAX_STEPS}) reached. Stopping.")
-            return END
+            return "__end__"
 
         # Check for blockers
         blockers = state.get("blockers", "")
@@ -102,7 +102,7 @@ def create_agent_graph() -> StateGraph:
                 return "planner"
 
         # No blockers, task complete
-        return END
+        return "__end__"
 
     graph_builder.add_conditional_edges(
         "builder",

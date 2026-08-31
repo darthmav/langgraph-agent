@@ -131,3 +131,53 @@ def test_research_status_enum():
     assert ResearchStatus.READY_FOR_BUILDER.value == "ready_for_builder"
     assert ResearchStatus.NEED_REPLAN.value == "need_replan"
     assert ResearchStatus.NO_RELEVANT_KNOWLEDGE.value == "no_relevant_knowledge"
+
+
+def test_simple_task_skips_research(agent_graph):
+    """Test that a straightforward file-creation task skips research.
+
+    Per the documentation happy-path diagram, the Planner should route a
+    fully-specified task directly to the Builder.
+    """
+    state = initial_state("Create a hello.txt file containing 'Hello World'")
+
+    result = agent_graph.invoke(state)
+
+    assert result["plan"] != ""
+    assert result["research"] == ""
+    assert result["next_agent"] == "Builder"
+    assert result["step_count"] > 0
+
+
+def test_state_injection_shows_empty():
+    """Test that empty fields in state injection render as (empty)."""
+    from langgraph_agent.nodes import _get_state_injection
+
+    state = initial_state("Test goal")
+    injection = _get_state_injection(state)
+
+    assert "Plan: (empty)" in injection
+    assert "Research: (empty)" in injection
+    assert "Builder report: (empty)" in injection
+    assert "Blockers: (empty)" in injection
+    assert "Files changed: (empty)" in injection
+
+
+def test_parse_builder_output_extracts_blockers():
+    """Test that Builder output parsing extracts blockers correctly."""
+    from langgraph_agent.nodes import _parse_builder_output
+
+    content = """## Changes Made
+- Created config file
+
+## Files Modified
+- config/settings.yaml
+
+## Next Steps / Blockers
+Need the database schema to continue
+"""
+    parsed = _parse_builder_output(content)
+
+    assert parsed["changes_made"] == "- Created config file"
+    assert parsed["files_modified"] == ["config/settings.yaml"]
+    assert "Need the database schema" in parsed["next_steps_blockers"]

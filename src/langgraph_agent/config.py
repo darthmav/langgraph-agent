@@ -1,9 +1,10 @@
 """Configuration and LLM setup."""
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
+from pydantic import SecretStr
 
 # Load environment variables from .env file
 load_dotenv()
@@ -13,7 +14,7 @@ def get_llm(
     provider: Literal["openai", "anthropic", "ollama"] | None = None,
     model: str | None = None,
     temperature: float = 0.1,
-):
+) -> Any:
     """Get LLM instance.
 
     Args:
@@ -39,14 +40,18 @@ def get_llm(
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             return StubLLM()
-        return ChatAnthropic(model=model_name, temperature=temperature, api_key=api_key)
+        return ChatAnthropic(
+            model=model_name,
+            temperature=temperature,
+            api_key=SecretStr(api_key),
+        )  # type: ignore[call-arg]
 
     elif provider == "ollama":
         from langchain_ollama import ChatOllama
 
-        model_name = model or os.getenv("OLLAMA_MODEL", "llama3.1")
+        model_name = model or os.getenv("OLLAMA_MODEL", "qwen3:8b")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(model=model_name, temperature=temperature, base_url=base_url)
+        return ChatOllama(model=str(model_name), temperature=temperature, base_url=base_url)
 
     else:  # openai (default)
         from langchain_openai import ChatOpenAI
@@ -55,7 +60,11 @@ def get_llm(
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             return StubLLM()
-        return ChatOpenAI(model=model_name, temperature=temperature, api_key=api_key)
+        return ChatOpenAI(
+            model=str(model_name),
+            temperature=temperature,
+            api_key=SecretStr(api_key),
+        )
 
 
 def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollama"]:
@@ -67,7 +76,7 @@ def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollam
         return "anthropic"
     if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_MODEL"):
         return "openai"
-    
+
     # Fallback to model name detection
     if not model:
         return "ollama"  # Default to local Ollama
@@ -85,7 +94,7 @@ class StubLLM:
     Returns responses in the 3-Agent System format.
     """
 
-    def invoke(self, messages):
+    def invoke(self, messages: list[Any]) -> Any:
         """Return canned responses for testing."""
         from langchain_core.messages import AIMessage
 

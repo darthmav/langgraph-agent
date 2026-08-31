@@ -178,18 +178,25 @@ Per the 3-Agent System specification:
 | `files_changed`    | Builder     | List of modified file paths                    |
 | `step_count`       | Builder     | Number of steps (for loop limit, max 8)        |
 
-## MCP Integration (Scaffolding)
+## MCP Integration
 
-The `mcp_client.py` module provides scaffolding for:
+The `mcp_client.py` module exposes the documented agent tool belts through a
+unified MCP-style interface:
 
-- **GraphRAG MCP** — Knowledge base queries and summarization
-- **Filesystem MCP** — Reading/writing files
-- **Git MCP** — Version control operations
+- **GraphRAG MCP** — `search_knowledge_graph` and `query_knowledge_graph` for the Researcher
+- **Filesystem MCP** — `filesystem_read` / `filesystem_write` for the Builder
+- **Git MCP** — `git_status` / `git_diff` for the Builder
 
-To enable real MCP integration:
-1. Set up MCP servers (stdio or HTTP)
-2. Update `MCPClient._discover_tools()` to connect
-3. Nodes call MCP when available, fall back to LLM
+The Researcher and Builder nodes call these tools through `MCPClient`, preserving
+the documented specialization:
+
+- Planner → no tools
+- Researcher → GraphRAG read-only tools only
+- Builder → filesystem / git / test tools only
+
+To switch from the bundled local tool implementations to external MCP servers,
+update `MCPClient._discover_tools()` to connect over stdio or HTTP and route each
+tool name to the external server.
 
 ## Project Structure
 
@@ -201,10 +208,16 @@ To enable real MCP integration:
 │   ├── config.py               # LLM setup (Ollama, OpenAI, Anthropic)
 │   ├── nodes.py                # Planner, Researcher, Builder
 │   ├── graph.py                # StateGraph wiring
-│   └── mcp_client.py           # MCP client scaffolding
+│   ├── graphrag_server.py      # GraphRAG MCP server
+│   └── mcp_client.py           # MCP client / tool bindings
+├── prompts/
+│   ├── planner.txt             # Planner system prompt
+│   ├── researcher.txt          # Researcher system prompt
+│   └── builder.txt             # Builder system prompt
 ├── tests/
 │   └── test_graph.py           # 8 passing tests
 ├── example_usage.py            # Demo script
+├── test_ollama.py              # Local Ollama end-to-end test
 ├── README.md
 ├── .env.example                # Environment variables template
 ├── ruff.toml                   # Linter config
