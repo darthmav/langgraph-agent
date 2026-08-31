@@ -20,10 +20,13 @@ Human (optional gates) → Planner → Researcher → Builder → END
 ## Installation
 
 ```bash
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-Requires `OPENAI_API_KEY` environment variable for real LLM calls. Without it, uses stub responses for testing.
+Requires API keys in `.env` file (copy from `.env.example`):
+- `OPENAI_API_KEY` for OpenAI models
+- `ANTHROPIC_API_KEY` for Claude models (optional)
+- `OLLAMA_BASE_URL` for local models (optional)
 
 ## Usage
 
@@ -68,6 +71,25 @@ OPENAI_API_KEY="" python -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
+## Development Tools
+
+```bash
+# Linting
+ruff check src/ tests/
+
+# Auto-fix linting issues
+ruff check --fix src/ tests/
+
+# Formatting
+ruff format src/ tests/
+
+# Type checking
+mypy src/langgraph_agent/
+
+# Test coverage
+pytest --cov=langgraph_agent tests/
+```
+
 ## Example
 
 ```bash
@@ -98,19 +120,22 @@ To enable real MCP integration:
 ├── src/langgraph_agent/
 │   ├── __init__.py
 │   ├── state.py                # AgentState TypedDict
-│   ├── config.py               # LLM setup (OpenAI + stub)
+│   ├── config.py               # LLM setup (OpenAI, Anthropic, Ollama)
 │   ├── nodes.py                # Planner, Researcher, Builder
 │   ├── graph.py                # StateGraph wiring + feedback loop
 │   └── mcp_client.py           # MCP client scaffolding
 ├── tests/
 │   └── test_graph.py           # 5 passing tests
 ├── example_usage.py            # Demo script
-└── README.md
+├── README.md
+├── .env.example                # Environment variables template
+├── ruff.toml                   # Linter config
+└── mypy.ini                    # Type checker config
 ```
 
 ## Next Steps
 
-1. **Real LLM**: Set `OPENAI_API_KEY` environment variable
+1. **Real LLM**: Set `OPENAI_API_KEY` in `.env`
 2. **MCP Servers**: Connect to actual GraphRAG and filesystem MCP servers
 3. **Human-in-the-loop**: Add approval gates before Builder executes
 4. **Persistence**: Add checkpointing for long-running agents
