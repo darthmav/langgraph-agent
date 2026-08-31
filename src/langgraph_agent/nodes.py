@@ -322,42 +322,33 @@ def researcher_node(state: AgentState) -> AgentState:
     - Output strict format with status
     - Status guides next steps (ready_for_builder | need_replan | no_relevant_knowledge)
 
-    Uses MCP client to search the knowledge base. Falls back to LLM if KB is empty.
+    Uses local GraphRAG directly. Falls back to LLM if KB is empty.
     """
-    import asyncio
-
     # Build messages with state injection
     state_injection = _get_state_injection(state)
     plan = state.get("plan", "")
 
-    # Try to use GraphRAG first
+    # Try to use GraphRAG directly
     graphrag_results = None
-    graph_results = None
 
     try:
-
-        async def search_graphrag():
-            from langgraph_agent.mcp_client import MCPClient
-
-            async with MCPClient() as client:
-                # Search for relevant information
-                search_results = await client.call_tool(
-                    "search_knowledge_base", {"query": plan, "top_k": 5}
-                )
-
-                # Query knowledge graph for relationships
-                graph_results = await client.call_tool(
-                    "query_knowledge_graph", {"entity": plan.split()[0] if plan else "code", "hops": 2}
-                )
-
-                return search_results, graph_results
-
-        # Run async search
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        graphrag_results, graph_results = loop.run_until_complete(search_graphrag())
-        loop.close()
-
+        from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+        kb = GraphRAGKnowledgeBase()
+        results = kb.search(plan, top_k=5)
+        
+        # Check if we got real results
+        if results and len(results) > 0 and results[0].get("score", 0) > 0.3:
+            graphrag_results = {"results": results, "source": "local_graphrag"}
+            
+            # Try to get graph info too
+            try:
+                first_doc = results[0].get("id", "")
+                if first_doc:
+                    entity = first_doc.split("/")[-1].split(".")[0] if "/" in first_doc else plan.split()[0] if plan else "code"
+                    graph_results = kb.query_graph(entity, hops=2)
+                    graphrag_results["graph"] = graph_results
+            except Exception:
+                pass  # Graph query is optional
     except Exception as e:
         # GraphRAG not available, will use LLM fallback
         graphrag_results = {"error": str(e)}
@@ -368,7 +359,6 @@ def researcher_node(state: AgentState) -> AgentState:
         and graphrag_results.get("source") == "local_graphrag"
         and graphrag_results.get("results")
         and len(graphrag_results["results"]) > 0
-        and graphrag_results["results"][0].get("score", 0) > 0.5
     )
 
     if has_real_results:
@@ -377,18 +367,21 @@ def researcher_node(state: AgentState) -> AgentState:
         research_findings = "## Key Findings\n"
 
         for i, result in enumerate(results[:3], 1):
-            research_findings += f"\n{i}. {result.get('content', '')[:200]}"
+            content = result.get('content', '')[:300]
+            score = result.get('score', 0)
+            research_findings += f"\n{i}. {content}"
             if result.get("related_entities"):
                 research_findings += f"\n   Related: {result['related_entities'][:3]}"
-            research_findings += f"\n   Score: {result.get('score', 0):.2f}\n"
+            research_findings += f"\n   Score: {score:.2f}\n"
 
         research_findings += "\n## Relevant Context\n"
         research_findings += f"Found {len(results)} relevant documents in knowledge base.\n"
 
-        if graph_results and graph_results.get("subgraph_nodes", 0) > 0:
+        if graphrag_results.get("graph") and graphrag_results["graph"].get("subgraph_nodes", 0) > 0:
+            g = graphrag_results["graph"]
             research_findings += (
-                f"\nKnowledge graph has {graph_results['subgraph_nodes']} nodes "
-                f"and {graph_results['subgraph_edges']} relationships.\n"
+                f"\nKnowledge graph has {g['subgraph_nodes']} nodes "
+                f"and {g['subgraph_edges']} relationships.\n"
             )
 
         research_findings += "\n## Recommendations for Builder\n"
@@ -439,76 +432,110 @@ def builder_node(state: AgentState) -> AgentState:
     - Report in strict format
     - Set blockers if stuck
 
-    Uses MCP client to call filesystem tools. Falls back to LLM if tools unavailable.
+    Uses direct file operations. Falls back to LLM if tools fail.
     """
-    import asyncio
     from pathlib import Path
+    import re
 
     # Build messages with state injection
     state_injection = _get_state_injection(state)
+    plan = state.get('plan', '')
+    research = state.get('research', '')
+    goal = state.get('goal', '')
 
-    messages = [
-        SystemMessage(content=BUILDER_PROMPT),
-        HumanMessage(
-            content=f"{state_injection}\n\nPlan to implement:\n{state.get('plan', '')}\n\n"
-            f"Research findings:\n{state.get('research', '(none)')}"
-        ),
-    ]
-
-    # Try to use tools to actually implement the plan
+    # Try to execute the plan directly
     files_changed = []
     builder_report_parts = []
+    execution_error = None
 
     try:
-        async def use_tools():
-            from langgraph_agent.mcp_client import mcp_client
+        # Pattern: "Create <filename>" or "Builder creates <filename>" etc.
+        # Supports backticks, quotes, or bare filenames
+        create_matches = re.findall(
+            r'[Cc]reate(?:s)?\s+(?:the\s+)?(?:a\s+)?(?:new\s+)?(?:file\s+)?(?:named|called)?\s*[`"\']?([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)[`"\']?',
+            plan
+        )
 
-            async with mcp_client() as client:
-                # Parse the plan to extract file operations
-                plan = state.get('plan', '')
+        # Pattern: content in quotes - multiple patterns to try
+        content_matches = []
 
-                # Simple heuristic: look for file creation patterns
-                import re
+        # Pattern 1: "containing 'content'" or "with 'content'" - most specific
+        content_matches += re.findall(r"(?:containing|with)\s*['\"`]([^'\"`]+)['\"`]", plan, re.IGNORECASE)
 
-                # Pattern: "Create <filename>" - handles backticks, "the file", etc.
-                create_matches = re.findall(r'[Cc]reate (?:the |a )?(?:new )?(?:file )?`?([a-zA-Z0-9_.\-/]+\.\w+)`?', plan)
+        # Pattern 2: "write 'content' to it" or "writes 'content'"
+        content_matches += re.findall(r"(?:write|writes?)\s+(?:to\s+it\s+)?['\"`]([^'\"`]+)['\"`]", plan, re.IGNORECASE)
 
-                # Pattern: content in quotes after containing/with/write
-                content_matches = re.findall(r"(?:containing|(?:with |having )?(?:the )?(?:exact )?(?:string |content )|write)\s*['\"]([^'\"]+)['\"]", plan, re.IGNORECASE)
+        # Pattern 3: Backtick-quoted text that's NOT a filename (LLM often uses backticks)
+        all_backtick = re.findall(r'`([^`]+)`', plan)
+        # Filter out filenames (things that look like file paths)
+        for match in all_backtick:
+            if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
+                content_matches.append(match)
 
-                if create_matches:
-                    for filename in create_matches:
-                        # Get content (use first match or default)
-                        content = content_matches[0] if content_matches else f"Content for {filename}"
+        # Pattern 4: Double-quoted text (not filenames)
+        all_double = re.findall(r'"([^"]+)"', plan)
+        for match in all_double:
+            if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
+                content_matches.append(match)
 
-                        # Write the file
-                        result = await client.call_tool("filesystem_write", {
-                            "path": filename,
-                            "content": content
-                        })
+        # Pattern 5: Single-quoted text (not filenames)
+        all_single = re.findall(r"'([^']+)'", plan)
+        for match in all_single:
+            if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
+                content_matches.append(match)
 
-                        if result.get("success"):
-                            files_changed.append(filename)
-                            builder_report_parts.append(f"Created {filename}")
-                        else:
-                            builder_report_parts.append(f"Failed to create {filename}: {result.get('error', 'unknown')}")
+        # Pattern 6: Just standalone quoted strings in the goal (fallback)
+        if not content_matches and goal:
+            goal_content = re.findall(r"['\"`]([^'\"`]+)['\"`]", goal)
+            # Filter out filenames
+            for match in goal_content:
+                if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
+                    content_matches.append(match)
 
-                return files_changed
+        if create_matches:
+            for filename in create_matches:
+                # Clean up filename
+                filename = filename.strip().strip('`"\'')
+                
+                # Get content (use first match or default)
+                content = content_matches[0] if content_matches else f"Content for {filename}"
+                
+                # Create parent directories if needed
+                file_path = Path(filename)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Write the file
+                try:
+                    file_path.write_text(content, encoding="utf-8")
+                    files_changed.append(filename)
+                    builder_report_parts.append(f"Created {filename} with content: {content[:50]}...")
+                except Exception as e:
+                    builder_report_parts.append(f"Failed to create {filename}: {e}")
+                    execution_error = str(e)
 
-        # Run async tool calls
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        files_changed = loop.run_until_complete(use_tools())
-        loop.close()
-        builder_report = "\n".join(builder_report_parts) if builder_report_parts else "No file operations identified"
+        builder_report = "\n".join(builder_report_parts) if builder_report_parts else "No file operations identified in plan"
 
     except Exception as e:
         # Fallback to LLM-only mode
+        execution_error = str(e)
+
+    # If execution failed or no file ops identified, use LLM
+    if not files_changed or execution_error:
+        messages = [
+            SystemMessage(content=BUILDER_PROMPT),
+            HumanMessage(
+                content=f"{state_injection}\n\nPlan to implement:\n{plan}\n\n"
+                f"Research findings:\n{research}"
+            ),
+        ]
+
         llm = get_llm()
         response = llm.invoke(messages)
         parsed = _parse_builder_output(response.content)
-        builder_report = parsed.get("changes_made", response.content)
-        files_changed = parsed.get("files_modified", [])
+        
+        if not files_changed:
+            builder_report = parsed.get("changes_made", response.content)
+            files_changed = parsed.get("files_modified", [])
 
     # Update state
     state["builder_report"] = builder_report

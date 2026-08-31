@@ -44,8 +44,15 @@ def create_agent_graph() -> StateGraph:
     graph_builder.set_entry_point("planner")
 
     # Route from Planner based on next_agent field
+    # First turn: always go to Researcher to ensure knowledge gathering
+    # Subsequent turns: respect the Planner's routing decision
     def route_from_planner(state: AgentState) -> Literal["researcher", "builder"]:
-        next_agent = state.get("next_agent", "Builder")
+        # Check if this is the first turn (research not yet done)
+        if not state.get("research"):
+            return "researcher"  # Always research first
+        
+        # On subsequent turns, respect the Planner's decision
+        next_agent = state.get("next_agent", "Researcher")
         return next_agent.lower()
 
     graph_builder.add_conditional_edges(

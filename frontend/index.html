@@ -651,6 +651,7 @@ button.ghost:hover {
   </div>
   <div style="padding: 12px 18px; font: 11px var(--mono); color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 10px;">
     <div>LLM: <span id="llm-info" style="color: var(--ink-2)">qwen3.5:397b-cloud</span></div>
+    <div style="margin-top: 6px;">Embedding: <span id="embedding-info" style="color: var(--ink-2)">all-MiniLM-L6-v2</span></div>
     <div style="margin-top: 6px;">GraphRAG: <span id="graphrag-info" style="color: var(--ok)">● indexed</span></div>
   </div>
 </aside>
@@ -837,34 +838,56 @@ function updateDisplays() {
 async function runGoal() {
   const goal = $("#goal-input").value.trim();
   if (!goal) return;
-  
+
   if (isRunning) return;
   isRunning = true;
-  
+
   $("#run-btn").disabled = true;
   $("#run-btn").textContent = "Running...";
   addMessage(`Starting: ${goal}`, "system");
-  
+
+  // Show Planner active
+  updateAgentCard("planner", "ACTIVE", 30);
+
   try {
     const response = await fetch(`${API_BASE}/api/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ goal })
     });
-    
+
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
+
     const result = await response.json();
     currentState = { ...currentState, ...result };
-    
-    // Add messages
+
+    // Parse messages to show which agents ran
     if (result.messages) {
-      result.messages.forEach(msg => addMessage(msg, "system"));
+      result.messages.forEach(msg => {
+        // Detect agent from message
+        let agentType = "system";
+        if (msg.includes("[Planner]")) agentType = "planner";
+        else if (msg.includes("[Researcher]")) agentType = "researcher";
+        else if (msg.includes("[Builder]")) agentType = "builder";
+        
+        addMessage(msg, agentType);
+        
+        // Update agent cards based on activity
+        if (agentType === "planner") {
+          updateAgentCard("planner", "COMPLETED", 100);
+          updateAgentCard("researcher", "ACTIVE", 50);
+        } else if (agentType === "researcher") {
+          updateAgentCard("researcher", "COMPLETED", 100);
+          updateAgentCard("builder", "ACTIVE", 50);
+        } else if (agentType === "builder") {
+          updateAgentCard("builder", "COMPLETED", 100);
+        }
+      });
     }
-    
+
     updateDisplays();
     addMessage("✓ Task completed", "system");
-    
+
   } catch (err) {
     addMessage(`✕ Error: ${err.message}`, "system");
   } finally {
@@ -872,6 +895,13 @@ async function runGoal() {
     $("#run-btn").disabled = false;
     $("#run-btn").textContent = "Run";
     updateStats();
+    
+    // Reset agent cards
+    setTimeout(() => {
+      updateAgentCard("planner", "STANDBY", 0);
+      updateAgentCard("researcher", "STANDBY", 0);
+      updateAgentCard("builder", "STANDBY", 0);
+    }, 2000);
   }
 }
 
@@ -934,8 +964,9 @@ async function pollStatus() {
     if (response.ok) {
       const status = await response.json();
       $("#llm-info").textContent = status.llm || "unknown";
-      $("#graphrag-info").innerHTML = status.graphrag ? 
-        '<span style="color: var(--ok)">● indexed</span>' : 
+      $("#embedding-info").textContent = status.embedding || "all-MiniLM-L6-v2";
+      $("#graphrag-info").innerHTML = status.graphrag ?
+        '<span style="color: var(--ok)">● indexed</span>' :
         '<span style="color: var(--warn)">● not indexed</span>';
     }
   } catch {}

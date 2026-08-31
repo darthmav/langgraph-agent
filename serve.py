@@ -2,31 +2,58 @@
 """Simple frontend server for 3-Agent Console.
 
 Usage:
-    python -m http.server 8080 --directory frontend
-    
-Then in another terminal, test API:
-    curl -X POST http://localhost:8080/api/run -H "Content-Type: application/json" -d '{"goal": "test"}'
+    python serve.py
+
+Then open: http://localhost:8080
 """
 
 import json
 import os
+import sys
 from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
 
-from langgraph_agent import create_agent_graph, AgentState
-from langgraph_agent.mcp_client import mcp_client
+# Ensure src directory is in Python path
+src_path = Path(__file__).parent / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
 
+from langgraph_agent import create_agent_graph, AgentState
+from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+
+# Initialize graph and knowledge base
 graph = create_agent_graph()
+kb = None
 
 class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory="frontend", **kwargs)
+    
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == '/api/status':
+            # Check if knowledge base is indexed
+            global kb
+            kb_indexed = False
+            embedding_model = "unknown"
+            
+            try:
+                if kb is None:
+                    kb = GraphRAGKnowledgeBase()
+                kb_indexed = kb.collection.count() > 0 if kb.collection else False
+                embedding_model = getattr(kb, 'embedder_model_name', 'all-MiniLM-L6-v2')
+            except Exception:
+                kb_indexed = False
+            
             self.send_json({
                 "llm": os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud"),
-                "graphrag": True,
+                "embedding": embedding_model,
+                "graphrag": kb_indexed,
             })
+        elif parsed.path == '/' or parsed.path == '/index.html':
+            self.path = '/index.html'
+            return super().do_GET()
         else:
             super().do_GET()
     
@@ -34,7 +61,7 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         length = int(self.headers.get('Content-Length', 0))
         data = json.loads(self.rfile.read(length)) if length else {}
-        
+
         if parsed.path == '/api/run':
             goal = data.get('goal', '')
             state: AgentState = {
@@ -45,16 +72,22 @@ class Handler(SimpleHTTPRequestHandler):
             }
             result = graph.invoke(state, {"recursion_limit": 10})
             self.send_json(result)
-        
+
         elif parsed.path == '/api/search':
-            import asyncio
-            async def search():
-                async with mcp_client() as c:
-                    return await c.call_tool("search_knowledge_base", {
-                        "query": data.get("query", ""), "top_k": data.get("top_k", 5)
-                    })
-            self.send_json(asyncio.run(search()))
-        
+            # Use local GraphRAG directly instead of MCP client
+            global kb
+            if kb is None:
+                kb = GraphRAGKnowledgeBase()
+            
+            query = data.get("query", "")
+            top_k = data.get("top_k", 5)
+            
+            try:
+                results = kb.search(query, top_k)
+                self.send_json({"results": results, "source": "local_graphrag"})
+            except Exception as e:
+                self.send_json({"error": str(e), "results": []})
+
         else:
             self.send_error(404)
     
