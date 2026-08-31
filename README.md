@@ -183,16 +183,23 @@ Per the 3-Agent System specification:
 The `mcp_client.py` module exposes the documented agent tool belts through a
 unified MCP-style interface:
 
-- **GraphRAG MCP** — `search_knowledge_graph` and `query_knowledge_graph` for the Researcher
-- **Filesystem MCP** — `filesystem_read` / `filesystem_write` for the Builder
-- **Git MCP** — `git_status` / `git_diff` for the Builder
+| Tool | Agent | Purpose |
+|------|-------|---------|
+| `search_knowledge_graph` | Researcher | Search the knowledge graph + vector store |
+| `query_knowledge_graph` | Researcher | Query entity/relationship neighborhoods |
+| `filesystem_read` | Builder | Read a file |
+| `filesystem_write` | Builder | Write a file |
+| `git_status` | Builder | `git status --porcelain` |
+| `git_diff` | Builder | `git diff` |
+| `terminal_execute` | Builder | Run a safe shell command |
+| `run_tests` | Builder | Run `pytest` |
 
 The Researcher and Builder nodes call these tools through `MCPClient`, preserving
 the documented specialization:
 
 - Planner → no tools
 - Researcher → GraphRAG read-only tools only
-- Builder → filesystem / git / test tools only
+- Builder → filesystem / git / terminal / test tools only
 
 To switch from the bundled local tool implementations to external MCP servers,
 update `MCPClient._discover_tools()` to connect over stdio or HTTP and route each

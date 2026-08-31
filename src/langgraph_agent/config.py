@@ -1,6 +1,7 @@
 """Configuration and LLM setup."""
 
 import os
+import re
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -113,7 +114,12 @@ class StubLLM:
         is_planner = "planner" in all_lower or "understand the user's goal" in all_lower
         is_researcher = "researcher" in all_lower or "gather high-quality" in all_lower
         is_builder = "builder" in all_lower or "implement the plan" in all_lower
-        needs_research = "research" in last_lower
+
+        # For the Planner, decide whether the *user goal* asks for research.
+        # Ignore the state-injection block, which contains a "Research:" label.
+        user_goal_match = re.search(r"User goal:\s*(.+)", last_content, re.IGNORECASE | re.DOTALL)
+        user_goal = user_goal_match.group(1).lower() if user_goal_match else last_lower
+        needs_research = "research" in user_goal
 
         if is_planner:
             # Planner response format

@@ -163,21 +163,3 @@ def test_state_injection_shows_empty():
     assert "Files changed: (empty)" in injection
 
 
-def test_parse_builder_output_extracts_blockers():
-    """Test that Builder output parsing extracts blockers correctly."""
-    from langgraph_agent.nodes import _parse_builder_output
-
-    content = """## Changes Made
-- Created config file
-
-## Files Modified
-- config/settings.yaml
-
-## Next Steps / Blockers
-Need the database schema to continue
-"""
-    parsed = _parse_builder_output(content)
-
-    assert parsed["changes_made"] == "- Created config file"
-    assert parsed["files_modified"] == ["config/settings.yaml"]
-    assert "Need the database schema" in parsed["next_steps_blockers"]

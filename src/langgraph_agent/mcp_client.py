@@ -17,8 +17,12 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -79,11 +83,13 @@ class MCPClient:
         tools["query_knowledge_graph"] = self._graphrag_query_graph
         tools["add_to_knowledge_base"] = self._graphrag_add
 
-        # Real filesystem and git tools
+        # Real filesystem, git, terminal, and test tools
         tools["filesystem_read"] = self._filesystem_read
         tools["filesystem_write"] = self._filesystem_write
         tools["git_status"] = self._git_status
         tools["git_diff"] = self._git_diff
+        tools["terminal_execute"] = self._terminal_execute
+        tools["run_tests"] = self._run_tests
 
         return tools
 
@@ -123,6 +129,7 @@ class MCPClient:
         if self._kb is None:
             try:
                 from langgraph_agent.graphrag_server import get_knowledge_base
+
                 self._kb = get_knowledge_base()
             except Exception:
                 self._kb = None
@@ -144,6 +151,7 @@ class MCPClient:
         if self._kb is None:
             try:
                 from langgraph_agent.graphrag_server import get_knowledge_base
+
                 self._kb = get_knowledge_base()
             except Exception:
                 self._kb = None
@@ -171,6 +179,7 @@ class MCPClient:
         if self._kb is None:
             try:
                 from langgraph_agent.graphrag_server import get_knowledge_base
+
                 self._kb = get_knowledge_base()
             except Exception:
                 self._kb = None
@@ -189,8 +198,6 @@ class MCPClient:
 
     async def _filesystem_read(self, args: dict[str, Any]) -> dict[str, Any]:
         """Read file contents."""
-        from pathlib import Path
-
         path = args.get("path", "")
         try:
             content = Path(path).read_text(encoding="utf-8")
@@ -200,8 +207,6 @@ class MCPClient:
 
     async def _filesystem_write(self, args: dict[str, Any]) -> dict[str, Any]:
         """Write file contents, creating parent directories if needed."""
-        from pathlib import Path
-
         path = args.get("path", "")
         content = args.get("content", "")
         try:
@@ -216,8 +221,6 @@ class MCPClient:
 
     async def _git_status(self, args: dict[str, Any]) -> dict[str, Any]:
         """Git status."""
-        import subprocess
-
         try:
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
@@ -231,8 +234,6 @@ class MCPClient:
 
     async def _git_diff(self, args: dict[str, Any]) -> dict[str, Any]:
         """Git diff."""
-        import subprocess
-
         try:
             result = subprocess.run(
                 ["git", "diff", args.get("path", "")],
@@ -241,6 +242,60 @@ class MCPClient:
                 timeout=10,
             )
             return {"success": True, "diff": result.stdout or "No changes"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # Terminal / test tools
+
+    async def _terminal_execute(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run a shell command in the project workspace.
+
+        Safety: rejects shell metacharacters and only allows simple commands.
+        """
+        command = args.get("command", "")
+        # Allow only simple commands: alphanumerics, dashes, underscores, dots,
+        # slashes, spaces, and a few safe flags/punctuation.
+        if not re.fullmatch(r"[A-Za-z0-9_./\s\-:'\"=,]+", command):
+            return {
+                "success": False,
+                "error": "Command contains disallowed shell metacharacters",
+                "command": command,
+            }
+
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=args.get("timeout", 30),
+            )
+            return {
+                "success": result.returncode == 0,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "command": command,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e), "command": command}
+
+    async def _run_tests(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run the pytest test suite."""
+        target = args.get("path", "tests/")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", target, "-q"],
+                capture_output=True,
+                text=True,
+                timeout=args.get("timeout", 600),
+            )
+            return {
+                "success": result.returncode == 0,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
