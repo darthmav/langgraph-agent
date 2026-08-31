@@ -1,25 +1,36 @@
-"""LangGraph graph definition."""
+"""LangGraph graph definition.
+
+Implements the 3-Agent System architecture:
+- Planner → Researcher → Builder flow
+- Feedback loops from Builder back to Planner/Researcher
+- Step count limit to prevent infinite loops
+"""
 
 from typing import Literal
 
 from langgraph.graph import END, StateGraph
 
 from langgraph_agent.nodes import builder_node, planner_node, researcher_node
-from langgraph_agent.state import AgentState
+from langgraph_agent.state import AgentState, ResearchStatus
+
+# Maximum steps before escalation
+MAX_STEPS = 8
 
 
-def create_agent_graph(max_iterations: int = 3) -> StateGraph:
-    """Create and compile the agent graph.
+def create_agent_graph() -> StateGraph:
+    """Create and compile the 3-agent system graph.
 
     Graph structure:
-        START -> Planner -> conditional -> Researcher -> Builder -> END
-                                      ^                    |
-                                      +------ loop --------+
+        START → Planner → conditional → Researcher → Builder → END
+                                    ^             |
+                                    +---- loop ---+
 
-        Builder can loop back to Planner if feedback indicates replanning needed.
-
-    Args:
-        max_iterations: Maximum times through the loop (prevents infinite loops)
+    Routing logic:
+    - Planner chooses Researcher (needs knowledge) or Builder (task is clear)
+    - Researcher sets status: ready_for_builder | need_replan | no_relevant_knowledge
+    - Builder sets blockers or completes
+    - Graph loops on blockers or need_replan status
+    - Stops at MAX_STEPS or when complete
     """
     # Initialize the graph with our state schema
     graph_builder = StateGraph(AgentState)
@@ -32,9 +43,10 @@ def create_agent_graph(max_iterations: int = 3) -> StateGraph:
     # Set entry point
     graph_builder.set_entry_point("planner")
 
-    # Add edges with conditional routing from planner
+    # Route from Planner based on next_agent field
     def route_from_planner(state: AgentState) -> Literal["researcher", "builder"]:
-        return state.get("next_node", "builder")
+        next_agent = state.get("next_agent", "Builder")
+        return next_agent.lower()
 
     graph_builder.add_conditional_edges(
         "planner",
@@ -45,32 +57,44 @@ def create_agent_graph(max_iterations: int = 3) -> StateGraph:
         },
     )
 
-    # Researcher always goes to builder after research
-    graph_builder.add_edge("researcher", "builder")
+    # Route from Researcher based on research_status
+    def route_from_researcher(state: AgentState) -> Literal["planner", "builder"]:
+        status = state.get("research_status", ResearchStatus.READY_FOR_BUILDER.value)
 
-    # Builder can loop back to planner if feedback indicates issues, or end
-    def route_from_builder(state: AgentState) -> Literal["planner", END]:
-        # Check if we've hit max iterations
-        if state.get("iteration", 0) >= max_iterations:
-            state["messages"].append(
-                f"[Graph] Max iterations ({max_iterations}) reached. Stopping."
-            )
-            state["status"] = "complete"
+        if status == ResearchStatus.NEED_REPLAN.value:
+            return "planner"
+        return "builder"
+
+    graph_builder.add_conditional_edges(
+        "researcher",
+        route_from_researcher,
+        {
+            "planner": "planner",
+            "builder": "builder",
+        },
+    )
+
+    # Route from Builder based on blockers and step count
+    def route_from_builder(state: AgentState) -> Literal["planner", "researcher", END]:
+        # Check step limit
+        if state.get("step_count", 0) >= MAX_STEPS:
+            state["messages"].append(f"[Graph] Max steps ({MAX_STEPS}) reached. Stopping.")
             return END
 
-        # Check if feedback indicates need for replanning
-        feedback = state.get("feedback", "")
-        if feedback and any(
-            kw in feedback.lower()
-            for kw in ["redo", "fix", "change", "revise", "replan", "wrong", "error"]
-        ):
-            state["iteration"] = state.get("iteration", 0) + 1
-            state["messages"].append(
-                f"[Graph] Feedback detected. Replanning (iteration {state['iteration']}/{max_iterations})"
-            )
-            return "planner"
+        # Check for blockers
+        blockers = state.get("blockers", "")
+        if blockers:
+            # Determine if we need research or replanning
+            if "need" in blockers.lower() and (
+                "info" in blockers.lower() or "research" in blockers.lower()
+            ):
+                state["messages"].append("[Graph] Blockers require research")
+                return "researcher"
+            else:
+                state["messages"].append("[Graph] Blockers require replanning")
+                return "planner"
 
-        state["status"] = "complete"
+        # No blockers, task complete
         return END
 
     graph_builder.add_conditional_edges(
@@ -78,6 +102,7 @@ def create_agent_graph(max_iterations: int = 3) -> StateGraph:
         route_from_builder,
         {
             "planner": "planner",
+            "researcher": "researcher",
             END: END,
         },
     )

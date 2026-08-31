@@ -71,32 +71,103 @@ def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollam
 
 
 class StubLLM:
-    """Stub LLM for testing without API key."""
+    """Stub LLM for testing without API key.
+
+    Returns responses in the 3-Agent System format.
+    """
 
     def invoke(self, messages):
         """Return canned responses for testing."""
         from langchain_core.messages import AIMessage
 
-        content = str(messages) if isinstance(messages, str) else str(messages[-1].content)
+        # Check all messages for agent detection
+        all_content = ""
+        last_content = ""
+        for msg in messages:
+            content = str(msg.content) if hasattr(msg, "content") else str(msg)
+            all_content += content + " "
+            last_content = content
 
-        if "research" in content.lower() or "investigate" in content.lower():
-            response = """{
-                "plan": [
-                    "Research existing solutions and best practices",
-                    "Identify key requirements and constraints",
-                    "Design the architecture",
-                    "Implement the solution"
-                ],
-                "next_node": "researcher"
-            }"""
+        all_lower = all_content.lower()
+        last_lower = last_content.lower()
+
+        # Detect which agent is being called based on prompt content
+        is_planner = "planner" in all_lower or "understand the user's goal" in all_lower
+        is_researcher = "researcher" in all_lower or "gather high-quality" in all_lower
+        is_builder = "builder" in all_lower or "implement the plan" in all_lower
+        needs_research = "research" in last_lower
+
+        if is_planner:
+            # Planner response format
+            if needs_research:
+                response = """## Goal
+Research Python best practices
+
+## Steps
+1. Search for existing documentation
+2. Identify key patterns
+3. Summarize findings
+
+## Next Agent
+Researcher
+
+## Notes
+Research needed for knowledge gathering"""
+            else:
+                response = """## Goal
+Create a file with content
+
+## Steps
+1. Create the file
+2. Write the content
+3. Verify the file
+
+## Next Agent
+Builder
+
+## Notes
+Task is straightforward, no research needed"""
+
+        elif is_researcher:
+            # Researcher response format
+            response = """## Key Findings
+- Found relevant patterns in documentation
+- Identified best practices
+
+## Relevant Context
+Existing code follows similar patterns
+
+## Recommendations for Builder
+Implement using the identified patterns
+
+## Status
+ready_for_builder"""
+
+        elif is_builder:
+            # Builder response format
+            response = """## Changes Made
+- Created file with specified content
+- Verified file exists
+
+## Files Modified
+- hello.txt
+
+## Next Steps / Blockers
+none"""
+
         else:
-            response = """{
-                "plan": [
-                    "Understand the requirements",
-                    "Design the solution",
-                    "Implement the code"
-                ],
-                "next_node": "builder"
-            }"""
+            # Default fallback
+            response = """## Goal
+Complete the task
+
+## Steps
+1. Understand requirements
+2. Implement solution
+
+## Next Agent
+Builder
+
+## Notes
+Default response"""
 
         return AIMessage(content=response)

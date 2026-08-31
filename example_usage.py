@@ -1,72 +1,92 @@
 #!/usr/bin/env python3
-"""Example usage of the LangGraph agent with feedback loop."""
+"""Example usage of the 3-Agent System.
 
-from langgraph_agent import create_agent_graph, AgentState
+Demonstrates:
+- Planner → Researcher → Builder flow
+- State injection on every turn
+- Strict output format parsing
+- Ollama (local) or OpenAI (cloud) LLM support
+"""
+
+import os
+
+from langgraph_agent import AgentState, create_agent_graph
 
 
-def run_example(user_input: str, feedback: str = None, max_iterations: int = 3):
-    """Run the agent with a sample input.
-    
+def run_example(goal: str, max_steps: int = 8):
+    """Run the 3-agent system with a goal.
+
     Args:
-        user_input: The request to process
-        feedback: Optional feedback to trigger replanning
-        max_iterations: Maximum replanning iterations
+        goal: The goal to achieve
+        max_steps: Maximum steps before stopping (default 8)
     """
-    graph = create_agent_graph(max_iterations=max_iterations)
-    
+    # Set Ollama as default for local execution
+    if not os.getenv("OPENAI_API_KEY"):
+        print("No OPENAI_API_KEY found, using Ollama (ensure 'ollama pull qwen3:8b' first)")
+        os.environ["OLLAMA_BASE_URL"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    graph = create_agent_graph()
+
+    # Initialize state per the 3-Agent System specification
     initial_state: AgentState = {
-        "input": user_input,
-        "plan": [],
-        "current_step": 0,
-        "research_findings": None,
-        "builder_output": None,
+        "goal": goal,
         "messages": [],
-        "status": "started",
-        "next_node": "",
-        "feedback": feedback,
-        "iteration": 0,
-        "max_iterations": max_iterations,
+        "plan": "",
+        "research": "",
+        "builder_report": "",
+        "next_agent": "Researcher",  # Default, Planner will set
+        "research_status": "",
+        "blockers": "",
+        "files_changed": [],
+        "step_count": 0,
     }
-    
-    print(f"\n{'='*60}")
-    print(f"Input: {user_input}")
-    if feedback:
-        print(f"Feedback: {feedback}")
-    print(f"{'='*60}\n")
-    
+
+    print(f"\n{'=' * 70}")
+    print(f"3-Agent System - Goal: {goal}")
+    print(f"{'=' * 70}\n")
+
+    # Run the graph
     result = graph.invoke(initial_state)
-    
-    print("Plan:")
-    for i, step in enumerate(result["plan"], 1):
-        print(f"  {i}. {step}")
-    
-    print(f"\nMessages:")
-    for msg in result["messages"]:
+
+    # Display results
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+
+    print("\n## Plan")
+    print(result.get("plan", "(empty)") or "(empty)")
+
+    print("\n## Research Findings")
+    print(result.get("research", "(empty)") or "(empty)")
+
+    print("\n## Builder Report")
+    print(result.get("builder_report", "(empty)") or "(empty)")
+
+    print("\n## Files Changed")
+    files = result.get("files_changed", [])
+    if files:
+        for f in files:
+            print(f"  - {f}")
+    else:
+        print("  (none)")
+
+    print("\n## Blockers")
+    blockers = result.get("blockers", "")
+    print(blockers if blockers else "  (none)")
+
+    print("\n## Execution Log")
+    for msg in result.get("messages", []):
         print(f"  - {msg}")
-    
-    print(f"\nStatus: {result['status']}")
-    print(f"Iterations: {result.get('iteration', 0)}")
-    if result["research_findings"]:
-        print(f"\nResearch:\n  {result['research_findings'][:200]}...")
-    if result["builder_output"]:
-        print(f"\nBuilder Output:\n  {result['builder_output'][:300]}...")
-    
+
+    print(f"\n## Steps Taken: {result.get('step_count', 0)}")
+
     return result
 
 
 if __name__ == "__main__":
-    # Example 1: Research task
-    run_example("Research the best Python async frameworks")
-    
-    # Example 2: Build task
-    run_example("Create a REST API with FastAPI")
-    
-    # Example 3: Build task with feedback (triggers replanning)
-    print("\n\n" + "="*60)
-    print("EXAMPLE WITH FEEDBACK LOOP")
-    print("="*60)
-    run_example(
-        "Create a simple todo list app",
-        feedback="The approach is wrong, please use a database instead of in-memory storage",
-        max_iterations=3
-    )
+    # Example 1: Simple build task (should skip research)
+    run_example("Create a hello.txt file containing 'Hello World'")
+
+    # Example 2: Research-heavy task
+    print("\n\n")
+    run_example("Research the best practices for Python async error handling")
