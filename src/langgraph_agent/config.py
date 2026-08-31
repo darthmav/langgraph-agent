@@ -59,13 +59,22 @@ def get_llm(
 
 
 def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollama"]:
-    """Detect provider from model name."""
-    if not model:
+    """Detect provider from model name or environment."""
+    # Check environment variables first
+    if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_MODEL"):
+        return "ollama"
+    if os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_MODEL"):
+        return "anthropic"
+    if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_MODEL"):
         return "openai"
+    
+    # Fallback to model name detection
+    if not model:
+        return "ollama"  # Default to local Ollama
     model_lower = model.lower()
     if "claude" in model_lower:
         return "anthropic"
-    if "llama" in model_lower or "mistral" in model_lower:
+    if "llama" in model_lower or "mistral" in model_lower or "qwen" in model_lower:
         return "ollama"
     return "openai"
 

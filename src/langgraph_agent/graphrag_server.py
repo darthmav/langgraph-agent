@@ -1,0 +1,327 @@
+"""GraphRAG MCP Server.
+
+Provides knowledge base search with entity/relation graph + vector store.
+
+Usage:
+    python -m src.langgraph_agent.graphrag_server
+
+Or with stdio transport for MCP:
+    mcp dev src/langgraph_agent/graphrag_server.py
+"""
+
+import asyncio
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import chromadb
+import networkx as nx
+import numpy as np
+from mcp.server import MCPServer
+
+Server = MCPServer
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
+
+# Force CPU for sentence-transformers (GPU 1060 3GB not compatible)
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+from sentence_transformers import SentenceTransformer
+
+
+class GraphRAGKnowledgeBase:
+    """Simple GraphRAG: NetworkX graph + Chroma vector store."""
+
+    def __init__(self, persist_dir: str = "./knowledge"):
+        self.persist_dir = Path(persist_dir)
+        self.persist_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize embedding model (local, no API key needed)
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+        # Initialize Chroma vector store
+        self.chroma_client = chromadb.PersistentClient(str(self.persist_dir / "chroma"))
+        self.collection = self.chroma_client.get_or_create_collection(
+            name="knowledge",
+            metadata={"hnsw:space": "cosine"}
+        )
+
+        # Initialize knowledge graph
+        self.graph = nx.DiGraph()
+        self._load_graph()
+
+    def _load_graph(self) -> None:
+        """Load graph from disk if exists."""
+        graph_path = self.persist_dir / "knowledge_graph.json"
+        if graph_path.exists():
+            self.graph = nx.readwrite.json_graph.node_link_graph(
+                json.load(open(graph_path))
+            )
+
+    def _save_graph(self) -> None:
+        """Save graph to disk."""
+        graph_path = self.persist_dir / "knowledge_graph.json"
+        node_link_data = nx.readwrite.json_graph.node_link_data(self.graph)
+        json.dump(node_link_data, open(graph_path, "w"))
+
+    def add_document(self, doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> None:
+        """Add a document to the knowledge base.
+
+        Args:
+            doc_id: Unique document identifier
+            content: Document text content
+            metadata: Optional metadata (path, type, etc.)
+        """
+        # Generate embedding
+        embedding = self.embedder.encode(content).tolist()
+
+        # Add to vector store
+        self.collection.upsert(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[metadata or {}]
+        )
+
+        # Add to graph as a node
+        self.graph.add_node(
+            doc_id,
+            type="document",
+            content=content[:200],  # Store snippet
+            **(metadata or {})
+        )
+
+        # Extract simple entities (words that look like important terms)
+        words = content.split()
+        entities = [
+            w.strip(".,!?;:") for w in words
+            if len(w) > 4 and w[0].isupper()
+        ]
+
+        # Add entities and relationships
+        for entity in set(entities):
+            self.graph.add_node(entity, type="entity")
+            self.graph.add_edge(doc_id, entity, relation="mentions")
+
+        self._save_graph()
+
+    def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Search the knowledge base.
+
+        Args:
+            query: Search query
+            top_k: Number of results to return
+
+        Returns:
+            List of results with content, metadata, and graph context
+        """
+        # Generate query embedding
+        query_embedding = self.embedder.encode(query).tolist()
+
+        # Search vector store
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        # Enrich with graph context
+        enriched_results = []
+        for i, doc_id in enumerate(results["ids"][0]):
+            result = {
+                "id": doc_id,
+                "content": results["documents"][0][i],
+                "metadata": results["metadatas"][0][i],
+                "score": 1 - results["distances"][0][i],  # Convert distance to similarity
+            }
+
+            # Add graph neighbors
+            if doc_id in self.graph:
+                neighbors = list(self.graph.neighbors(doc_id))[:5]
+                result["related_entities"] = neighbors
+
+            enriched_results.append(result)
+
+        return enriched_results
+
+    def query_graph(self, entity: str, hops: int = 2) -> dict[str, Any]:
+        """Query the knowledge graph for entity relationships.
+
+        Args:
+            entity: Entity name to search for
+            hops: Number of hops to traverse
+
+        Returns:
+            Entity info with relationships
+        """
+        if entity not in self.graph:
+            # Try fuzzy match
+            for node in self.graph.nodes():
+                if entity.lower() in node.lower():
+                    entity = node
+                    break
+
+        if entity not in self.graph:
+            return {"error": f"Entity '{entity}' not found"}
+
+        # Get neighborhood
+        neighbors = nx.single_source_shortest_path_length(
+            self.graph, entity, cutoff=hops
+        )
+
+        # Build subgraph
+        subgraph = self.graph.subgraph(neighbors.keys())
+
+        return {
+            "entity": entity,
+            "neighbors": list(neighbors.items()),
+            "subgraph_nodes": len(subgraph.nodes()),
+            "subgraph_edges": len(subgraph.edges()),
+        }
+
+
+# Create MCP server
+server = MCPServer("graphrag")
+kb = GraphRAGKnowledgeBase()
+
+
+# Register tools with the server
+@server.tool(name="search_knowledge_base")
+def search_tool(query: str, top_k: int = 5) -> str:
+    """Search the knowledge base for relevant documents and passages."""
+    results = kb.search(query, top_k)
+    return json.dumps(results, indent=2)
+
+
+@server.tool(name="query_knowledge_graph")
+def query_tool(entity: str, hops: int = 2) -> str:
+    """Query the knowledge graph for entity relationships."""
+    result = kb.query_graph(entity, hops)
+    return json.dumps(result, indent=2)
+
+
+@server.tool(name="add_to_knowledge_base")
+def add_tool(doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> str:
+    """Add a document to the knowledge base."""
+    kb.add_document(doc_id, content, metadata)
+    return f"Added document '{doc_id}' to knowledge base"
+
+
+def list_tools_impl() -> list[Tool]:
+    """List available GraphRAG tools."""
+    return [
+        Tool(
+            name="search_knowledge_base",
+            description="Search the knowledge base for relevant documents and passages. "
+                       "Use for questions about codebase, architecture, documentation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results (default 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="query_knowledge_graph",
+            description="Query the knowledge graph for entity relationships. "
+                       "Use to find how concepts, files, or components are related.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entity": {
+                        "type": "string",
+                        "description": "Entity to search for"
+                    },
+                    "hops": {
+                        "type": "integer",
+                        "description": "Number of hops to traverse (default 2)",
+                        "default": 2
+                    }
+                },
+                "required": ["entity"]
+            }
+        ),
+        Tool(
+            name="add_to_knowledge_base",
+            description="Add a document to the knowledge base. "
+                       "Use to index new files or documentation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Unique document ID (e.g., file path)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Document content"
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Optional metadata"
+                    }
+                },
+                "required": ["doc_id", "content"]
+            }
+        ),
+    ]
+
+
+async def call_tool_impl(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    """Call a GraphRAG tool."""
+    if name == "search_knowledge_base":
+        results = kb.search(
+            arguments["query"],
+            arguments.get("top_k", 5)
+        )
+        return [TextContent(
+            type="text",
+            text=json.dumps(results, indent=2)
+        )]
+
+    elif name == "query_knowledge_graph":
+        result = kb.query_graph(
+            arguments["entity"],
+            arguments.get("hops", 2)
+        )
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, indent=2)
+        )]
+
+    elif name == "add_to_knowledge_base":
+        kb.add_document(
+            arguments["doc_id"],
+            arguments["content"],
+            arguments.get("metadata")
+        )
+        return [TextContent(
+            type="text",
+            text=f"Added document '{arguments['doc_id']}' to knowledge base"
+        )]
+
+    else:
+        raise ValueError(f"Unknown tool: {name}")
+
+
+async def main():
+    """Run the GraphRAG MCP server."""
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options()
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

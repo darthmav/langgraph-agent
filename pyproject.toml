@@ -1,7 +1,7 @@
 [project]
 name = "langgraph-agent"
-version = "0.1.0"
-description = "LangGraph orchestration with Planner, Researcher, Builder nodes"
+version = "0.2.0"
+description = "3-Agent Local AI System: Planner, Researcher, Builder"
 requires-python = ">=3.10"
 dependencies = [
     "langgraph>=0.2.0",
@@ -12,6 +12,11 @@ dependencies = [
     "langchain-community>=0.3.0",
     "mcp>=0.5.0",
     "python-dotenv>=1.0.0",
+    # GraphRAG dependencies
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+    "networkx>=3.0",
+    "faiss-cpu>=1.8.0",
 ]
 
 [project.optional-dependencies]

@@ -1,7 +1,7 @@
 """MCP client integration for GraphRAG and filesystem tools.
 
 This module provides a unified interface to MCP (Model Context Protocol) servers.
-It handles connection, tool discovery, and tool invocation.
+For GraphRAG, can use the local knowledge base directly or connect to an MCP server.
 
 Usage:
     from langgraph_agent.mcp_client import MCPClient
@@ -10,10 +10,11 @@ Usage:
         # List available tools
         tools = await client.list_tools()
 
-        # Call a tool
-        result = await client.call_tool("filesystem_read", {"path": "file.txt"})
+        # Call GraphRAG search
+        result = await client.call_tool("search_knowledge_base", {"query": "Planner agent"})
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -22,8 +23,7 @@ from typing import Any
 class MCPClient:
     """Client for MCP servers (GraphRAG, Filesystem, Git).
 
-    Currently a scaffolding - implements the interface that will connect
-    to actual MCP servers when they are available.
+    Uses local GraphRAG knowledge base when available, falls back to stubs.
     """
 
     def __init__(self, server_urls: list[str] | None = None):
@@ -35,6 +35,7 @@ class MCPClient:
         self.server_urls = server_urls or self._default_servers()
         self._connected = False
         self._tools: dict[str, Any] = {}
+        self._kb = None
 
     def _default_servers(self) -> list[str]:
         """Get default MCP server URLs from environment."""
@@ -48,11 +49,9 @@ class MCPClient:
         return servers
 
     async def connect(self) -> None:
-        """Connect to MCP servers."""
-        # TODO: Implement actual MCP connection
-        # This would use something like:
-        # from mcp import ClientSession
-        # Connect to each server_url and discover tools
+        """Connect to MCP servers and initialize local GraphRAG (lazy)."""
+        # Lazy init GraphRAG - only when actually needed for search
+        self._kb = None
         self._connected = True
         self._tools = self._discover_tools()
 
@@ -60,6 +59,7 @@ class MCPClient:
         """Disconnect from MCP servers."""
         self._connected = False
         self._tools = {}
+        self._kb = None
 
     def _discover_tools(self) -> dict[str, Any]:
         """Discover available tools from connected servers.
@@ -67,18 +67,22 @@ class MCPClient:
         Returns:
             Dict mapping tool names to tool callables
         """
-        # TODO: Actually discover tools from MCP servers
-        # For now, return stub tools
-        return {
-            "graphrag_query": self._stub_graphrag_query,
-            "graphrag_summarize": self._stub_graphrag_summarize,
-            "filesystem_read": self._stub_filesystem_read,
-            "filesystem_write": self._stub_filesystem_write,
-            "git_status": self._stub_git_status,
-            "git_diff": self._stub_git_diff,
-        }
+        tools = {}
 
-    async def list_tools(self) -> list[dict[str, Any]]:
+        # Always provide GraphRAG tools (local or stub)
+        tools["search_knowledge_base"] = self._graphrag_search
+        tools["query_knowledge_graph"] = self._graphrag_query_graph
+        tools["add_to_knowledge_base"] = self._graphrag_add
+
+        # Real filesystem and git tools
+        tools["filesystem_read"] = self._filesystem_read
+        tools["filesystem_write"] = self._filesystem_write
+        tools["git_status"] = self._git_status
+        tools["git_diff"] = self._git_diff
+
+        return tools
+
+    async def list_tools(self) -> list[str]:
         """List all available tools."""
         if not self._connected:
             await self.connect()
@@ -103,38 +107,121 @@ class MCPClient:
         tool_fn = self._tools[tool_name]
         return await tool_fn(arguments)
 
-    # Stub implementations for testing without actual MCP servers
+    # GraphRAG implementations (use local knowledge base when available)
 
-    async def _stub_graphrag_query(self, args: dict) -> dict:
-        """Stub GraphRAG query."""
+    async def _graphrag_search(self, args: dict) -> dict:
+        """Search the knowledge base (lazy init)."""
         query = args.get("query", "")
-        return {
-            "results": [{"content": f"[GraphRAG stub] Found info about: {query}", "score": 0.9}]
-        }
+        top_k = args.get("top_k", 5)
 
-    async def _stub_graphrag_summarize(self, args: dict) -> dict:
-        """Stub GraphRAG summarize."""
-        topic = args.get("topic", "general")
-        return {"summary": f"[GraphRAG stub] Summary of {topic}"}
+        # Lazy init GraphRAG
+        if self._kb is None:
+            try:
+                from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+                self._kb = GraphRAGKnowledgeBase()
+            except Exception:
+                self._kb = None
 
-    async def _stub_filesystem_read(self, args: dict) -> dict:
-        """Stub filesystem read."""
+        if self._kb:
+            results = self._kb.search(query, top_k)
+            return {"results": results, "source": "local_graphrag"}
+        else:
+            return {
+                "results": [{"content": "[GraphRAG not indexed]", "score": 0.0, "id": "no_kb"}],
+                "source": "stub",
+            }
+
+    async def _graphrag_query_graph(self, args: dict) -> dict:
+        """Query the knowledge graph."""
+        entity = args.get("entity", "")
+        hops = args.get("hops", 2)
+
+        if self._kb:
+            result = self._kb.query_graph(entity, hops)
+            result["source"] = "local_graphrag"
+            return result
+        else:
+            return {
+                "entity": entity,
+                "neighbors": [],
+                "subgraph_nodes": 0,
+                "subgraph_edges": 0,
+                "source": "stub",
+                "note": "Run 'python scripts/index_knowledge.py' to build the knowledge base",
+            }
+
+    async def _graphrag_add(self, args: dict) -> dict:
+        """Add a document to the knowledge base."""
+        doc_id = args.get("doc_id", "")
+        content = args.get("content", "")
+        metadata = args.get("metadata", {})
+
+        if self._kb:
+            self._kb.add_document(doc_id, content, metadata)
+            return {"success": True, "doc_id": doc_id, "source": "local_graphrag"}
+        else:
+            return {
+                "success": False,
+                "error": "Knowledge base not initialized",
+                "note": "Run 'python scripts/index_knowledge.py' first",
+            }
+
+    # Real filesystem implementations
+
+    async def _filesystem_read(self, args: dict) -> dict:
+        """Read file contents."""
+        from pathlib import Path
+
         path = args.get("path", "")
-        return {"content": f"[Filesystem stub] Contents of {path}"}
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+            return {"success": True, "content": content, "path": path}
+        except Exception as e:
+            return {"success": False, "error": str(e), "path": path}
 
-    async def _stub_filesystem_write(self, args: dict) -> dict:
-        """Stub filesystem write."""
+    async def _filesystem_write(self, args: dict) -> dict:
+        """Write file contents."""
+        from pathlib import Path
+
         path = args.get("path", "")
         content = args.get("content", "")
-        return {"success": True, "path": path, "bytes_written": len(content)}
+        try:
+            Path(path).write_text(content, encoding="utf-8")
+            return {"success": True, "path": path, "bytes_written": len(content)}
+        except Exception as e:
+            return {"success": False, "error": str(e), "path": path}
 
-    async def _stub_git_status(self, args: dict) -> dict:
-        """Stub git status."""
-        return {"status": "[Git stub] Working tree clean"}
+    # Real git implementations
 
-    async def _stub_git_diff(self, args: dict) -> dict:
-        """Stub git diff."""
-        return {"diff": "[Git stub] No changes"}
+    async def _git_status(self, args: dict) -> dict:
+        """Git status."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return {"success": True, "status": result.stdout or "Working tree clean"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def _git_diff(self, args: dict) -> dict:
+        """Git diff."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", args.get("path", "")],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return {"success": True, "diff": result.stdout or "No changes"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @asynccontextmanager
@@ -144,7 +231,7 @@ async def mcp_client(server_urls: list[str] | None = None):
     Usage:
         async with mcp_client() as client:
             tools = await client.list_tools()
-            result = await client.call_tool("filesystem_read", {"path": "file.txt"})
+            result = await client.call_tool("search_knowledge_base", {"query": "Planner"})
     """
     client = MCPClient(server_urls)
     try:
