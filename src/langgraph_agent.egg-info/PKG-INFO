@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: langgraph-agent
+Version: 0.1.0
+Summary: LangGraph orchestration with Planner, Researcher, Builder nodes
+Requires-Python: >=3.10
+Requires-Dist: langgraph>=0.2.0
+Requires-Dist: langchain-core>=0.3.0
+Requires-Dist: langchain-openai>=0.2.0
+Requires-Dist: langchain-community>=0.3.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21; extra == "dev"
