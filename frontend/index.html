@@ -980,7 +980,9 @@ button.ghost:hover {
     <div class="progress"><div class="progress-bar"></div></div>
   </div>
   <div style="padding: 12px 18px; font: 11px var(--mono); color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 10px;">
-    <div>System LLM: <span id="llm-info" style="color: var(--ink-2)">qwen3:8b</span></div>
+    <div>Planner: <span id="llm-planner" style="color: var(--planner)">moonshot-v1-8k (Kimi)</span></div>
+    <div style="margin-top: 6px;">Researcher: <span id="llm-researcher" style="color: var(--researcher)">gemma4:27b (cloud Ollama)</span></div>
+    <div style="margin-top: 6px;">Builder: <span id="llm-builder" style="color: var(--builder)">qwen3:32b (cloud Ollama)</span></div>
     <div style="margin-top: 6px;">Embedding: <span id="embedding-info" style="color: var(--ink-2)">all-MiniLM-L6-v2</span></div>
     <div style="margin-top: 6px;">GraphRAG: <span id="graphrag-info" style="color: var(--ok)">● indexed</span></div>
   </div>
@@ -1025,7 +1027,9 @@ button.ghost:hover {
         <div class="layer-status">Status: <span id="diag-graphrag" style="color: var(--ok)">● indexed</span></div>
       </div>
       <div class="llm-info-bar">
-        System LLM: <span id="diag-llm">qwen3:8b</span>
+        Planner: <span id="diag-llm-planner">moonshot-v1-8k (Kimi)</span> ·
+        Researcher: <span id="diag-llm-researcher">gemma4:27b (cloud Ollama)</span> ·
+        Builder: <span id="diag-llm-builder">qwen3:32b (cloud Ollama)</span>
       </div>
     </div>
     
@@ -1598,13 +1602,21 @@ async function pollStatus() {
     if (response.ok) {
       const status = await response.json();
       // Update sidebar
-      $("#llm-info").textContent = status.llm || "unknown";
+      const agents = status.agents || {};
+      const planner = agents.planner || {};
+      const researcher = agents.researcher || {};
+      const builder = agents.builder || {};
+      $("#llm-planner").textContent = planner.model || status.llm || "unknown";
+      $("#llm-researcher").textContent = researcher.model || status.llm || "unknown";
+      $("#llm-builder").textContent = builder.model || status.llm || "unknown";
       $("#embedding-info").textContent = status.embedding || "all-MiniLM-L6-v2";
       $("#graphrag-info").innerHTML = status.graphrag ?
         '<span style="color: var(--ok)">● indexed</span>' :
         '<span style="color: var(--warn)">● not indexed</span>';
       // Update architecture diagram
-      $("#diag-llm").textContent = status.llm || "unknown";
+      $("#diag-llm-planner").textContent = planner.model || status.llm || "unknown";
+      $("#diag-llm-researcher").textContent = researcher.model || status.llm || "unknown";
+      $("#diag-llm-builder").textContent = builder.model || status.llm || "unknown";
       $("#diag-embedding").textContent = status.embedding || "all-MiniLM-L6-v2";
       $("#diag-graphrag").innerHTML = status.graphrag ?
         '<span style="color: var(--ok)">● indexed</span>' :

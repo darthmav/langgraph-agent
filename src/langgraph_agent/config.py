@@ -1,4 +1,9 @@
-"""Configuration and LLM setup."""
+"""Configuration and LLM setup.
+
+Supports per-agent LLM selection so Planner, Researcher, and Builder can each
+use a different model/provider. Falls back to the legacy single-model config
+when per-agent variables are not set.
+"""
 
 import os
 import re
@@ -11,26 +16,40 @@ from pydantic import SecretStr
 load_dotenv()
 
 
+# Default model per (provider, agent) when a per-agent provider is configured
+# but no model is supplied.
+_DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
+    ("kimi", "planner"): "moonshot-v1-8k",    # main architect / planner
+    ("ollama", "researcher"): "gemma4:27b",  # science & dev research
+    ("ollama", "builder"): "qwen3:32b",       # code evaluation / builder
+}
+
+
 def get_llm(
-    provider: Literal["openai", "anthropic", "ollama"] | None = None,
+    provider: Literal["openai", "anthropic", "ollama", "kimi"] | None = None,
     model: str | None = None,
     temperature: float = 0.1,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> Any:
-    """Get LLM instance.
+    """Get an LLM instance.
 
     Args:
-        provider: LLM provider ("openai", "anthropic", "ollama").
-                  Auto-detected from model name if not specified.
-        model: Model name (default from env: OPENAI_MODEL, ANTHROPIC_MODEL, etc.)
-        temperature: Sampling temperature
+        provider: LLM provider ("openai", "anthropic", "ollama", "kimi").
+                  Auto-detected from model name/env if not specified.
+        model: Model name (default from provider-specific env var).
+        temperature: Sampling temperature.
+        base_url: Optional API base URL override.
+        api_key: Optional API key override.
 
     Returns:
-        Chat model instance
+        Chat model instance.
 
     Environment variables:
         OPENAI_API_KEY, OPENAI_MODEL
         ANTHROPIC_API_KEY, ANTHROPIC_MODEL
         OLLAMA_BASE_URL, OLLAMA_MODEL
+        KIMI_API_KEY, KIMI_MODEL, KIMI_BASE_URL
     """
     provider = provider or _detect_provider(model)
 
@@ -38,39 +57,65 @@ def get_llm(
         from langchain_anthropic import ChatAnthropic
 
         model_name = model or os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
+        key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        if not key:
             return StubLLM()
-        return ChatAnthropic(
-            model=model_name,
-            temperature=temperature,
-            api_key=SecretStr(api_key),
-        )  # type: ignore[call-arg]
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "temperature": temperature,
+            "api_key": SecretStr(key),
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        return ChatAnthropic(**kwargs)
 
-    elif provider == "ollama":
+    if provider == "ollama":
         from langchain_ollama import ChatOllama
 
         model_name = model or os.getenv("OLLAMA_MODEL", "qwen3:8b")
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(model=str(model_name), temperature=temperature, base_url=base_url)
+        base_url_val = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        return ChatOllama(
+            model=str(model_name), temperature=temperature, base_url=base_url_val
+        )
 
-    else:  # openai (default)
+    if provider == "kimi":
         from langchain_openai import ChatOpenAI
 
-        model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        # Kimi (Moonshot) uses an OpenAI-compatible API.
+        model_name = model or os.getenv("KIMI_MODEL", "moonshot-v1-8k")
+        key = api_key or os.getenv("KIMI_API_KEY")
+        if not key:
             return StubLLM()
+        url = base_url or os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
         return ChatOpenAI(
             model=str(model_name),
             temperature=temperature,
-            api_key=SecretStr(api_key),
+            api_key=SecretStr(key),
+            base_url=url,
         )
 
+    # openai (default)
+    from langchain_openai import ChatOpenAI
 
-def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollama"]:
+    model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    key = api_key or os.getenv("OPENAI_API_KEY")
+    if not key:
+        return StubLLM()
+    kwargs = {
+        "model": str(model_name),
+        "temperature": temperature,
+        "api_key": SecretStr(key),
+    }
+    if base_url:
+        kwargs["base_url"] = base_url
+    return ChatOpenAI(**kwargs)
+
+
+def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollama", "kimi"]:
     """Detect provider from model name or environment."""
     # Check environment variables first
+    if os.getenv("KIMI_API_KEY") or os.getenv("KIMI_MODEL"):
+        return "kimi"
     if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_MODEL"):
         return "ollama"
     if os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_MODEL"):
@@ -82,11 +127,92 @@ def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollam
     if not model:
         return "ollama"  # Default to local Ollama
     model_lower = model.lower()
+    if "moonshot" in model_lower or "kimi" in model_lower:
+        return "kimi"
     if "claude" in model_lower:
         return "anthropic"
     if "llama" in model_lower or "mistral" in model_lower or "qwen" in model_lower:
         return "ollama"
     return "openai"
+
+
+def get_agent_llm(
+    agent: Literal["planner", "researcher", "builder"],
+    temperature: float = 0.1,
+) -> Any:
+    """Get the LLM configured for a specific agent role.
+
+    Reads per-agent environment variables:
+        PLANNER_PROVIDER, PLANNER_MODEL, PLANNER_BASE_URL, PLANNER_API_KEY
+        RESEARCHER_PROVIDER, RESEARCHER_MODEL, RESEARCHER_BASE_URL, RESEARCHER_API_KEY
+        BUILDER_PROVIDER, BUILDER_MODEL, BUILDER_BASE_URL, BUILDER_API_KEY
+
+    Falls back to the legacy single-model configuration when per-agent variables
+    are not set, preserving backward compatibility.
+
+    Recommended 3-model setup:
+        Planner    -> Kimi cloud           (main architect / structural planning)
+        Researcher -> Gemma4 via Ollama    (science & dev research)
+        Builder    -> Qwen via Ollama      (code evaluation / implementation)
+    """
+    prefix = agent.upper()
+    provider = os.getenv(f"{prefix}_PROVIDER")
+    model = os.getenv(f"{prefix}_MODEL")
+    base_url = os.getenv(f"{prefix}_BASE_URL")
+    api_key = os.getenv(f"{prefix}_API_KEY")
+
+    per_agent_configured = bool(provider or model)
+
+    if not per_agent_configured:
+        # Legacy single-model fallback: every agent uses the same provider/model.
+        provider = _detect_provider(None)
+        model = None
+    elif not model and provider:
+        # Per-agent provider was explicitly chosen; apply a sensible default
+        # model for that provider + agent combination.
+        model = _DEFAULT_AGENT_MODELS.get((provider, agent))
+
+    return get_llm(
+        provider=provider,  # type: ignore[arg-type]
+        model=model,
+        temperature=temperature,
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+
+def get_agent_model_info(
+    agent: Literal["planner", "researcher", "builder"],
+) -> dict[str, str]:
+    """Resolve the configured provider/model name for an agent without instantiating an LLM.
+
+    Mirrors the fallback logic of `get_agent_llm()` so the UI can display the
+    model each agent will use.
+    """
+    prefix = agent.upper()
+    provider = os.getenv(f"{prefix}_PROVIDER")
+    model = os.getenv(f"{prefix}_MODEL")
+
+    per_agent_configured = bool(provider or model)
+
+    if not per_agent_configured:
+        provider = _detect_provider(None)
+        model = None
+    elif not model and provider:
+        model = _DEFAULT_AGENT_MODELS.get((provider, agent))
+
+    # Fallback to provider-specific global defaults if no per-agent default applies.
+    if not model:
+        if provider == "kimi":
+            model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
+        elif provider == "ollama":
+            model = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+        elif provider == "anthropic":
+            model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        else:
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    return {"provider": provider or "ollama", "model": model}
 
 
 class StubLLM:

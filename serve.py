@@ -20,6 +20,7 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from langgraph_agent import create_agent_graph, AgentState
+from langgraph_agent.config import get_agent_model_info
 from langgraph_agent.graphrag_server import get_knowledge_base
 
 # Initialize graph and knowledge base
@@ -50,6 +51,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "llm": os.getenv("OLLAMA_MODEL", "qwen3:8b"),
                 "embedding": embedding_model,
                 "graphrag": kb_indexed,
+                "agents": {
+                    "planner": get_agent_model_info("planner"),
+                    "researcher": get_agent_model_info("researcher"),
+                    "builder": get_agent_model_info("builder"),
+                },
             })
         elif parsed.path == '/' or parsed.path == '/index.html':
             self.path = '/index.html'

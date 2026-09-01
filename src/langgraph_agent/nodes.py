@@ -12,7 +12,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from langgraph_agent.config import get_llm
+from langgraph_agent.config import get_agent_llm
 from langgraph_agent.mcp_client import mcp_client
 from langgraph_agent.state import AgentState, ResearchStatus
 
@@ -351,7 +351,7 @@ def planner_node(state: AgentState) -> AgentState:
         HumanMessage(content=f"{state_injection}\n\nUser goal: {goal}"),
     ]
 
-    llm = get_llm()
+    llm = get_agent_llm("planner")
     response = llm.invoke(messages)
 
     # Parse the structured output
@@ -458,7 +458,7 @@ def researcher_node(state: AgentState) -> AgentState:
             HumanMessage(content=f"{state_injection}\n\nPlan to research:\n{plan}"),
         ]
 
-        llm = get_llm()
+        llm = get_agent_llm("researcher")
         response = llm.invoke(messages)
         research_findings = response.content
 
@@ -597,7 +597,7 @@ def builder_node(state: AgentState) -> AgentState:
             ),
         ]
 
-        llm = get_llm()
+        llm = get_agent_llm("builder")
         response = llm.invoke(messages)
         parsed = _parse_builder_output(response.content)
 

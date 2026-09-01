@@ -11,11 +11,18 @@ Verifies:
 import pytest
 
 from langgraph_agent import AgentState, ResearchStatus, create_agent_graph
+from langgraph_agent.config import StubLLM
 
 
 @pytest.fixture
-def agent_graph():
-    """Create a fresh agent graph for testing."""
+def agent_graph(monkeypatch):
+    """Create a fresh agent graph for testing using the deterministic StubLLM."""
+    # Force every agent node to use the canned StubLLM so tests do not depend
+    # on a live Ollama server or cloud API keys.
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: StubLLM(),
+    )
     return create_agent_graph()
 
 
