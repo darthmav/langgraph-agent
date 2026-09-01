@@ -3,2056 +3,702 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ambiguity 3-Agent Console</title>
+<title>Ambiguity console</title>
 <style>
-:root {
-  /* Base palette - dark, professional */
-  --bg: #0a0b0d;
-  --bg-2: #101216;
-  --bg-3: #15181e;
-  --line: #1e232c;
-  --line-2: #2a313d;
-  --ink: #dde3ec;
-  --ink-2: #8b95a6;
-  --ink-3: #5a6474;
-  
-  /* Agent-specific colors - revamped for Part 2 */
-  --planner: #4ea3ff;      /* Blue - strategic thinking */
-  --researcher: #76d13a;   /* Green - knowledge gathering */
-  --builder: #ff6a8a;      /* Pink/red - execution */
-  
-  /* Status colors */
-  --ok: #4ade80;
-  --warn: #fbbf24;
-  --err: #f87171;
-  
-  /* Gradients for Part 2 pop */
-  --gradient-1: linear-gradient(135deg, #4ea3ff 0%, #76d13a 50%, #ff6a8a 100%);
-  --gradient-2: linear-gradient(90deg, #4ea3ff, #76d13a, #ff6a8a, #4ea3ff);
-  --glow-planner: 0 0 20px #4ea3ff44, 0 0 40px #4ea3ff22;
-  --glow-researcher: 0 0 20px #76d13a44, 0 0 40px #76d13a22;
-  --glow-builder: 0 0 20px #ff6a8a44, 0 0 40px #ff6a8a22;
-  
-  /* Typography */
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+:root{
+  --bg:#0a0b0d; --bg-2:#101216; --bg-3:#15181e; --line:#1e232c; --line-2:#2a313d;
+  --ink:#dde3ec; --ink-2:#8b95a6; --ink-3:#5a6474;
+  --accent:#4ea3ff; --doc:#76d13a; --violet:#b48cff; --amber:#ffb454;
+  --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --architect:#f2b544; --planner:#4ea3ff; --researcher:#76d13a; --builder:#ff6a8a;
+  --user-msg:#1e3a5f; --danger:#ff7a6a;
 }
-
-* { box-sizing: border-box; margin: 0; padding: 0; }
-
-html, body {
-  height: 100%;
-  background: var(--bg);
-  color: var(--ink);
-  font: 14px/1.5 var(--sans);
-  overflow: hidden;
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--ink); font:14px/1.5 var(--sans);
+  display:grid; grid-template-columns:190px 1fr; grid-template-rows:44px auto 1fr;
+  grid-template-areas:"brand top" "warn warn" "crew main";
+  overflow:hidden;
 }
-
-/* Animated background gradient */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  opacity: 0.4;
+body::before{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:.5;
   background:
-    radial-gradient(1200px 600px at 10% -20%, #14304a55, transparent 60%),
-    radial-gradient(1000px 500px at 110% 120%, #3a1f4d44, transparent 60%),
-    radial-gradient(800px 400px at 50% 50%, #144a3a22, transparent 50%);
-  animation: bg-shift 20s ease-in-out infinite;
-}
-
-@keyframes bg-shift {
-  0%, 100% { opacity: 0.4; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(1.05); }
-}
-
-/* Layout */
-body {
-  display: grid;
-  grid-template-columns: 180px 1fr;
-  grid-template-rows: 52px auto 1fr;
-  grid-template-areas:
-    "brand top"
-    "warn warn"
-    "crew main";
-  overflow: hidden;
-  position: relative;
-  z-index: 1;
-}
-
-/* Brand */
-#brand {
-  grid-area: brand;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 18px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-2);
-  position: relative;
-  z-index: 2;
-}
-
-#brand b {
-  font: 700 14px var(--mono);
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  background: var(--gradient-1);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: text-shimmer 8s linear infinite;
-}
-
-@keyframes text-shimmer {
-  0% { background-position: 0% 50%; }
-  100% { background-position: 200% 50%; }
-}
-
-#brand span {
-  font: 11px var(--mono);
-  color: var(--ink-3);
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-}
-
-.pulse {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 0 0 var(--ok);
-  animation: pulse 2.6s infinite;
-}
-
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 #4ade8099; }
-  70% { box-shadow: 0 0 0 10px #4ade8000; }
-  100% { box-shadow: 0 0 0 0 #4ade8000; }
-}
-
-/* Top bar */
-#top {
-  grid-area: top;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-2);
-  position: relative;
-  z-index: 2;
-}
-
-.tab {
-  appearance: none;
-  background: none;
-  border: 0;
-  color: var(--ink-3);
-  cursor: pointer;
-  font: 600 11px var(--mono);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  padding: 8px 14px;
-  border-radius: 6px;
-  transition: all 0.2s;
-  position: relative;
-  overflow: hidden;
-}
-
-.tab[data-p="overview"] { color: #b48cff; }
-.tab[data-p="planner"] { color: var(--planner); }
-.tab[data-p="researcher"] { color: var(--researcher); }
-.tab[data-p="builder"] { color: var(--builder); }
-.tab[data-p="state"] { color: var(--ink-2); }
-.tab[data-p="graph"] { color: #b48cff; }
-.tab[data-p="interactive"] { color: #4ade80; }
-.tab[data-p="stream"] { color: #fbbf24; }
-
-.tab::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 50%;
-  width: 0;
-  height: 2px;
-  background: currentColor;
-  transform: translateX(-50%);
-  transition: width 0.2s;
-}
-
-.tab:hover {
-  color: var(--ink-2);
-  background: #ffffff08;
-}
-
-.tab:hover::after {
-  width: 60%;
-}
-
-.tab[aria-selected="true"] {
-  color: var(--ink);
-  background: #ffffff0f;
-  box-shadow: inset 0 0 0 1px var(--line-2);
-}
-
-.tab[aria-selected="true"]::after {
-  width: 80%;
-}
-
-/* Animated rainbow for active tab */
-.tab.active-rainbow {
-  background-image: var(--gradient-2);
-  background-size: 300% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: rainbow 6s linear infinite;
-}
-
-@keyframes rainbow {
-  0% { background-position: 0% 50%; }
-  100% { background-position: 300% 50%; }
-}
-
-#stats {
-  font: 11px var(--mono);
-  color: var(--ink-3);
-  display: flex;
-  gap: 18px;
-  margin-left: auto;
-}
-
-#stats b {
-  color: var(--ink-2);
-  font-weight: 600;
-}
-
-/* Crew sidebar */
-#crew {
-  grid-area: crew;
-  border-right: 1px solid var(--line);
-  background: var(--bg-2);
-  overflow-y: auto;
-  position: relative;
-  z-index: 2;
-}
-
-.hd {
-  font: 600 10px var(--mono);
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  padding: 14px 18px 10px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.agent-card {
-  margin: 0 12px 10px;
-  padding: 12px 13px;
-  border-radius: 10px;
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--agent-color, var(--ink-3));
-  cursor: pointer;
-  transition: all 0.2s;
-  position: relative;
-  overflow: hidden;
-}
-
-.agent-card::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--agent-color, transparent), transparent);
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-.agent-card:hover::before {
-  opacity: 1;
-}
-
-.agent-card:hover {
-  border-color: var(--line-2);
-  border-left-color: var(--agent-color, var(--ink-3));
-  transform: translateX(3px);
-  box-shadow: 0 4px 12px #00000044;
-}
-
-.agent-card.active {
-  background: #ffffff0d;
-  box-shadow: 0 0 0 1px var(--agent-color, var(--line-2)) inset, 0 4px 16px #00000066;
-}
-
-.agent-card .name {
-  font: 600 14px var(--sans);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--agent-color, var(--ink));
-}
-
-.agent-card .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--agent-color, var(--ink-3));
-  flex: none;
-  box-shadow: 0 0 8px var(--agent-color, transparent);
-}
-
-.agent-card .status {
-  font: 11px var(--mono);
-  color: var(--ink-3);
-  margin-top: 4px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.agent-card .status-badge {
-  font: 9px var(--mono);
-  letter-spacing: 0.08em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #ffffff0d;
-  color: var(--ink-2);
-  border: 1px solid var(--line);
-}
-
-.agent-card .progress {
-  margin-top: 8px;
-  height: 3px;
-  background: #ffffff10;
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.agent-card .progress-bar {
-  height: 100%;
-  background: var(--agent-color, var(--ink-3));
-  width: 0%;
-  transition: width 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-/* Main content */
-#main {
-  grid-area: main;
-  overflow: hidden;
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-}
-
-.panel {
-  display: none;
-  flex: 1;
-  overflow: auto;
-  padding: 20px;
-}
-
-.panel.on {
-  display: flex;
-  flex-direction: column;
-}
-
-/* Panel headers */
-.panel h2 {
-  font: 600 11px var(--mono);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.panel h2::before {
-  content: "";
-  width: 3px;
-  height: 14px;
-  background: var(--gradient-1);
-  border-radius: 2px;
-}
-
-/* Action bar */
-.bar {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-input, textarea, select {
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  padding: 10px 13px;
-  border-radius: 8px;
-  font: 13px var(--sans);
-  outline: none;
-  transition: all 0.2s;
-}
-
-input:focus, textarea:focus, select:focus {
-  border-color: var(--planner);
-  box-shadow: 0 0 0 3px #4ea3ff1a;
-}
-
-input::placeholder {
-  color: var(--ink-3);
-}
-
-.grow {
-  flex: 1;
-  min-width: 200px;
-}
-
-button.go {
-  background: var(--planner);
-  color: #04121f;
-  border: 0;
-  padding: 10px 18px;
-  border-radius: 8px;
-  font: 600 12px var(--sans);
-  cursor: pointer;
-  transition: all 0.2s;
-  white-space: nowrap;
-  box-shadow: 0 2px 8px #4ea3ff33;
-}
-
-button.go:hover {
-  filter: brightness(1.15);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px #4ea3ff44;
-}
-
-button.go:disabled {
-  opacity: 0.5;
-  cursor: default;
-  transform: none;
-}
-
-button.go.planner { background: var(--planner); box-shadow: 0 2px 8px #4ea3ff33; }
-button.go.researcher { background: var(--researcher); box-shadow: 0 2px 8px #76d13a33; }
-button.go.builder { background: var(--builder); box-shadow: 0 2px 8px #ff6a8a33; }
-
-select.llm-select {
-  width: 100%;
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  padding: 10px 13px;
-  border-radius: 8px;
-  font: 13px var(--sans);
-  outline: none;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-select.llm-select:focus {
-  border-color: var(--planner);
-  box-shadow: 0 0 0 3px #4ea3ff1a;
-}
-
-button.ghost {
-  background: none;
-  border: 1px solid var(--line);
-  color: var(--ink-2);
-  box-shadow: none;
-}
-
-button.ghost:hover {
-  border-color: var(--line-2);
-  color: var(--ink);
-  transform: none;
-}
-
-/* State display */
-.state-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 14px;
-  margin-bottom: 20px;
-}
-
-.state-card {
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 14px 16px;
-  position: relative;
-  overflow: hidden;
-}
-
-.state-card::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--gradient-1);
-}
-
-.state-card h3 {
-  font: 600 11px var(--mono);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: 8px;
-}
-
-.state-card .value {
-  font: 13px var(--sans);
-  color: var(--ink-2);
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* Messages/Log */
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  min-height: 300px;
-}
-
-.msg {
-  padding: 10px 14px;
-  border-radius: 8px;
-  font: 12.5px var(--sans);
-  line-height: 1.5;
-  max-width: 85%;
-  animation: msg-in 0.3s ease-out;
-}
-
-@keyframes msg-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.msg.planner {
-  background: #14304a;
-  border-left: 3px solid var(--planner);
-  align-self: flex-start;
-}
-
-.msg.researcher {
-  background: #1a3a14;
-  border-left: 3px solid var(--researcher);
-  align-self: flex-start;
-}
-
-.msg.builder {
-  background: #3a1420;
-  border-left: 3px solid var(--builder);
-  align-self: flex-end;
-}
-
-.msg.system {
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  color: var(--ink-3);
-  font: 11px var(--mono);
-  align-self: center;
-  max-width: 100%;
-}
-
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #ffffff12;
-  border-radius: 5px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-/* Warning banner */
-#warn {
-  grid-area: warn;
-  display: none;
-  background: #3a1618;
-  border-bottom: 1px solid #f8717155;
-  padding: 10px 16px;
-  font: 12px var(--mono);
-  color: #ffb4b4;
-}
-
-/* Architecture Diagram */
-.architecture-diagram {
-  background: #0d1117;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 20px;
-  margin-bottom: 20px;
-}
-
-.flow-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.flow-node {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 14px 18px;
-  background: #161b22;
-  border: 2px solid var(--line);
-  border-radius: 10px;
-  min-width: 120px;
-  transition: all 0.3s;
-}
-
-.flow-node.planner-node { border-color: var(--planner); }
-.flow-node.researcher-node { border-color: var(--researcher); }
-.flow-node.builder-node { border-color: var(--builder); }
-
-.flow-node.active {
-  background: #1c2128;
-  box-shadow: 0 0 20px rgba(0, 100, 255, 0.2);
-  transform: scale(1.05);
-}
-
-.flow-node .node-icon {
-  font-size: 28px;
-  margin-bottom: 6px;
-}
-
-.flow-node .node-name {
-  font: 600 14px var(--sans);
-  color: var(--ink);
-  margin-bottom: 4px;
-}
-
-.flow-node .node-desc {
-  font: 10px var(--mono);
-  color: var(--ink-3);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.flow-arrow {
-  font-size: 24px;
-  color: var(--ink-3);
-  opacity: 0.5;
-}
-
-.feedback-loop {
-  text-align: center;
-  font: 10px var(--mono);
-  color: var(--ink-3);
-  margin: 12px 0;
-  padding: 6px;
-  background: #ffffff05;
-  border-radius: 6px;
-}
-
-.knowledge-layer {
-  background: #1a1f26;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 14px 18px;
-  margin-top: 16px;
-}
-
-.layer-title {
-  font: 600 11px var(--mono);
-  color: var(--ink-2);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-bottom: 12px;
-  text-align: center;
-}
-
-.layer-components {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  font: 11px var(--sans);
-  color: var(--ink-3);
-  flex-wrap: wrap;
-}
-
-.layer-components .component {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.layer-components .separator {
-  color: var(--line);
-  opacity: 0.5;
-}
-
-.layer-status {
-  text-align: center;
-  font: 10px var(--mono);
-  color: var(--ink-3);
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--line);
-}
-
-.llm-info-bar {
-  text-align: center;
-  font: 10px var(--mono);
-  color: var(--ink-3);
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
-
-.llm-info-bar #diag-llm {
-  color: var(--ink-2);
-  font-weight: 500;
-}
-
-/* Loading spinner */
-.spinner {
-  width: 20px;
-  height: 20px;
-  border: 2px solid #ffffff10;
-  border-top-color: var(--planner);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* Graph Panel */
-#agent-graph {
-  width: 100%;
-  max-width: 960px;
-  height: auto;
-  min-height: 360px;
-  flex: 1;
-  background: #0d1117;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: inset 0 0 40px #00000066;
-}
-
-.graph-hint {
-  font: 11px var(--mono);
-  color: var(--ink-3);
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: #ffffff05;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-}
-
-.graph-node rect,
-.graph-node circle {
-  fill: #11151c;
-  stroke: var(--line-2);
-  stroke-width: 2;
-  transition: all 0.3s ease;
-}
-
-.graph-node text {
-  text-anchor: middle;
-  font-family: var(--sans);
-  pointer-events: none;
-  fill: var(--ink-2);
-  transition: all 0.3s ease;
-}
-
-.graph-node .icon {
-  font-size: 22px;
-}
-
-.graph-node .label {
-  font-size: 13px;
-  font-weight: 600;
-  fill: var(--ink);
-}
-
-.graph-node .sublabel {
-  font-size: 9px;
-  font-family: var(--mono);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  fill: var(--ink-3);
-}
-
-#node-planner rect { stroke: var(--planner); }
-#node-researcher rect { stroke: var(--researcher); }
-#node-builder rect { stroke: var(--builder); }
-#node-end circle { stroke: #b48cff; }
-#node-kb rect { stroke: #8b95a6; }
-
-#node-planner.active rect { fill: #14304a; filter: url(#glow-planner); }
-#node-researcher.active rect { fill: #1a3a14; filter: url(#glow-researcher); }
-#node-builder.active rect { fill: #3a1420; filter: url(#glow-builder); }
-#node-end.active circle { fill: #261638; stroke: #d8b4fe; }
-
-.graph-node.active text { fill: var(--ink); }
-.graph-node.active .sublabel { fill: var(--ink-2); }
-
-.edge {
-  fill: none;
-  stroke: var(--line-2);
-  stroke-width: 2.5;
-  marker-end: url(#arrow);
-  transition: stroke 0.3s, stroke-width 0.3s;
-}
-
-.edge.feedback {
-  stroke-dasharray: 6 4;
-}
-
-.edge.kb {
-  stroke-dasharray: 4 4;
-  marker-end: none;
-}
-
-.edge.active {
-  stroke: url(#edge-gradient);
-  stroke-width: 3.5;
-  marker-end: url(#arrow-active);
-  animation: dash-flow 1.2s linear infinite;
-}
-
-.edge.feedback.active {
-  stroke: var(--warn);
-  stroke-width: 3;
-}
-
-.edge.kb.active {
-  stroke: var(--researcher);
-  marker-end: url(#arrow-active);
-}
-
-@keyframes dash-flow {
-  to { stroke-dashoffset: -20; }
-}
-
-.graph-caption {
-  font: 10px var(--mono);
-  fill: var(--ink-3);
-}
-
-#interactive-graph {
-  width: 100%;
-  max-width: 960px;
-  flex: 1;
-  min-height: 360px;
-  background: #0d1117;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: inset 0 0 40px #00000066;
-  cursor: grab;
-}
-
-#interactive-graph:active {
-  cursor: grabbing;
-}
-
-#stream-layout {
-  display: grid;
-  grid-template-columns: 1fr 340px;
-  gap: 16px;
-  flex: 1;
-  min-height: 0;
-}
-
-#stream-diagram {
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  overflow: hidden;
-}
-
-#stream-arrows {
-  width: 100%;
-  height: auto;
-  min-height: 140px;
-  position: absolute;
-  top: 50%;
-  left: 0;
-  transform: translateY(-40%);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.stream-node {
-  position: relative;
-  z-index: 1;
-  background: var(--bg-3);
-}
-
-.stream-node.active {
-  transform: scale(1.08);
-  box-shadow: 0 0 30px #4ea3ff33;
-}
-
-#stream-log {
-  max-height: none;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-}
-
-@media (max-width: 900px) {
-  #stream-layout { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
-  #stream-log { max-height: 220px; }
-}
-
-@media (max-width: 700px) {
-  #agent-graph { min-height: 280px; }
-}
+    radial-gradient(1100px 500px at 18% -10%, #14304a55, transparent 60%),
+    radial-gradient(900px 460px at 100% 110%, #3a1f4d44, transparent 60%);
+}
+#brand{
+  grid-area:brand; display:flex; align-items:center; gap:9px; padding:0 16px;
+  border-right:1px solid var(--line); border-bottom:1px solid var(--line);
+  background:var(--bg-2); position:relative; z-index:1;
+}
+#brand b{font:600 13px var(--mono); letter-spacing:.14em; text-transform:uppercase}
+#brand span.sub{font:10px var(--mono); color:var(--ink-3); letter-spacing:.18em}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 var(--ok);animation:p 2.6s infinite}
+.pulse.off{background:var(--err);animation:none}
+@keyframes p{0%{box-shadow:0 0 0 0 #4ade8099}70%{box-shadow:0 0 0 7px #4ade8000}100%{box-shadow:0 0 0 0 #4ade8000}}
+
+#top{
+  grid-area:top; display:flex; align-items:center; gap:4px; padding:0 14px;
+  border-bottom:1px solid var(--line); background:var(--bg-2); position:relative; z-index:1;
+}
+.tab{
+  appearance:none; background:none; border:0; color:var(--ink-3); cursor:pointer;
+  font:11px var(--mono); letter-spacing:.13em; text-transform:uppercase;
+  padding:7px 13px; border-radius:5px; transition:.15s;
+}
+.tab[data-p="graph"]{color:var(--violet)}
+.tab[data-p="retrieval"]{color:#7fe0a8}
+.tab[data-p="corpus"]{color:var(--err)}
+.tab[data-p="state"]{color:var(--ink-3)}
+.tab[data-p="engineer"]{color:var(--amber)}
+.tab:hover{background:#ffffff08;color:var(--ink)}
+.tab[aria-selected="true"]{background:#ffffff10;color:var(--ink)}
+#stats{margin-left:auto;display:flex;gap:14px;font:11px var(--mono);color:var(--ink-3)}
+#stats b{color:var(--ink-2);font-weight:600}
+
+#warn{
+  grid-area:warn; display:none; background:#3a1618; border-bottom:1px solid #f8717155;
+  padding:8px 14px; font:12px var(--mono); color:#ffb4b4; position:relative; z-index:1;
+}
+#warn code{background:#00000040;padding:1px 5px;border-radius:3px}
+
+#crew{
+  grid-area:crew; border-right:1px solid var(--line); background:var(--bg-2);
+  overflow-y:auto; position:relative; z-index:1;
+}
+#crew .hd{
+  display:flex;justify-content:space-between;padding:12px 16px 9px;
+  font:10px var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);
+}
+.seat{
+  margin:0 10px 8px; padding:9px 10px; background:var(--bg-3);
+  border:1px solid var(--line); border-left:3px solid var(--role,var(--ink-3));
+  border-radius:8px; transition:.15s;
+}
+.seat:hover{transform:translateX(2px)}
+.seat .nm{display:flex;align-items:center;gap:6px;font:10px var(--mono);
+  letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);margin-bottom:6px}
+.seat .dot{width:5px;height:5px;border-radius:50%;background:var(--role,var(--ink-3));flex:none}
+.seat select{width:100%;font:10px var(--mono);padding:4px 5px;background:var(--bg-2);
+  color:var(--accent);border:1px solid var(--line);border-radius:5px;cursor:pointer}
+.seat .plc{margin-top:5px;font:9px var(--mono);letter-spacing:.12em;color:var(--ink-3)}
+.seat .chip{display:inline-block;margin-top:5px;padding:1px 5px;border-radius:4px;
+  font:9px var(--mono);letter-spacing:.1em;background:#ffffff10;color:var(--ink-3)}
+.seat .chip.bad{background:#f8717122;color:#ffb4b4}
+#embed{padding:10px 16px 18px;font:10px var(--mono);color:var(--amber);line-height:1.6}
+#embed span{color:var(--ink-2)}
+
+#main{grid-area:main;position:relative;z-index:1;overflow:hidden}
+.panel{display:none;height:100%;padding:16px;flex-direction:column;overflow:hidden}
+.panel.on{display:flex}
+h2{font:10px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);margin-bottom:9px}
+
+.bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;flex:none}
+input,textarea,select{
+  background:var(--bg-3);border:1px solid var(--line);color:var(--ink);
+  border-radius:7px;padding:7px 10px;font:12px var(--mono);outline:none;
+}
+input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px #4ea3ff1a}
+.grow{flex:1;min-width:120px}
+button.go{
+  appearance:none;background:var(--accent);border:0;color:#04121f;cursor:pointer;
+  font:600 11px var(--sans);padding:7px 14px;border-radius:7px;transition:.15s;
+}
+button.go:hover{filter:brightness(1.12)}
+button.go.ghost{background:#ffffff12;color:var(--ink-2)}
+button.go.danger{background:#b3413a;color:#fff}
+button.go:disabled{opacity:.5;cursor:not-allowed}
+
+/* ---- graph ---- */
+#gwrap{flex:1;position:relative;border:1px solid var(--line);border-radius:10px;
+  background:linear-gradient(var(--bg-2),var(--bg-2)) padding-box,var(--bg-3);overflow:hidden}
+#gwrap::before{content:"";position:absolute;inset:0;opacity:.35;
+  background-image:linear-gradient(#ffffff06 1px,transparent 1px),linear-gradient(90deg,#ffffff06 1px,transparent 1px);
+  background-size:26px 26px}
+#g{width:100%;height:100%;display:block;position:relative}
+#g .edge{stroke:#3a4453;stroke-width:1}
+#g .edge.mentions{stroke:#4ea3ff44;stroke-dasharray:3 3}
+#g .node circle{cursor:grab;transition:r .15s}
+#g .node:hover circle{r:11}
+#g .node text{font:10px var(--mono);fill:var(--ink-2);pointer-events:none;
+  paint-order:stroke;stroke:var(--bg-3);stroke-width:3px;stroke-linejoin:round}
+/* Entities outnumber documents several times over and their labels pile into
+   an unreadable stack. Label documents always, reveal an entity on hover. */
+#g .node.entity text{opacity:0;transition:opacity .12s}
+#g .node.entity:hover text{opacity:1}
+#g .node:hover text{fill:var(--ink)}
+.gempty{position:absolute;inset:0;display:grid;place-items:center;color:var(--ink-3);
+  font:12px var(--mono);text-align:center;padding:30px;line-height:1.8}
+.gempty code{background:#ffffff10;padding:2px 6px;border-radius:4px;color:var(--ink-2)}
+
+/* ---- split panes ---- */
+.split{display:grid;grid-template-columns:1fr 1fr;gap:14px;flex:1;min-height:0}
+.col{display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.scroll{overflow-y:auto;flex:1;min-height:0}
+
+/* ---- retrieval ---- */
+.hit{background:var(--bg-3);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px}
+.hit .t{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--ink-2);margin-bottom:6px}
+.hit .sc{color:var(--doc)}
+.hit .barw{height:3px;background:#ffffff10;border-radius:2px;overflow:hidden;margin-bottom:7px}
+.hit .barf{height:100%;background:linear-gradient(90deg,#4ea3ff,#76d13a);width:0;transition:width .5s}
+.hit p{font:11px/1.6 var(--mono);color:var(--ink-3);white-space:pre-wrap;word-break:break-word}
+#tele .hd{display:flex;justify-content:space-between;font:10px var(--mono);
+  letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);margin-bottom:8px}
+#clr{cursor:pointer}
+.ev{display:flex;gap:8px;font:10px var(--mono);padding:3px 0;border-bottom:1px solid #ffffff08}
+.ev .tm{color:var(--ink-3);flex:none}
+.ev .nm{flex:1;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ev .d{color:var(--ok);flex:none}
+.ev.bad .nm,.ev.bad .d{color:var(--err)}
+
+/* ---- corpus ---- */
+.doc{display:flex;justify-content:space-between;align-items:center;background:var(--bg-3);
+  border:1px solid var(--line);border-radius:7px;padding:7px 10px;margin-bottom:6px;
+  font:11px var(--mono);color:var(--ink-2);cursor:pointer}
+.doc:hover{border-color:var(--accent)}
+.doc span{color:var(--ink-3)}
+
+/* ---- engineer ---- */
+#eng-input{display:flex;gap:8px;flex:none;margin-top:10px}
+#eng-prompt{flex:1;resize:none;font:12px var(--mono);min-height:38px}
+.msg{border-radius:10px;padding:9px 12px;margin-bottom:8px;font:12px/1.6 var(--sans);white-space:pre-wrap}
+.msg.user{background:var(--user-msg);color:#dbe9ff}
+.msg.sys{background:var(--bg-3);border-left:3px solid var(--accent);color:var(--ink-2);font:11px/1.6 var(--mono)}
+.stage{background:var(--bg-3);border:1px solid var(--line);border-left:3px solid var(--role,var(--ink-3));
+  border-radius:8px;padding:8px 11px;margin-bottom:7px}
+.stage .sn{display:flex;justify-content:space-between;align-items:center;
+  font:10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)}
+.stage .sd{font:11px/1.6 var(--mono);color:var(--ink-3);margin-top:5px}
+.badge{padding:1px 6px;border-radius:4px;font:9px var(--mono);letter-spacing:.08em}
+.badge.ok{background:#4ade8022;color:var(--ok)}
+.badge.run{background:#4ea3ff22;color:var(--accent)}
+.badge.bad{background:#f8717122;color:var(--err)}
+#impact{background:#3a161822;border:1px solid #f8717144;border-radius:8px;
+  padding:9px 12px;margin-bottom:9px;font:11px var(--mono);color:#ffb4b4;display:none}
+.muted{color:var(--ink-3);font:11px var(--mono);padding:6px 0}
+pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap;word-break:break-word}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:#ffffff12;border-radius:5px}
+::-webkit-scrollbar-track{background:transparent}
 </style>
 </head>
 <body>
 
-<div id="brand">
-  <span class="pulse"></span>
-  <b>Ambiguity</b>
-  <span>3-Agent Console</span>
-</div>
+<div id="brand"><span class="pulse" id="pulse"></span><b>Ambiguity</b><span class="sub">CONSOLE</span></div>
 
 <div id="top">
-  <button class="tab active-rainbow" data-p="overview" aria-selected="true">Overview</button>
-  <button class="tab" data-p="planner">Planner</button>
-  <button class="tab" data-p="researcher">Researcher</button>
-  <button class="tab" data-p="builder">Builder</button>
-  <button class="tab" data-p="graph">Graph</button>
-  <button class="tab" data-p="interactive">Interactive</button>
-  <button class="tab" data-p="stream">Stream</button>
+  <button class="tab" data-p="engineer">Engineer</button>
+  <button class="tab" data-p="graph" aria-selected="true">Graph</button>
+  <button class="tab" data-p="retrieval">Retrieval</button>
+  <button class="tab" data-p="corpus">Corpus</button>
   <button class="tab" data-p="state">State</button>
-  <div id="stats">
-    <span>steps <b id="stat-steps">0</b></span>
-    <span>files <b id="stat-files">0</b></span>
-    <span>status <b id="stat-status">idle</b></span>
-  </div>
+  <div id="stats"></div>
 </div>
 
-<div id="warn">
-  ⚠️ Backend not connected — start the 3-Agent server
-</div>
+<div id="warn"></div>
 
 <aside id="crew">
-  <div class="hd">Agents</div>
-  <div class="agent-card" style="--agent-color: var(--planner)" data-agent="planner">
-    <div class="name"><span class="dot"></span>Planner</div>
-    <div class="status">
-      <span class="status-badge">STANDBY</span>
-      <span>Reasoning & routing</span>
-    </div>
-    <div class="progress"><div class="progress-bar"></div></div>
-  </div>
-  <div class="agent-card" style="--agent-color: var(--researcher)" data-agent="researcher">
-    <div class="name"><span class="dot"></span>Researcher</div>
-    <div class="status">
-      <span class="status-badge">STANDBY</span>
-      <span>GraphRAG queries</span>
-    </div>
-    <div class="progress"><div class="progress-bar"></div></div>
-  </div>
-  <div class="agent-card" style="--agent-color: var(--builder)" data-agent="builder">
-    <div class="name"><span class="dot"></span>Builder</div>
-    <div class="status">
-      <span class="status-badge">STANDBY</span>
-      <span>Implementation</span>
-    </div>
-    <div class="progress"><div class="progress-bar"></div></div>
-  </div>
-  <div style="padding: 12px 18px; font: 11px var(--mono); color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 10px;">
-    <div>Planner: <span id="llm-planner" style="color: var(--planner)">claude-3-5-sonnet-20241022 (Anthropic)</span></div>
-    <div style="margin-top: 6px;">Researcher: <span id="llm-researcher" style="color: var(--researcher)">claude-3-5-haiku-20241022 (Anthropic)</span></div>
-    <div style="margin-top: 6px;">Builder: <span id="llm-builder" style="color: var(--builder)">claude-3-5-haiku-20241022 (Anthropic)</span></div>
-    <div style="margin-top: 6px;">Embedding: <span id="embedding-info" style="color: var(--ink-2)">all-MiniLM-L6-v2</span></div>
-    <div style="margin-top: 6px;">GraphRAG: <span id="graphrag-info" style="color: var(--ok)">● indexed</span></div>
-  </div>
+  <div class="hd"><span>Crew</span><span id="crewn">&mdash;</span></div>
+  <div id="seats"></div>
+  <div id="embed">Embedding model:<br><span id="embed-model">&mdash;</span><br>runs on this machine</div>
 </aside>
 
 <main id="main">
-  <!-- Overview Panel -->
-  <section class="panel on" data-p="overview">
-    <h2>System Overview</h2>
-    
-    <!-- Architecture Diagram -->
-    <div class="architecture-diagram">
-      <div class="flow-row">
-        <div class="flow-node planner-node">
-          <span class="node-icon">🧠</span>
-          <span class="node-name">Planner</span>
-          <span class="node-desc">Reasoning & routing</span>
-        </div>
-        <div class="flow-arrow">→</div>
-        <div class="flow-node researcher-node">
-          <span class="node-icon">📚</span>
-          <span class="node-name">Researcher</span>
-          <span class="node-desc">GraphRAG queries</span>
-        </div>
-        <div class="flow-arrow">→</div>
-        <div class="flow-node builder-node">
-          <span class="node-icon">🔨</span>
-          <span class="node-name">Builder</span>
-          <span class="node-desc">Implementation</span>
+  <section class="panel" data-p="engineer">
+    <div class="split">
+      <div class="col">
+        <h2>Director</h2>
+        <div class="scroll" id="director"><div class="muted">Give the Architect a goal. It sets the direction, the Planner breaks it down, and it rules on the result.</div></div>
+        <div id="eng-input">
+          <textarea id="eng-prompt" rows="1" placeholder="Tell the Architect what you want done&hellip;"></textarea>
+          <button class="go" id="eng-send">Run</button>
         </div>
       </div>
-      <div class="feedback-loop">↺ Feedback Loop (replan if blocked)</div>
-      <div class="knowledge-layer">
-        <div class="layer-title">GraphRAG Knowledge Layer</div>
-        <div class="layer-components">
-          <span class="component">🔗 Knowledge Graph</span>
-          <span class="separator">|</span>
-          <span class="component">📐 Embedding: <span id="diag-embedding">all-MiniLM-L6-v2</span></span>
-          <span class="separator">|</span>
-          <span class="component">💾 Vector Store</span>
-        </div>
-        <div class="layer-status">Status: <span id="diag-graphrag" style="color: var(--ok)">● indexed</span></div>
-      </div>
-      <div class="llm-info-bar">
-        Planner: <span id="diag-llm-planner">claude-3-5-sonnet-20241022 (Anthropic)</span> ·
-        Researcher: <span id="diag-llm-researcher">claude-3-5-haiku-20241022 (Anthropic)</span> ·
-        Builder: <span id="diag-llm-builder">claude-3-5-haiku-20241022 (Anthropic)</span>
+      <div class="col">
+        <h2>Action Feed</h2>
+        <div id="impact"></div>
+        <div class="scroll" id="feed"><div class="muted">No run yet &mdash; stages appear here as the loop reports them.</div></div>
       </div>
     </div>
-    
+  </section>
+
+  <section class="panel on" data-p="graph">
     <div class="bar">
-      <input id="goal-input" class="grow" placeholder="Enter your goal (e.g., 'Create a hello.txt file with Hello World')">
-      <button class="go planner" id="run-btn">Run</button>
-      <button class="go ghost" id="clear-btn">Clear</button>
+      <input id="gnode" class="grow" placeholder="node id, or blank to sweep every document">
+      <input id="gdepth" type="number" value="2" min="1" max="5" style="width:78px" title="max depth">
+      <button class="go" id="gbtn">Trace</button>
+      <button class="go ghost" id="gall">Sweep all</button>
     </div>
-    <div class="messages" id="overview-messages">
-      <div class="msg system">
-        3-Agent System ready. Enter a goal above to begin.
-      </div>
-    </div>
+    <div id="gwrap"><svg id="g"></svg><div class="gempty" id="gempty">Loading graph&hellip;</div></div>
   </section>
 
-  <!-- Planner Panel -->
-  <section class="panel" data-p="planner">
-    <h2>Planner Agent</h2>
-    <div class="state-card" style="margin-bottom: 16px;">
-      <h3>LLM</h3>
-      <select class="llm-select" id="llm-planner-select" data-agent="planner"></select>
-    </div>
-    <div class="state-card" style="margin-bottom: 16px;">
-      <h3>Current Plan</h3>
-      <div class="value" id="planner-plan">(no plan yet)</div>
-    </div>
-    <div class="state-card">
-      <h3>Next Agent</h3>
-      <div class="value" id="planner-next">—</div>
-    </div>
-  </section>
-
-  <!-- Researcher Panel -->
-  <section class="panel" data-p="researcher">
-    <h2>Researcher Agent</h2>
-    <div class="state-card" style="margin-bottom: 16px;">
-      <h3>LLM</h3>
-      <select class="llm-select" id="llm-researcher-select" data-agent="researcher"></select>
-    </div>
-    <div class="bar">
-      <input id="research-query" class="grow" placeholder="Query knowledge base...">
-      <button class="go researcher" id="research-btn">Search</button>
-    </div>
-    <div class="state-card">
-      <h3>Research Findings</h3>
-      <div class="value" id="researcher-findings">(no research yet)</div>
-    </div>
-  </section>
-
-  <!-- Builder Panel -->
-  <section class="panel" data-p="builder">
-    <h2>Builder Agent</h2>
-    <div class="state-card" style="margin-bottom: 16px;">
-      <h3>LLM</h3>
-      <select class="llm-select" id="llm-builder-select" data-agent="builder"></select>
-    </div>
-    <div class="state-card" style="margin-bottom: 16px;">
-      <h3>Implementation Report</h3>
-      <div class="value" id="builder-report">(no implementation yet)</div>
-    </div>
-    <div class="state-card">
-      <h3>Files Changed</h3>
-      <div class="value" id="builder-files">—</div>
-    </div>
-  </section>
-
-  <!-- Graph Panel -->
-  <section class="panel" data-p="graph">
-    <h2>Live Agent Graph</h2>
-    <div class="graph-hint">
-      Nodes update as agents run. Active paths pulse; gray paths are idle.
-    </div>
-    <svg id="agent-graph" viewBox="0 0 800 460" preserveAspectRatio="xMidYMid meet">
-      <defs>
-        <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L0,6 L9,3 z" fill="#5a6474" />
-        </marker>
-        <marker id="arrow-active" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L0,6 L9,3 z" fill="#dde3ec" />
-        </marker>
-        <filter id="glow-planner">
-          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-          <feMerge>
-            <feMergeNode in="coloredBlur"/>
-            <feMergeNode in="SourceGraphic"/>
-          </feMerge>
-        </filter>
-        <filter id="glow-researcher">
-          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-          <feMerge>
-            <feMergeNode in="coloredBlur"/>
-            <feMergeNode in="SourceGraphic"/>
-          </feMerge>
-        </filter>
-        <filter id="glow-builder">
-          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-          <feMerge>
-            <feMergeNode in="coloredBlur"/>
-            <feMergeNode in="SourceGraphic"/>
-          </feMerge>
-        </filter>
-        <linearGradient id="edge-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="#4ea3ff" />
-          <stop offset="50%" stop-color="#76d13a" />
-          <stop offset="100%" stop-color="#ff6a8a" />
-        </linearGradient>
-      </defs>
-
-      <g class="graph-edges">
-        <!-- Planner -> Researcher -->
-        <path id="edge-planner-researcher" class="edge" d="M 150 180 L 280 180" />
-        <!-- Researcher -> Builder -->
-        <path id="edge-researcher-builder" class="edge" d="M 380 180 L 510 180" />
-        <!-- Builder -> END -->
-        <path id="edge-builder-end" class="edge" d="M 610 180 L 720 180" />
-        <!-- Feedback: Builder -> Planner (replan) -->
-        <path id="edge-builder-planner" class="edge feedback" d="M 560 230 C 560 330, 200 330, 200 230" />
-        <!-- Researcher -> Planner (need replan / no knowledge) -->
-        <path id="edge-researcher-planner" class="edge feedback" d="M 330 130 C 330 60, 200 60, 200 130" />
-        <!-- Researcher -> GraphRAG -->
-        <path id="edge-researcher-kb" class="edge kb" d="M 330 230 L 330 320" />
-      </g>
-
-      <g class="graph-nodes">
-        <g class="graph-node" id="node-planner" data-agent="planner" transform="translate(110, 180)">
-          <rect x="-60" y="-45" width="120" height="90" rx="12" />
-          <text class="icon" y="-10">🧠</text>
-          <text class="label" y="14">Planner</text>
-          <text class="sublabel" y="32">Reasoning</text>
-        </g>
-
-        <g class="graph-node" id="node-researcher" data-agent="researcher" transform="translate(330, 180)">
-          <rect x="-60" y="-45" width="120" height="90" rx="12" />
-          <text class="icon" y="-10">📚</text>
-          <text class="label" y="14">Researcher</text>
-          <text class="sublabel" y="32">GraphRAG Query</text>
-        </g>
-
-        <g class="graph-node" id="node-builder" data-agent="builder" transform="translate(550, 180)">
-          <rect x="-60" y="-45" width="120" height="90" rx="12" />
-          <text class="icon" y="-10">🔨</text>
-          <text class="label" y="14">Builder</text>
-          <text class="sublabel" y="32">Implementation</text>
-        </g>
-
-        <g class="graph-node end" id="node-end" transform="translate(730, 180)">
-          <circle r="32" />
-          <text class="label" y="5">END</text>
-        </g>
-
-        <g class="graph-node kb" id="node-kb" transform="translate(330, 340)">
-          <rect x="-70" y="-30" width="140" height="60" rx="10" />
-          <text class="label" y="5">GraphRAG KB</text>
-        </g>
-      </g>
-
-      <text class="graph-caption" x="400" y="430" text-anchor="middle">
-        Feedback loops return to Planner on blockers or insufficient knowledge.
-      </text>
-    </svg>
-  </section>
-
-  <!-- Interactive Graph Panel -->
-  <section class="panel" data-p="interactive">
-    <h2>Interactive Agent Graph</h2>
-    <div class="graph-hint">
-      Drag nodes to rearrange. Physics keeps the graph tidy. Active paths pulse; click nodes to focus.
-    </div>
-    <canvas id="interactive-graph"></canvas>
-  </section>
-
-  <!-- Streaming Overlay Panel -->
-  <section class="panel" data-p="stream">
-    <h2>Execution Stream</h2>
-    <div class="graph-hint">
-      Live architecture overlay showing each step as it happens, with step log on the side.
-    </div>
-    <div id="stream-layout">
-      <div id="stream-diagram">
-        <div class="flow-row">
-          <div class="flow-node stream-node planner-node" id="stream-planner">
-            <span class="node-icon">🧠</span>
-            <span class="node-name">Planner</span>
-            <span class="node-desc">Reasoning &amp; routing</span>
-          </div>
-          <div class="flow-arrow">→</div>
-          <div class="flow-node stream-node researcher-node" id="stream-researcher">
-            <span class="node-icon">📚</span>
-            <span class="node-name">Researcher</span>
-            <span class="node-desc">GraphRAG queries</span>
-          </div>
-          <div class="flow-arrow">→</div>
-          <div class="flow-node stream-node builder-node" id="stream-builder">
-            <span class="node-icon">🔨</span>
-            <span class="node-name">Builder</span>
-            <span class="node-desc">Implementation</span>
-          </div>
+  <section class="panel" data-p="retrieval">
+    <div class="split">
+      <div class="col">
+        <div class="bar">
+          <input id="q" class="grow" placeholder="semantic query &mdash; wording need not appear in the text">
+          <input id="topk" type="number" value="5" min="1" max="25" style="width:74px" title="top k">
+          <button class="go" id="qbtn">Search</button>
         </div>
-        <div class="feedback-loop">↺ Feedback Loop</div>
-        <svg id="stream-arrows" viewBox="0 0 700 180" preserveAspectRatio="xMidYMid meet">
-          <defs>
-            <marker id="stream-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
-              <path d="M0,0 L0,5 L7,2.5 z" fill="#5a6474" />
-            </marker>
-            <marker id="stream-arrow-active" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
-              <path d="M0,0 L0,5 L7,2.5 z" fill="#dde3ec" />
-            </marker>
-          </defs>
-          <path id="stream-edge-planner-researcher" class="edge" d="M 120 90 L 280 90" marker-end="url(#stream-arrow)" />
-          <path id="stream-edge-researcher-builder" class="edge" d="M 420 90 L 580 90" marker-end="url(#stream-arrow)" />
-          <path id="stream-edge-feedback" class="edge feedback" d="M 525 140 C 525 220, 120 220, 120 140" marker-end="url(#stream-arrow)" />
-        </svg>
+        <div class="scroll" id="hits"><div class="muted">all-MiniLM-L6-v2 &middot; cosine &middot; embeddings run locally</div></div>
       </div>
-      <div id="stream-log" class="messages"></div>
+      <div class="col" id="tele">
+        <div class="hd"><span>Telemetry</span><span id="clr">clear</span></div>
+        <div class="scroll" id="evs"></div>
+      </div>
     </div>
   </section>
 
-  <!-- State Panel -->
+  <section class="panel" data-p="corpus">
+    <div class="bar">
+      <button class="go" id="rebtn">Reindex project</button>
+      <button class="go ghost" id="rfbtn">Refresh</button>
+      <span class="muted" id="restat"></span>
+    </div>
+    <h2>Documents</h2>
+    <div class="scroll" id="docs"><div class="muted">nothing indexed</div></div>
+  </section>
+
   <section class="panel" data-p="state">
-    <h2>System State</h2>
-    <div class="state-grid">
-      <div class="state-card">
-        <h3>Goal</h3>
-        <div class="value" id="state-goal">(empty)</div>
-      </div>
-      <div class="state-card">
-        <h3>Plan</h3>
-        <div class="value" id="state-plan">(empty)</div>
-      </div>
-      <div class="state-card">
-        <h3>Research</h3>
-        <div class="value" id="state-research">(empty)</div>
-      </div>
-      <div class="state-card">
-        <h3>Builder Report</h3>
-        <div class="value" id="state-builder">(empty)</div>
-      </div>
-      <div class="state-card">
-        <h3>Blockers</h3>
-        <div class="value" id="state-blockers">(empty)</div>
-      </div>
-      <div class="state-card">
-        <h3>Step Count</h3>
-        <div class="value" id="state-steps">0</div>
-      </div>
-    </div>
+    <h2>Agent state</h2>
+    <div class="scroll"><pre id="state-dump">(no run yet)</pre></div>
   </section>
 </main>
 
 <script>
-const API_BASE = window.location.origin;
-const $ = s => document.querySelector(s);
+const $  = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-// State
-let currentState = {
-  goal: "",
-  plan: "",
-  research: "",
-  builder_report: "",
-  next_agent: "Planner",
-  research_status: "",
-  blockers: "",
-  files_changed: [],
-  step_count: 0,
-  messages: []
-};
+const ROLES = ["architect","planner","researcher","builder"];
+const ROLE_COLOR = {architect:"#f2b544", planner:"#4ea3ff", researcher:"#76d13a", builder:"#ff6a8a"};
 
-let isRunning = false;
-let llmOptions = [];
-let agentLLMs = {
-  planner: { provider: "", model: "" },
-  researcher: { provider: "", model: "" },
-  builder: { provider: "", model: "" }
-};
+/* ---------- transport ---------- */
+let online = true;
+function goOffline(){ if(!online) return; online = false; $("#pulse").classList.add("off"); banner("Backend not reachable — is <code>python serve.py</code> still running?"); }
+function goOnline(){ if(online) return; online = true; $("#pulse").classList.remove("off"); banner(""); }
+function banner(html){ const w = $("#warn"); w.innerHTML = html; w.style.display = html ? "block" : "none"; }
 
-// Tab switching
-$$(".tab").forEach(tab => {
-  tab.addEventListener("click", () => {
-    $$(".tab").forEach(t => t.setAttribute("aria-selected", "false"));
-    tab.setAttribute("aria-selected", "true");
-    $$(".panel").forEach(p => p.classList.remove("on"));
-    $(`.panel[data-p="${tab.dataset.p}"]`).classList.add("on");
-  });
+async function rpc(method, params, quiet){
+  const t0 = performance.now();
+  let r;
+  try{
+    r = await fetch("/rpc", {method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({method, params: params || {}})});
+  }catch(e){
+    // A rejected fetch to loopback is not a slow network, it is nobody
+    // listening — say so once rather than failing a poll silently every 5s.
+    goOffline(); if(!quiet) ev(method+" — "+e.message, null, true); throw e;
+  }
+  const j = await r.json().catch(() => ({error:{message:"bad JSON"}}));
+  const ms = j.elapsed_ms ?? Math.round(performance.now() - t0);
+  goOnline();
+  if(j.error){ if(!quiet) ev(method+" — "+(j.error.message || j.error), ms, true); throw new Error(j.error.message || "failed"); }
+  if(!quiet) ev(method, ms, false);
+  return j.result;
+}
+
+/* ---------- telemetry ---------- */
+const EVS = [];
+function ev(name, ms, bad){
+  EVS.unshift({t:new Date().toLocaleTimeString(), name, ms, bad});
+  if(EVS.length > 140) EVS.length = 140;
+  $("#evs").innerHTML = EVS.map(e =>
+    `<div class="ev${e.bad?" bad":""}"><span class="tm">${esc(e.t)}</span>`+
+    `<span class="nm">${esc(e.name)}</span>`+
+    `<span class="d">${e.ms==null?"":e.ms+"ms"}</span></div>`).join("");
+}
+$("#clr").onclick = () => { EVS.length = 0; $("#evs").innerHTML = ""; };
+
+/* ---------- tabs ---------- */
+$$(".tab").forEach(t => t.onclick = () => {
+  $$(".tab").forEach(x => x.removeAttribute("aria-selected"));
+  t.setAttribute("aria-selected","true");
+  $$(".panel").forEach(p => p.classList.toggle("on", p.dataset.p === t.dataset.p));
+  if(t.dataset.p === "corpus") loadDocs();
+  if(t.dataset.p === "graph" && !NODES.length) sweep().catch(()=>{});
 });
 
-// Add message to overview
-function addMessage(text, type = "system") {
-  const msg = document.createElement("div");
-  msg.className = `msg ${type}`;
-  msg.textContent = text;
-  const container = $("#overview-messages");
-  container.appendChild(msg);
-  container.scrollTop = container.scrollHeight;
-}
+/* ---------- crew ---------- */
+let OPTIONS = [], OLLAMA_TAGS = [];
 
-// Update agent cards
-function updateAgentCard(agent, status, progress = 0) {
-  const card = $(`[data-agent="${agent}"]`);
-  if (!card) return;
-  
-  const badge = card.querySelector(".status-badge");
-  const bar = card.querySelector(".progress-bar");
-  
-  badge.textContent = status;
-  bar.style.width = `${progress}%`;
-  
-  if (status === "ACTIVE") {
-    card.classList.add("active");
-    // Also highlight the architecture diagram node
-    const diagramNode = $(`.flow-node.${agent}-node`);
-    if (diagramNode) diagramNode.classList.add("active");
-  } else {
-    card.classList.remove("active");
-    const diagramNode = $(`.flow-node.${agent}-node`);
-    if (diagramNode) diagramNode.classList.remove("active");
-  }
-}
-
-// Update stats
-function updateStats() {
-  $("#stat-steps").textContent = currentState.step_count;
-  $("#stat-files").textContent = currentState.files_changed.length;
-  $("#stat-status").textContent = isRunning ? "running" : "idle";
-}
-
-// Update all displays
-function updateDisplays() {
-  // Planner
-  $("#planner-plan").textContent = currentState.plan || "(no plan yet)";
-  $("#planner-next").textContent = currentState.next_agent || "—";
-
-  // Researcher
-  $("#researcher-findings").textContent = currentState.research || "(no research yet)";
-
-  // Builder
-  $("#builder-report").textContent = currentState.builder_report || "(no implementation yet)";
-  $("#builder-files").textContent = currentState.files_changed.length ?
-    currentState.files_changed.join(", ") : "—";
-
-  // State
-  $("#state-goal").textContent = currentState.goal || "(empty)";
-  $("#state-plan").textContent = currentState.plan || "(empty)";
-  $("#state-research").textContent = currentState.research || "(empty)";
-  $("#state-builder").textContent = currentState.builder_report || "(empty)";
-  $("#state-blockers").textContent = currentState.blockers || "(empty)";
-  $("#state-steps").textContent = currentState.step_count;
-
-  updateGraph();
-  updateInteractiveGraph();
-  updateStreamOverlay();
-  updateStats();
-}
-
-// Update the live agent graph
-function updateGraph() {
-  // Clear active states
-  $$(".graph-node").forEach(n => n.classList.remove("active"));
-  $$(".edge").forEach(e => e.classList.remove("active"));
-  $$(".flow-node").forEach(n => n.classList.remove("active"));
-
-  const next = currentState.next_agent || "";
-  const status = currentState.research_status || "";
-  const blockers = currentState.blockers || "";
-
-  // Highlight final path based on which agents produced output
-  if (currentState.plan) {
-    $("#node-planner").classList.add("active");
-    highlightEdge("planner", "researcher");
-    $(".flow-node.planner-node").classList.add("active");
-  }
-  if (currentState.research) {
-    $("#node-researcher").classList.add("active");
-    highlightEdge("researcher", "builder");
-    $(".flow-node.researcher-node").classList.add("active");
-  }
-  if (currentState.builder_report || currentState.files_changed.length) {
-    $("#node-builder").classList.add("active");
-    highlightEdge("builder", "end");
-    $(".flow-node.builder-node").classList.add("active");
-  }
-
-  // Highlight next routing
-  if (next === "END") {
-    $("#node-end").classList.add("active");
-    highlightEdge("builder", "end");
-  }
-
-  // Feedback loops
-  if (status === "need_replan" || blockers) {
-    highlightEdge("builder", "planner");
-  }
-  if (status === "no_relevant_knowledge" || status === "need_replan") {
-    highlightEdge("researcher", "planner");
-  }
-
-  // Researcher queries KB whenever researcher has output
-  if (currentState.research) {
-    highlightEdge("researcher", "kb");
-  }
-}
-
-function highlightEdge(from, to) {
-  const id = `edge-${from}-${to}`;
-  const edge = $(`#${id}`);
-  if (edge) edge.classList.add("active");
-}
-
-// Stream overlay helpers
-const streamLog = $("#stream-log");
-
-function addStreamStep(text, agent = "system") {
-  if (!streamLog) return;
-  const msg = document.createElement("div");
-  msg.className = `msg ${agent}`;
-  msg.textContent = text;
-  streamLog.appendChild(msg);
-  streamLog.scrollTop = streamLog.scrollHeight;
-}
-
-function clearStreamLog() {
-  if (streamLog) streamLog.innerHTML = "";
-}
-
-function updateStreamOverlay() {
-  $$(".stream-node").forEach(n => n.classList.remove("active"));
-  $$("#stream-arrows .edge").forEach(e => e.classList.remove("active"));
-
-  if (currentState.plan) {
-    $("#stream-planner").classList.add("active");
-    $("#stream-edge-planner-researcher").classList.add("active");
-  }
-  if (currentState.research) {
-    $("#stream-researcher").classList.add("active");
-    $("#stream-edge-researcher-builder").classList.add("active");
-  }
-  if (currentState.builder_report || currentState.files_changed.length) {
-    $("#stream-builder").classList.add("active");
-  }
-  if (currentState.blockers || currentState.research_status === "need_replan") {
-    $("#stream-edge-feedback").classList.add("active");
-  }
-}
-
-// Animate the agent graph through a simulated sequence
-function animateGraphSequence(steps) {
-  // steps: array of { agent, edgeFrom, edgeTo, duration }
-  let i = 0;
-  function step() {
-    if (i >= steps.length) return;
-    const s = steps[i];
-    if (s.agent) {
-      $("#node-planner").classList.remove("active");
-      $("#node-researcher").classList.remove("active");
-      $("#node-builder").classList.remove("active");
-      if (s.agent !== "kb") $(`#node-${s.agent}`).classList.add("active");
-    }
-    $$(".edge").forEach(e => e.classList.remove("active"));
-    if (s.edgeFrom && s.edgeTo) highlightEdge(s.edgeFrom, s.edgeTo);
-    if (s.edgeFrom === "researcher" && s.edgeTo === "builder") highlightEdge("researcher", "kb");
-
-    // Also pulse interactive graph node
-    if (s.agent && s.agent !== "kb" && s.agent !== "end") {
-      pulseInteractiveNode(s.agent);
-    }
-
-    i++;
-    setTimeout(step, s.duration || 900);
-  }
-  step();
-}
-
-// Run the 3-Agent system
-async function runGoal() {
-  const goal = $("#goal-input").value.trim();
-  if (!goal) return;
-
-  if (isRunning) return;
-  isRunning = true;
-
-  $("#run-btn").disabled = true;
-  $("#run-btn").textContent = "Running...";
-  addMessage(`Starting: ${goal}`, "system");
-  clearStreamLog();
-  addStreamStep(`Goal: ${goal}`, "system");
-
-  // Show dynamic graph sequence while the backend runs
-  animateGraphSequence([
-    { agent: "planner", edgeFrom: "planner", edgeTo: "researcher", duration: 1000 },
-    { agent: "researcher", edgeFrom: "researcher", edgeTo: "kb", duration: 1200 },
-    { agent: "builder", edgeFrom: "researcher", edgeTo: "builder", duration: 1200 },
-    { agent: "end", edgeFrom: "builder", edgeTo: "end", duration: 1000 },
+async function loadCrew(quiet){
+  const [seatData, optData] = await Promise.all([
+    rpc("list_seats", {}, quiet),
+    rpc("llm_options", {}, quiet),
   ]);
+  OPTIONS = optData.options || [];
+  OLLAMA_TAGS = optData.ollama_tags || [];
 
-  addStreamStep("Planner: creating plan", "planner");
-  addStreamStep("Researcher: querying GraphRAG KB", "researcher");
-  addStreamStep("Builder: executing implementation", "builder");
+  const seats = seatData.seats || [];
+  $("#crewn").textContent = seats.length;
+  $("#seats").innerHTML = "";
 
-  try {
-    const response = await fetch(`${API_BASE}/api/run`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal })
-    });
+  for(const s of seats){
+    const el = document.createElement("div");
+    el.className = "seat";
+    el.style.setProperty("--role", ROLE_COLOR[s.role] || "#5a6474");
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    // A seat that cannot run says so on the card, with the reason it gave --
+    // "NO KEY" would be a lie for a key that exists but has no credits.
+    const chips = [];
+    if(!s.live) chips.push(`<span class="chip bad" title="${esc(s.reason)}">${esc(s.badge || "DEGRADED")}</span>`);
+    chips.push(`<span class="chip">${esc(s.placement)}</span>`);
 
-    const result = await response.json();
-    currentState = { ...currentState, ...result };
+    el.innerHTML =
+      `<div class="nm"><span class="dot"></span>${esc(s.role)}</div>`+
+      `<select title="Reassign this seat">${optionsHtml(s)}</select>`+
+      `<div class="plc">${esc(s.provider)}</div>`+
+      `<div>${chips.join(" ")}</div>`;
 
-    // Add messages
-    if (result.messages) {
-      result.messages.forEach(msg => addMessage(msg, "system"));
-    }
+    el.querySelector("select").onchange = e => setSeat(s.role, e.target.value);
+    $("#seats").appendChild(el);
+  }
 
-    updateDisplays();
-    addMessage("✓ Task completed", "system");
-    addStreamStep("✓ Task completed", "system");
-
-  } catch (err) {
-    addMessage(`✕ Error: ${err.message}`, "system");
-    addStreamStep(`✕ Error: ${err.message}`, "system");
-  } finally {
-    isRunning = false;
-    $("#run-btn").disabled = false;
-    $("#run-btn").textContent = "Run";
-    updateStats();
+  // Two different failures, worded differently: a seat with no credentials
+  // falls back to a stub and the run still completes with canned text; a seat
+  // whose credentials do not work fails the run outright.
+  const dead = seats.filter(s => !s.live);
+  if(!dead.length) banner("");
+  else {
+    const detail = dead.map(s => esc(s.role)+" — "+esc(s.reason)).join(" · ");
+    const consequence = dead.every(s => s.stubbed)
+      ? "Those seats fall back to canned stub output."
+      : "Runs using those seats will fail until this is fixed.";
+    banner(`⚠️ ${detail}. ${consequence}`);
   }
 }
 
-// Clear state
-function clearState() {
-  currentState = {
-    goal: "",
-    plan: "",
-    research: "",
-    builder_report: "",
-    next_agent: "Planner",
-    research_status: "",
-    blockers: "",
-    files_changed: [],
-    step_count: 0,
-    messages: []
-  };
-  $("#goal-input").value = "";
-  $("#overview-messages").innerHTML = '<div class="msg system">Cleared. Enter a new goal.</div>';
-  clearStreamLog();
-  updateDisplays();
+function optionsHtml(seat){
+  const current = JSON.stringify({provider:seat.provider, model:seat.model});
+  const groups = new Map();
+  for(const o of OPTIONS){
+    const g = o.group || "Cloud";
+    if(!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(o);
+  }
+  // Whatever the daemon actually carries, so a pulled-but-uncurated tag is
+  // still selectable; the curated entries above it keep their labels.
+  const curated = new Set(OPTIONS.filter(o => o.provider === "ollama").map(o => o.model));
+  const extra = OLLAMA_TAGS.filter(t => !curated.has(t));
+  if(extra.length) groups.set("Ollama (installed)", extra.map(t => ({label:t, provider:"ollama", model:t})));
+
+  let html = "";
+  for(const [name, opts] of groups){
+    html += `<optgroup label="${esc(name)}">`;
+    for(const o of opts){
+      const val = JSON.stringify({provider:o.provider, model:o.model});
+      html += `<option value='${esc(val)}'${val === current ? " selected" : ""}>${esc(o.label)}</option>`;
+    }
+    html += `</optgroup>`;
+  }
+  if(!OPTIONS.some(o => o.model === seat.model))
+    html = `<optgroup label="Current"><option value='${esc(current)}' selected>${esc(seat.model)}</option></optgroup>` + html;
+  return html;
 }
 
-// Research query
-async function doResearch() {
-  const query = $("#research-query").value.trim();
-  if (!query) return;
-  
-  try {
-    const response = await fetch(`${API_BASE}/api/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, top_k: 5 })
-    });
-    
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
-    const result = await response.json();
-    $("#researcher-findings").textContent = JSON.stringify(result, null, 2);
-    
-  } catch (err) {
-    alert(`Search failed: ${err.message}`);
+async function setSeat(role, value){
+  const {provider, model} = JSON.parse(value);
+  await rpc("set_seat", {agent:role, provider, model});
+  await loadCrew(true);
+}
+
+/* ---------- graph ---------- */
+let NODES = [], EDGES = [], raf = null;
+
+// A document mints an entity for every capitalised word, so most entities
+// touch exactly one document and say nothing about how the corpus connects.
+// Four is where the sweep starts showing structure instead of noise.
+const SWEEP_MIN_DEGREE = 4;
+
+// query_graph excludes the node you centred on, so the centre has to be added
+// back or every trace comes out missing the one node you asked about.
+async function sweep(){
+  const docs = (await rpc("list_documents", {})).documents || [];
+  const depth = +$("#gdepth").value || 2;
+  const seen = new Map(), eds = [];
+
+  // Seed with the documents themselves: they are the centres, so they never
+  // appear in their own neighbourhood, and this is where their titles are.
+  docs.forEach(d => seen.set(d.id, {id:d.id, label:d.title, node_type:"document"}));
+
+  for(const d of docs){
+    try{
+      const g = await rpc("query_graph", {node_id:d.id, max_depth:depth, min_degree:SWEEP_MIN_DEGREE}, true);
+      (g.related_nodes || []).forEach(n => { if(!seen.has(n.id)) seen.set(n.id, n); });
+      (g.edges || []).forEach(e => eds.push(e));
+    }catch{}
+  }
+  ev(`sweep ${docs.length} documents`, null, false);
+  draw([...seen.values()], dedupe(eds));
+}
+
+const dedupe = es => {
+  const m = new Map();
+  es.forEach(e => m.set(e.source_id+">"+e.target_id+e.relationship, e));
+  return [...m.values()];
+};
+
+async function trace(){
+  const id = $("#gnode").value.trim();
+  if(!id) return sweep();
+  // min_degree 1: a node asked for by name should not have neighbours hidden.
+  const g = await rpc("query_graph", {node_id:id, max_depth:+$("#gdepth").value || 2, min_degree:1});
+  const ns = [...(g.related_nodes || [])];
+  if(g.center_node && !ns.some(n => n.id === g.center_node))
+    ns.unshift({id:g.center_node, label:g.center_node, node_type:"document"});
+  draw(ns, dedupe(g.edges || []));
+}
+
+function draw(ns, es){
+  const svg = $("#g"), W = svg.clientWidth || 900, H = svg.clientHeight || 520;
+  $("#gempty").style.display = ns.length ? "none" : "grid";
+  if(!ns.length) $("#gempty").innerHTML = "No graph yet &mdash; run <code>python scripts/reindex.py</code>,<br>or press Reindex project on the Corpus tab.";
+
+  NODES = ns.map((n, i) => ({...n,
+    x: W/2 + Math.cos(i/ns.length*6.283) * Math.min(W,H)*.3,
+    y: H/2 + Math.sin(i/ns.length*6.283) * Math.min(W,H)*.3, vx:0, vy:0}));
+
+  const idx = new Map(NODES.map(n => [n.id, n]));
+  EDGES = es.filter(e => idx.has(e.source_id) && idx.has(e.target_id))
+            .map(e => ({...e, s:idx.get(e.source_id), t:idx.get(e.target_id)}));
+
+  svg.innerHTML = "";
+  const gE = mk("g"), gN = mk("g");
+  svg.append(gE, gN);
+
+  EDGES.forEach(e => {
+    e.el = mk("line");
+    e.el.setAttribute("class", "edge" + (e.relationship === "mentions" ? " mentions" : ""));
+    gE.append(e.el);
+  });
+
+  NODES.forEach(n => {
+    const isDoc = n.node_type === "document";
+    const g = mk("g");
+    g.setAttribute("class", "node" + (isDoc ? "" : " entity"));
+    const c = mk("circle");
+    c.setAttribute("r", isDoc ? 9 : 6);
+    c.setAttribute("fill", isDoc ? "#76d13a" : "#4ea3ff");
+    c.setAttribute("fill-opacity", ".85");
+    c.setAttribute("stroke", isDoc ? "#76d13a" : "#4ea3ff");
+    c.setAttribute("stroke-opacity", ".35");
+    c.setAttribute("stroke-width", "6");
+    const t = mk("text");
+    t.setAttribute("dy", "-14");
+    t.setAttribute("text-anchor", "middle");
+    t.textContent = String(n.label || n.id).slice(0, 26);
+    g.append(c, t);
+    gN.append(g);
+    n.el = g; n.c = c;
+
+    g.onclick = () => { $("#gnode").value = n.id; };
+    g.onpointerdown = ev0 => {
+      n.fix = true; g.setPointerCapture(ev0.pointerId);
+      const mv = e2 => { const r = svg.getBoundingClientRect();
+        n.x = e2.clientX - r.left; n.y = e2.clientY - r.top; n.vx = n.vy = 0; };
+      const up = () => { n.fix = false;
+        g.removeEventListener("pointermove", mv); g.removeEventListener("pointerup", up); };
+      g.addEventListener("pointermove", mv); g.addEventListener("pointerup", up);
+    };
+  });
+
+  cancelAnimationFrame(raf);
+  tick(W, H, 0);
+}
+
+const mk = t => document.createElementNS("http://www.w3.org/2000/svg", t);
+
+function tick(W, H, step){
+  // Plain spring layout: repulsion between every pair, attraction along edges,
+  // and a weak pull to centre. It stops on its own rather than burning a RAF
+  // loop forever.
+  //
+  // The constants scale with how many nodes are actually on screen. A fixed
+  // set tuned for a couple of dozen collapses a few hundred into one ball:
+  // the ideal separation between nodes falls as the canvas is divided up, so
+  // repulsion range, strength and edge rest length have to fall with it.
+  const count  = Math.max(NODES.length, 1);
+  const FRAMES = count > 60 ? 900 : 600;
+  const spread = Math.sqrt((W * H) / count);
+  const REST   = Math.max(52, Math.min(150, spread * 0.62));
+  // Repulsion has to reach well past one hop, or separate clusters never push
+  // each other apart and the whole graph stays balled up in the middle with
+  // the canvas empty around it.
+  const RANGE  = Math.max(260, spread * 3.2);
+  const REPEL  = REST * REST * 0.55;
+  const PULL   = 0.0016 * Math.min(1, 30 / count);
+
+  for(let i = 0; i < NODES.length; i++) for(let j = i+1; j < NODES.length; j++){
+    const a = NODES[i], b = NODES[j];
+    let dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy) || 1;
+    if(d < RANGE){ const f = REPEL/(d*d);
+      a.vx -= dx/d*f; a.vy -= dy/d*f; b.vx += dx/d*f; b.vy += dy/d*f; }
+  }
+  EDGES.forEach(e => {
+    const dx = e.t.x-e.s.x, dy = e.t.y-e.s.y, d = Math.hypot(dx,dy) || 1, f = (d-REST)*.008;
+    e.s.vx += dx/d*f; e.s.vy += dy/d*f; e.t.vx -= dx/d*f; e.t.vy -= dy/d*f;
+  });
+  NODES.forEach(n => {
+    if(n.fix) return;
+    n.vx += (W/2-n.x)*PULL; n.vy += (H/2-n.y)*PULL;
+    n.vx *= .86; n.vy *= .86; n.x += n.vx; n.y += n.vy;
+    n.x = Math.max(30, Math.min(W-30, n.x));
+    n.y = Math.max(26, Math.min(H-20, n.y));
+    n.el.setAttribute("transform", `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
+  });
+  EDGES.forEach(e => {
+    e.el.setAttribute("x1", e.s.x); e.el.setAttribute("y1", e.s.y);
+    e.el.setAttribute("x2", e.t.x); e.el.setAttribute("y2", e.t.y);
+  });
+  if(step < FRAMES) raf = requestAnimationFrame(() => tick(W, H, step+1));
+}
+
+$("#gbtn").onclick = () => trace().catch(()=>{});
+$("#gall").onclick = () => sweep().catch(()=>{});
+$("#gnode").onkeydown = e => { if(e.key === "Enter") trace().catch(()=>{}); };
+addEventListener("resize", () => { if(NODES.length){
+  const svg = $("#g"); cancelAnimationFrame(raf); tick(svg.clientWidth, svg.clientHeight, 400); }});
+
+/* ---------- retrieval ---------- */
+async function search(){
+  const query = $("#q").value.trim();
+  if(!query) return;
+  const r = await rpc("search_documents", {query, top_k:+$("#topk").value || 5});
+  const hits = r.results || [];
+  $("#hits").innerHTML = hits.length ? hits.map((h,i) =>
+    `<div class="hit"><div class="t"><span>${esc(h.metadata?.path || h.id)}</span>`+
+    `<span class="sc">${(h.score ?? 0).toFixed(3)}</span></div>`+
+    `<div class="barw"><div class="barf" data-w="${Math.max(0, Math.min(1, h.score ?? 0))*100}"></div></div>`+
+    `<p>${esc(String(h.content || "").slice(0, 320))}</p></div>`).join("")
+    : `<div class="muted">no results</div>`;
+  $$("#hits .barf").forEach((b,i) => setTimeout(() => b.style.width = b.dataset.w+"%", 70*i));
+}
+$("#qbtn").onclick = () => search().catch(()=>{});
+$("#q").onkeydown = e => { if(e.key === "Enter") search().catch(()=>{}); };
+
+/* ---------- corpus ---------- */
+async function loadDocs(){
+  const docs = (await rpc("list_documents", {}, true)).documents || [];
+  $("#docs").innerHTML = docs.length ? docs.map(d =>
+    `<div class="doc" data-id="${esc(d.id)}"><span>${esc(d.title)}</span><span>${esc(d.id)}</span></div>`).join("")
+    : `<div class="muted">nothing indexed — press Reindex project</div>`;
+  $$("#docs .doc").forEach(el => el.onclick = () => {
+    $("#gnode").value = el.dataset.id;
+    $$(".tab").find(t => t.dataset.p === "graph").click();
+    trace().catch(()=>{});
+  });
+}
+$("#rfbtn").onclick = () => loadDocs().catch(()=>{});
+$("#rebtn").onclick = async () => {
+  const b = $("#rebtn"); b.disabled = true; b.textContent = "Reindexing…";
+  $("#restat").textContent = "";
+  try{
+    const r = await rpc("reindex", {});
+    $("#restat").textContent = `${r.indexed} indexed · ${r.total_nodes} nodes · ${r.total_edges} edges`
+      + (r.errors?.length ? ` · ${r.errors.length} failed` : "");
+    await Promise.all([loadDocs(), poll(true)]);
+    NODES = [];                       // force a rebuild from the new graph
+  }catch(e){ $("#restat").textContent = "failed: " + e.message; }
+  finally{ b.disabled = false; b.textContent = "Reindex project"; }
+};
+
+/* ---------- engineer ---------- */
+function stageCard(role, text, badge){
+  return `<div class="stage" style="--role:${ROLE_COLOR[role] || "#5a6474"}">`+
+    `<div class="sn"><span>${esc(role)}</span>${badge || ""}</div>`+
+    `<div class="sd">${esc(text)}</div></div>`;
+}
+
+async function run(){
+  const goal = $("#eng-prompt").value.trim();
+  if(!goal) return;
+  const btn = $("#eng-send");
+  btn.disabled = true; btn.textContent = "Running…";
+  $("#director").innerHTML += `<div class="msg user">${esc(goal)}</div>`;
+  $("#eng-prompt").value = "";
+
+  // There is no per-node event stream, so the feed says what is actually
+  // known — the loop is running — instead of animating a guessed path.
+  const started = Date.now();
+  $("#feed").innerHTML = stageCard("architect", "Loop running…", `<span class="badge run">RUN</span>`);
+  const timer = setInterval(() => {
+    const s = ((Date.now()-started)/1000).toFixed(0);
+    $("#feed").innerHTML = stageCard("architect", `Loop running… ${s}s`, `<span class="badge run">RUN</span>`);
+  }, 500);
+
+  try{
+    const r = await rpc("run_goal", {goal});
+    clearInterval(timer);
+    renderRun(r);
+  }catch(e){
+    clearInterval(timer);
+    $("#feed").innerHTML = stageCard("architect", "Run failed: "+e.message, `<span class="badge bad">FAIL</span>`);
+  }finally{
+    btn.disabled = false; btn.textContent = "Run";
   }
 }
 
-// Event listeners
-$("#run-btn").addEventListener("click", runGoal);
-$("#clear-btn").addEventListener("click", clearState);
-$("#research-btn").addEventListener("click", doResearch);
-$("#goal-input").addEventListener("keypress", e => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    runGoal();
-  }
-});
+function renderRun(r){
+  $("#state-dump").textContent = JSON.stringify(r, null, 2);
 
-// Poll for status
-async function pollStatus() {
-  try {
-    const response = await fetch(`${API_BASE}/api/status`);
-    if (response.ok) {
-      const status = await response.json();
-      // Update sidebar
-      const agents = status.agents || {};
-      const planner = agents.planner || {};
-      const researcher = agents.researcher || {};
-      const builder = agents.builder || {};
-      $("#llm-planner").textContent = planner.model || status.llm || "unknown";
-      $("#llm-researcher").textContent = researcher.model || status.llm || "unknown";
-      $("#llm-builder").textContent = builder.model || status.llm || "unknown";
-      $("#embedding-info").textContent = status.embedding || "all-MiniLM-L6-v2";
-      $("#graphrag-info").innerHTML = status.graphrag ?
-        '<span style="color: var(--ok)">● indexed</span>' :
-        '<span style="color: var(--warn)">● not indexed</span>';
-      // Update architecture diagram
-      $("#diag-llm-planner").textContent = planner.model || status.llm || "unknown";
-      $("#diag-llm-researcher").textContent = researcher.model || status.llm || "unknown";
-      $("#diag-llm-builder").textContent = builder.model || status.llm || "unknown";
-      $("#diag-embedding").textContent = status.embedding || "all-MiniLM-L6-v2";
-      $("#diag-graphrag").innerHTML = status.graphrag ?
-        '<span style="color: var(--ok)">● indexed</span>' :
-        '<span style="color: var(--warn)">● not indexed</span>';
+  // Each node logs "[Role] ..." into messages; that log is the run's actual
+  // path, so the feed is built from it rather than from a fixed sequence.
+  const stages = (r.messages || []).map(m => {
+    const hit = /^\[(\w+)\]\s*(.*)$/.exec(m);
+    return hit ? {role: hit[1].toLowerCase(), text: hit[2]} : {role:"", text:m};
+  });
+  $("#feed").innerHTML = stages.map(s =>
+    stageCard(s.role || "graph", s.text, `<span class="badge ok">DONE</span>`)).join("");
 
-      // Sync agent LLM selections from server (without overwriting user focus)
-      const selected = status.selected || {};
-      ["planner", "researcher", "builder"].forEach(agent => {
-        const info = selected[agent] || agents[agent] || {};
-        agentLLMs[agent] = { provider: info.provider || "", model: info.model || "" };
-        updateLLMSelect(agent);
-      });
-    }
-  } catch {}
+  const files = r.files_changed || [];
+  const impact = $("#impact");
+  impact.style.display = files.length ? "block" : "none";
+  impact.textContent = files.length ? `Changed this machine — ${files.length} file(s): ${files.join(", ")}` : "";
+
+  const verdict = r.verdict || "(none)";
+  const cls = verdict === "approved" ? "ok" : "bad";
+  $("#director").innerHTML +=
+    `<div class="msg sys"><b>Architect verdict:</b> <span class="badge ${cls}">${esc(verdict)}</span>`+
+    (r.architecture ? `\n\n${esc(r.architecture)}` : "")+
+    (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
+    `</div>`;
+  $("#director").scrollTop = $("#director").scrollHeight;
 }
 
-// Load available cloud LLM options and build dropdowns.
-async function loadLLMOptions() {
-  try {
-    const cloudRes = await fetch(`${API_BASE}/api/llm-options`);
-    if (!cloudRes.ok) throw new Error(`HTTP ${cloudRes.status}`);
-    const cloud = (await cloudRes.json()).options || [];
+$("#eng-send").onclick = () => run();
+$("#eng-prompt").onkeydown = e => {
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); run(); }
+};
 
-    llmOptions = cloud.map(opt => ({ ...opt, group: opt.group || "Cloud" }));
-    ["planner", "researcher", "builder"].forEach(agent => updateLLMSelect(agent));
-  } catch (err) {
-    console.error("Failed to load LLM options:", err);
-  }
+/* ---------- polling ---------- */
+async function poll(quiet){
+  try{
+    const [st, stats] = await Promise.all([
+      rpc("status", {}, true),
+      rpc("rag_stats", {}, true),
+    ]);
+    $("#embed-model").textContent = st.embedding;
+    $("#stats").innerHTML =
+      `<span>docs <b>${stats.total_documents}</b></span>`+
+      `<span>chunks <b>${stats.total_chunks}</b></span>`+
+      `<span>nodes <b>${stats.total_nodes}</b></span>`+
+      `<span>edges <b>${stats.total_edges}</b></span>`;
+    await loadCrew(true);
+  }catch(e){ /* goOffline already reported it */ }
 }
 
-function updateLLMSelect(agent) {
-  const select = $(`#llm-${agent}-select`);
-  if (!select) return;
-
-  // Preserve current focus/value.
-  const active = document.activeElement === select;
-  const currentValue = select.value;
-
-  select.innerHTML = "";
-  const groups = {};
-  const getGroup = (name) => {
-    if (!groups[name]) {
-      const g = document.createElement("optgroup");
-      g.label = name;
-      groups[name] = g;
-    }
-    return groups[name];
-  };
-
-  llmOptions.forEach(opt => {
-    const option = document.createElement("option");
-    option.value = JSON.stringify({ provider: opt.provider, model: opt.model });
-    option.textContent = opt.label;
-    const selected = agentLLMs[agent] &&
-      agentLLMs[agent].provider === opt.provider &&
-      agentLLMs[agent].model === opt.model;
-    if (selected) option.selected = true;
-    const groupName = opt.group || "Cloud";
-    getGroup(groupName).appendChild(option);
-  });
-
-  Object.values(groups).forEach(g => {
-    if (g.childNodes.length) select.appendChild(g);
-  });
-
-  if (currentValue) select.value = currentValue;
-  if (active) select.focus();
-}
-
-async function setAgentLLM(agent, provider, model) {
-  try {
-    const response = await fetch(`${API_BASE}/api/set-llm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent, provider, model })
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    agentLLMs[agent] = { provider, model };
-    updateLLMSelect(agent);
-    // Refresh server-reported status immediately.
-    pollStatus();
-  } catch (err) {
-    console.error(`Failed to set ${agent} LLM:`, err);
-  }
-}
-
-// Wire up the LLM dropdowns.
-["planner", "researcher", "builder"].forEach(agent => {
-  const select = $(`#llm-${agent}-select`);
-  if (!select) return;
-  select.addEventListener("change", () => {
-    const value = JSON.parse(select.value || "{}");
-    if (value.provider && value.model) {
-      setAgentLLM(agent, value.provider, value.model);
-    }
-  });
-});
-
-// Initial load
-loadLLMOptions();
-pollStatus();
-setInterval(pollStatus, 10000);
-
-// Interactive force-directed graph
-(function initInteractiveGraph() {
-  const canvas = $("#interactive-graph");
-  if (!canvas) return;
-
-  const ctx = canvas.getContext("2d");
-  let width, height;
-  let dpr = window.devicePixelRatio || 1;
-
-  function resize() {
-    const rect = canvas.getBoundingClientRect();
-    width = rect.width;
-    height = rect.height;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  const nodes = [
-    { id: "planner", label: "Planner", sub: "Reasoning", x: 0.2, y: 0.3, color: "#4ea3ff", radius: 42 },
-    { id: "researcher", label: "Researcher", sub: "GraphRAG Query", x: 0.5, y: 0.2, color: "#76d13a", radius: 42 },
-    { id: "builder", label: "Builder", sub: "Implementation", x: 0.8, y: 0.3, color: "#ff6a8a", radius: 42 },
-    { id: "kb", label: "GraphRAG KB", sub: "Knowledge", x: 0.5, y: 0.72, color: "#8b95a6", radius: 34 },
-    { id: "end", label: "END", sub: "", x: 0.9, y: 0.3, color: "#b48cff", radius: 30 }
-  ];
-
-  const edges = [
-    { from: "planner", to: "researcher" },
-    { from: "researcher", to: "builder" },
-    { from: "builder", to: "end" },
-    { from: "builder", to: "planner", dashed: true },
-    { from: "researcher", to: "planner", dashed: true },
-    { from: "researcher", to: "kb", dashed: true }
-  ];
-
-  let dragging = null;
-  let hover = null;
-  let pulses = {}; // id -> timestamp
-
-  function toScreen(n) {
-    return { x: n.x * width, y: n.y * height };
-  }
-
-  function fromScreen(x, y) {
-    return { x: x / width, y: y / height };
-  }
-
-  function getEdgePoint(n, angle) {
-    const r = n.radius;
-    return { x: Math.cos(angle) * r, y: Math.sin(angle) * r };
-  }
-
-  function drawArrow(from, to, active, dashed) {
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const angle = Math.atan2(dy, dx);
-    const start = getEdgePoint({ radius: from.radius + 4 }, angle);
-    const endOff = getEdgePoint({ radius: to.radius + 6 }, angle);
-    const sx = from.x + start.x;
-    const sy = from.y + start.y;
-    const ex = to.x - endOff.x;
-    const ey = to.y - endOff.y;
-
-    ctx.beginPath();
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(ex, ey);
-    ctx.strokeStyle = active ? "#dde3ec" : "#3a4555";
-    ctx.lineWidth = active ? 3 : 2;
-    ctx.setLineDash(dashed ? (active ? [8, 4] : [6, 4]) : []);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Arrowhead
-    ctx.beginPath();
-    ctx.moveTo(ex, ey);
-    ctx.lineTo(ex - 10 * Math.cos(angle - 0.4), ey - 10 * Math.sin(angle - 0.4));
-    ctx.lineTo(ex - 10 * Math.cos(angle + 0.4), ey - 10 * Math.sin(angle + 0.4));
-    ctx.closePath();
-    ctx.fillStyle = active ? "#dde3ec" : "#3a4555";
-    ctx.fill();
-
-    // Active flow animation
-    if (active) {
-      const t = (Date.now() / 800) % 1;
-      const px = sx + (ex - sx) * t;
-      const py = sy + (ey - sy) * t;
-      ctx.beginPath();
-      ctx.arc(px, py, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-    }
-  }
-
-  function drawNode(n) {
-    const p = toScreen(n);
-    const isActive = currentState.plan && n.id === "planner" ||
-                     currentState.research && n.id === "researcher" ||
-                     (currentState.builder_report || currentState.files_changed.length) && n.id === "builder" ||
-                     currentState.next_agent === "END" && n.id === "end" ||
-                     currentState.research && n.id === "kb";
-    const isPulsing = pulses[n.id] && Date.now() - pulses[n.id] < 800;
-
-    // Glow
-    if (isActive || isPulsing) {
-      const glow = ctx.createRadialGradient(p.x, p.y, n.radius * 0.5, p.x, p.y, n.radius * 2.5);
-      glow.addColorStop(0, n.color + "44");
-      glow.addColorStop(1, n.color + "00");
-      ctx.fillStyle = glow;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, n.radius * 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Body
-    ctx.beginPath();
-    if (n.id === "end") {
-      ctx.arc(p.x, p.y, n.radius, 0, Math.PI * 2);
-    } else {
-      ctx.roundRect(p.x - n.radius, p.y - n.radius * 0.75, n.radius * 2, n.radius * 1.5, 10);
-    }
-    ctx.fillStyle = isActive || isPulsing ? n.color + "22" : "#11151c";
-    ctx.fill();
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = n.color;
-    ctx.stroke();
-
-    // Label
-    ctx.fillStyle = (isActive || isPulsing) ? "#dde3ec" : "#8b95a6";
-    ctx.font = "600 13px system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(n.label, p.x, p.y - (n.sub ? 6 : 0));
-
-    if (n.sub) {
-      ctx.fillStyle = "#5a6474";
-      ctx.font = "9px ui-monospace, monospace";
-      ctx.fillText(n.sub, p.x, p.y + 12);
-    }
-
-    // Hover ring
-    if (hover === n.id) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, n.radius + 8, 0, Math.PI * 2);
-      ctx.strokeStyle = n.color + "66";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-  }
-
-  function applyForces() {
-    const kRepel = 1200;
-    const kSpring = 0.03;
-    const kCenter = 0.002;
-
-    nodes.forEach(n => {
-      n.vx = (n.vx || 0) * 0.85;
-      n.vy = (n.vy || 0) * 0.85;
-    });
-
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i], b = nodes[j];
-        const pa = toScreen(a), pb = toScreen(b);
-        let dx = pa.x - pb.x;
-        let dy = pa.y - pb.y;
-        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const f = kRepel / (dist * dist);
-        dx /= dist; dy /= dist;
-        a.vx += dx * f / width;
-        a.vy += dy * f / height;
-        b.vx -= dx * f / width;
-        b.vy -= dy * f / height;
-      }
-    }
-
-    edges.forEach(e => {
-      const a = nodes.find(n => n.id === e.from);
-      const b = nodes.find(n => n.id === e.to);
-      if (!a || !b || a === dragging || b === dragging) return;
-      const pa = toScreen(a), pb = toScreen(b);
-      const target = e.dashed ? 120 : 160;
-      const dx = pb.x - pa.x;
-      const dy = pb.y - pa.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const f = (dist - target) * kSpring;
-      a.vx += (dx / dist) * f;
-      a.vy += (dy / dist) * f;
-      b.vx -= (dx / dist) * f;
-      b.vy -= (dy / dist) * f;
-    });
-
-    nodes.forEach(n => {
-      if (n === dragging) return;
-      n.vx += (n.x - 0.5) * -kCenter * width;
-      n.vy += (n.y - 0.4) * -kCenter * height;
-      n.x += n.vx / width;
-      n.y += n.vy / height;
-      n.x = Math.max(0.08, Math.min(0.92, n.x));
-      n.y = Math.max(0.1, Math.min(0.85, n.y));
-    });
-  }
-
-  function draw() {
-    ctx.clearRect(0, 0, width, height);
-
-    applyForces();
-
-    const positions = {};
-    nodes.forEach(n => positions[n.id] = toScreen(n));
-
-    edges.forEach(e => {
-      const active =
-        (e.from === "planner" && e.to === "researcher" && currentState.plan) ||
-        (e.from === "researcher" && e.to === "builder" && currentState.research) ||
-        (e.from === "builder" && e.to === "end" && (currentState.builder_report || currentState.files_changed.length)) ||
-        (e.from === "builder" && e.to === "planner" && (currentState.blockers || currentState.research_status === "need_replan")) ||
-        (e.from === "researcher" && e.to === "planner" && (currentState.research_status === "no_relevant_knowledge" || currentState.research_status === "need_replan")) ||
-        (e.from === "researcher" && e.to === "kb" && currentState.research);
-      drawArrow(positions[e.from], positions[e.to], active, e.dashed);
-    });
-
-    nodes.forEach(drawNode);
-  }
-
-  function loop() {
-    if (document.visibilityState === "visible") draw();
-    requestAnimationFrame(loop);
-  }
-
-  function hitNode(x, y) {
-    for (let i = nodes.length - 1; i >= 0; i--) {
-      const n = nodes[i];
-      const p = toScreen(n);
-      const dx = x - p.x;
-      const dy = y - p.y;
-      if (dx * dx + dy * dy <= n.radius * n.radius * 1.5) return n;
-    }
-    return null;
-  }
-
-  canvas.addEventListener("pointerdown", e => {
-    const rect = canvas.getBoundingClientRect();
-    const n = hitNode(e.clientX - rect.left, e.clientY - rect.top);
-    if (n) {
-      dragging = n;
-      canvas.setPointerCapture(e.pointerId);
-      pulses[n.id] = Date.now();
-    }
-  });
-
-  canvas.addEventListener("pointermove", e => {
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const n = hitNode(x, y);
-    hover = n ? n.id : null;
-    canvas.style.cursor = dragging || hover ? "grabbing" : "grab";
-    if (dragging) {
-      const pos = fromScreen(x, y);
-      dragging.x = Math.max(0.08, Math.min(0.92, pos.x));
-      dragging.y = Math.max(0.1, Math.min(0.85, pos.y));
-    }
-  });
-
-  canvas.addEventListener("pointerup", e => {
-    dragging = null;
-    canvas.releasePointerCapture(e.pointerId);
-  });
-
-  canvas.addEventListener("pointerleave", () => {
-    hover = null;
-  });
-
-  window.addEventListener("resize", resize);
-  window.addEventListener("pulse-node", e => {
-    pulses[e.detail] = Date.now();
-  });
-  resize();
-  loop();
+(async () => {
+  await poll(true);
+  await sweep().catch(()=>{});
+  setInterval(() => poll(true), 5000);
+  addEventListener("visibilitychange", () => { if(!document.hidden) poll(true); });
 })();
-
-function updateInteractiveGraph() {
-  // Canvas loop reads currentState directly; no extra work needed.
-}
-
-function pulseInteractiveNode(id) {
-  const event = new CustomEvent("pulse-node", { detail: id });
-  window.dispatchEvent(event);
-}
-
-// Keyboard shortcuts
-document.addEventListener("keydown", e => {
-  if (e.key === "F5") {
-    e.preventDefault();
-    pollStatus();
-  }
-});
 </script>
 </body>
 </html>

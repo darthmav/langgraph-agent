@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Example usage of the 3-Agent System.
+"""Example usage of the 4-Agent System.
 
 Demonstrates:
-- Planner → Researcher → Builder flow
+- Architect → Planner → Researcher → Builder → Architect flow
 - State injection on every turn
 - Strict output format parsing
 - Cloud LLM support (Anthropic by default, OpenAI optional)
@@ -14,7 +14,7 @@ from langgraph_agent import AgentState, create_agent_graph
 
 
 def run_example(goal: str, max_steps: int = 8):
-    """Run the 3-agent system with a goal.
+    """Run the 4-agent system with a goal.
 
     Args:
         goal: The goal to achieve
@@ -28,10 +28,12 @@ def run_example(goal: str, max_steps: int = 8):
 
     graph = create_agent_graph()
 
-    # Initialize state per the 3-Agent System specification
+    # Initialize state per the 4-Agent System specification
     initial_state: AgentState = {
         "goal": goal,
         "messages": [],
+        "architecture": "",
+        "verdict": "",
         "plan": "",
         "research": "",
         "builder_report": "",
@@ -43,7 +45,7 @@ def run_example(goal: str, max_steps: int = 8):
     }
 
     print(f"\n{'=' * 70}")
-    print(f"3-Agent System - Goal: {goal}")
+    print(f"4-Agent System - Goal: {goal}")
     print(f"{'=' * 70}\n")
 
     # Run the graph

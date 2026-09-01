@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cloud LLM end-to-end test.
 
-This script verifies that the 3-Agent system can run using a cloud LLM.
+This script verifies that the 4-Agent system can run using a cloud LLM.
 Set ANTHROPIC_API_KEY (default) or OPENAI_API_KEY in your environment.
 """
 
@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from langgraph_agent import AgentState, create_agent_graph
+from langgraph_agent.graph import RECURSION_LIMIT
 
 # Default to Anthropic if no cloud key is configured.
 if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("OPENAI_API_KEY"):
@@ -22,6 +23,8 @@ graph = create_agent_graph()
 state: AgentState = {
     "goal": "Create cloud_test.txt with content 'Cloud LLM works!'",
     "messages": [],
+    "architecture": "",
+    "verdict": "",
     "plan": "",
     "research": "",
     "builder_report": "",
@@ -32,8 +35,8 @@ state: AgentState = {
     "step_count": 0,
 }
 
-print("Running 3-Agent with cloud LLM...")
-result = graph.invoke(state, {"recursion_limit": 5})
+print("Running 4-Agent with cloud LLM...")
+result = graph.invoke(state, {"recursion_limit": RECURSION_LIMIT})
 
 print("\n=== RESULTS ===")
 print(f"Full plan: {result.get('plan', 'N/A')!r}")

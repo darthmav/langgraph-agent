@@ -1,6 +1,7 @@
 """State schema for the agent graph.
 
-Matches the 3-Agent System specification:
+The 4-Agent System:
+- Architect writes: architecture, verdict
 - Planner writes: plan, next_agent
 - Researcher writes: research, research_status
 - Builder writes: builder_report, files_changed, blockers
@@ -18,14 +19,28 @@ class ResearchStatus(str, Enum):
     NO_RELEVANT_KNOWLEDGE = "no_relevant_knowledge"
 
 
+class Verdict(str, Enum):
+    """The Architect's ruling, which decides where the loop goes next.
+
+    The Architect runs twice per cycle -- once to set direction, once as the
+    approval gate -- so PLAN is the opening ruling and the other three are
+    what it can say about work the Builder has already reported.
+    """
+
+    PLAN = "plan"
+    APPROVED = "approved"
+    REVISE = "revise"
+    NEED_RESEARCH = "need_research"
+
+
 class AgentState(TypedDict):
     """Shared state passed between all nodes.
-
-    As specified in the 3-Agent System documentation:
 
     Attributes:
         goal: The user's original goal/objective
         messages: Conversation history / log
+        architecture: Architectural direction and constraints from the Architect
+        verdict: The Architect's ruling (Verdict enum value)
         plan: Structured plan from Planner
         research: Findings from Researcher
         builder_report: Implementation report from Builder
@@ -38,6 +53,8 @@ class AgentState(TypedDict):
 
     goal: str
     messages: list[str]
+    architecture: str
+    verdict: str  # Verdict enum value
     plan: str
     research: str
     builder_report: str

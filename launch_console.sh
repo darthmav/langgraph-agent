@@ -26,10 +26,20 @@ if [ -f ".env" ]; then
     . ./.env
     set +a
     echo "✓ Loaded .env"
-    # Report the active provider/model for the primary agent
-    provider="${PLANNER_PROVIDER:-anthropic}"
-    model="${PLANNER_MODEL:-${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}}"
-    echo "  LLM: ${model} (${provider})"
+fi
+
+# Report the seats from config.py rather than re-deriving them from env vars.
+# Guessing here is how this line ended up claiming a Claude model for seats
+# that were running something else -- or nothing at all.
+if [ -d "src" ]; then
+    PYTHONPATH=src python3 - <<'PY' 2>/dev/null || true
+from langgraph_agent.config import AGENTS, get_agent_status
+
+for agent in AGENTS:
+    seat = get_agent_status(agent)
+    flag = "" if seat["live"] else f"  !! {seat['reason']}"
+    print(f"  {agent:11}{seat['model']:22}{seat['provider']}{flag}")
+PY
 fi
 
 is_server_ready() {

@@ -1,12 +1,19 @@
 """Configuration and LLM setup.
 
-Supports per-agent LLM selection so Planner, Researcher, and Builder can each
-use a different model/provider. Defaults are cloud-only: Anthropic is the primary
-provider. OpenAI remains available as an optional cloud provider.
+Supports per-agent LLM selection so Architect, Planner, Researcher, and Builder
+can each use a different model/provider. Inference is cloud-only: the Architect
+runs on the Anthropic API and the other three seats run on Ollama Cloud tags,
+which the local daemon proxies to ollama.com. OpenAI remains optional.
+
+The only thing that runs on this machine is the embedding model, which belongs
+to GraphRAG rather than to any agent seat.
 """
 
+import json
 import os
 import re
+import time
+import urllib.request
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -16,34 +23,172 @@ from pydantic import SecretStr
 load_dotenv()
 
 
+# The four seats, in the order they hold the loop. Anything that iterates
+# agents reads this rather than repeating the list.
+AgentName = Literal["architect", "planner", "researcher", "builder"]
+Provider = Literal["openai", "anthropic", "ollama"]
+
+AGENTS: tuple[AgentName, ...] = ("architect", "planner", "researcher", "builder")
+
+
 # Default model per (provider, agent) when a per-agent provider is configured
 # but no model is supplied. Cloud-first defaults.
 _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
-    ("anthropic", "planner"): "claude-3-5-sonnet-20241022",
-    ("anthropic", "researcher"): "claude-3-5-haiku-20241022",
-    ("anthropic", "builder"): "claude-3-5-haiku-20241022",
+    ("anthropic", "architect"): "claude-opus-5",
+    ("anthropic", "planner"): "claude-opus-5",
+    ("anthropic", "researcher"): "claude-sonnet-5",
+    ("anthropic", "builder"): "claude-sonnet-5",
+    ("ollama", "architect"): "kimi-k3:cloud",
+    ("ollama", "planner"): "qwen3.5:397b-cloud",
+    ("ollama", "researcher"): "gemma4:cloud",
+    ("ollama", "builder"): "kimi-k3:cloud",
+    ("openai", "architect"): "gpt-4o",
     ("openai", "planner"): "gpt-4o",
     ("openai", "researcher"): "gpt-4o-mini",
     ("openai", "builder"): "gpt-4o-mini",
 }
 
 
-# Cloud LLM options exposed in the console.
+# The seat each agent takes when nothing overrides it. Claude is the leading
+# authority on architecture, so the Architect is the one Anthropic seat.
+DEFAULT_SEATS: dict[str, dict[str, str]] = {
+    "architect": {"provider": "anthropic", "model": "claude-opus-5"},
+    "planner": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
+    "researcher": {"provider": "ollama", "model": "gemma4:cloud"},
+    "builder": {"provider": "ollama", "model": "kimi-k3:cloud"},
+}
+
+
+# Cloud LLM options exposed in the console. `group` drives the <optgroup>
+# headings in the seat dropdowns.
 AGENT_LLM_OPTIONS: list[dict[str, str]] = [
-    {
-        "label": "Anthropic Claude 3.5 Sonnet",
-        "provider": "anthropic",
-        "model": "claude-3-5-sonnet-20241022",
-    },
-    {
-        "label": "Anthropic Claude 3.5 Haiku",
-        "provider": "anthropic",
-        "model": "claude-3-5-haiku-20241022",
-    },
+    {"label": "Claude Opus 5", "provider": "anthropic", "model": "claude-opus-5",
+     "group": "Anthropic"},
+    {"label": "Claude Sonnet 5", "provider": "anthropic", "model": "claude-sonnet-5",
+     "group": "Anthropic"},
+    {"label": "Claude Haiku 4.5", "provider": "anthropic", "model": "claude-haiku-4-5",
+     "group": "Anthropic"},
+    {"label": "Kimi K3", "provider": "ollama", "model": "kimi-k3:cloud",
+     "group": "Ollama Cloud"},
+    {"label": "Qwen3.5 397B", "provider": "ollama", "model": "qwen3.5:397b-cloud",
+     "group": "Ollama Cloud"},
+    {"label": "Gemma 4", "provider": "ollama", "model": "gemma4:cloud",
+     "group": "Ollama Cloud"},
     # Optional cloud provider
-    {"label": "OpenAI GPT-4o", "provider": "openai", "model": "gpt-4o"},
-    {"label": "OpenAI GPT-4o mini", "provider": "openai", "model": "gpt-4o-mini"},
+    {"label": "OpenAI GPT-4o", "provider": "openai", "model": "gpt-4o",
+     "group": "OpenAI"},
+    {"label": "OpenAI GPT-4o mini", "provider": "openai", "model": "gpt-4o-mini",
+     "group": "OpenAI"},
 ]
+
+
+def _ollama_base_url() -> str:
+    """Where the local Ollama daemon listens.
+
+    The daemon is a proxy here, not a runtime: every seat that uses it runs a
+    `:cloud` tag, which it forwards to ollama.com.
+    """
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+
+
+_ollama_tags_cache: tuple[float, list[str]] = (0.0, [])
+
+
+def list_ollama_models() -> list[str]:
+    """Tags the local Ollama daemon reports, cached for 30s.
+
+    Feeds both the seat dropdowns and the liveness check, either of which can
+    be hit on every status poll -- hence the cache and the short timeout. An
+    unreachable daemon is an empty list, never an exception.
+    """
+    global _ollama_tags_cache
+
+    now = time.monotonic()
+    cached_at, cached = _ollama_tags_cache
+    if cached and now - cached_at < 30.0:
+        return cached
+
+    try:
+        with urllib.request.urlopen(
+            f"{_ollama_base_url()}/api/tags", timeout=2.0
+        ) as response:
+            payload = json.loads(response.read())
+        tags = sorted(str(entry["name"]) for entry in payload.get("models", []))
+    except Exception:
+        tags = []
+
+    _ollama_tags_cache = (now, tags)
+    return tags
+
+
+# Why the last call to a seat failed, if it did. A key can be present and the
+# seat still unusable -- out of credits, expired, revoked, wrong workspace --
+# and only a real call finds that out. Recording the outcome here is what lets
+# the console stop claiming a seat is live without spending a probe request on
+# every five-second status poll.
+_seat_failures: dict[str, str] = {}
+
+
+def _failure_reason(exc: Exception) -> str:
+    """Turn a provider exception into something a seat card can show."""
+    text = str(exc)
+
+    # Providers wrap their real message in a dict repr; pull it back out.
+    match = re.search(r"'message': '([^']+)'", text)
+    message = match.group(1) if match else text
+
+    lowered = message.lower()
+    if "credit balance" in lowered:
+        return "Anthropic credit balance too low"
+    if "authentication" in lowered or "invalid x-api-key" in lowered:
+        return "API key rejected"
+    if "rate limit" in lowered:
+        return "Rate limited"
+    if "not found" in lowered and "model" in lowered:
+        return "Model not available on this account"
+    if "connect" in lowered or "connection" in lowered:
+        return "Provider unreachable"
+
+    return message[:90].strip()
+
+
+class _SeatLLM:
+    """Wraps a seat's chat model so its failures are visible in the console.
+
+    Transparent apart from `invoke`: every other attribute passes through to
+    the wrapped model.
+    """
+
+    def __init__(self, agent: str, inner: Any) -> None:
+        self._agent = agent
+        self._inner = inner
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = self._inner.invoke(*args, **kwargs)
+        except Exception as exc:
+            _seat_failures[self._agent] = _failure_reason(exc)
+            raise
+        # A call that works clears an older failure, so a seat recovers on its
+        # own once credits are topped up or the daemon comes back.
+        _seat_failures.pop(self._agent, None)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _accepts_temperature(provider: str, model: str) -> bool:
+    """Whether this model still accepts a sampling temperature.
+
+    Anthropic removed temperature/top_p/top_k on the 4.6-and-later families
+    (Opus 5, Sonnet 5, Opus 4.6+) -- sending one is rejected with a 400, which
+    reads like a credentials problem and is not one. Legacy `claude-3-*` and
+    the 4.5 models still take it, as do Ollama and OpenAI.
+    """
+    if provider != "anthropic":
+        return True
+    return model.startswith("claude-3") or "-4-5" in model
 
 
 # Runtime per-agent LLM selections set from the console. These override the
@@ -61,7 +206,7 @@ def set_agent_llm(agent: str, provider: str, model: str) -> None:
 
 
 def get_llm(
-    provider: Literal["openai", "anthropic"] | None = None,
+    provider: Provider | None = None,
     model: str | None = None,
     temperature: float = 0.1,
     base_url: str | None = None,
@@ -70,36 +215,49 @@ def get_llm(
     """Get an LLM instance.
 
     Args:
-        provider: LLM provider ("openai" or "anthropic").
+        provider: LLM provider ("anthropic", "ollama" or "openai").
                   Auto-detected from model name/env if not specified.
         model: Model name (default from provider-specific env var).
-        temperature: Sampling temperature.
+        temperature: Sampling temperature, where the model accepts one.
         base_url: Optional API base URL override.
         api_key: Optional API key override.
 
     Returns:
-        Chat model instance.
+        Chat model instance, or `StubLLM` when the provider needs a key and
+        none is configured. Callers that need to know which of the two they
+        got should ask `get_agent_status()` rather than inspect the result.
 
     Environment variables:
         ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+        OLLAMA_BASE_URL, OLLAMA_MODEL
         OPENAI_API_KEY, OPENAI_MODEL  (optional)
     """
     provider = provider or _detect_provider(model)
 
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+
+        # No key: the daemon holds the ollama.com credentials for `:cloud`
+        # tags, so there is nothing for this process to authenticate with.
+        return ChatOllama(
+            model=str(model or os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud")),
+            temperature=temperature,
+            base_url=base_url or _ollama_base_url(),
+        )
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        model_name = model or os.getenv(
-            "ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"
-        )
+        model_name = str(model or os.getenv("ANTHROPIC_MODEL", "claude-opus-5"))
         key = api_key or os.getenv("ANTHROPIC_API_KEY")
         if not key:
             return StubLLM()
         kwargs: dict[str, Any] = {
             "model": model_name,
-            "temperature": temperature,
             "api_key": SecretStr(key),
         }
+        if _accepts_temperature("anthropic", model_name):
+            kwargs["temperature"] = temperature
         if base_url:
             kwargs["base_url"] = base_url
         return ChatAnthropic(**kwargs)
@@ -107,7 +265,7 @@ def get_llm(
     # openai (optional cloud provider)
     from langchain_openai import ChatOpenAI
 
-    model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model_name = str(model or os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     key = api_key or os.getenv("OPENAI_API_KEY")
     if not key:
         return StubLLM()
@@ -121,11 +279,16 @@ def get_llm(
     return ChatOpenAI(**kwargs)
 
 
-def _detect_provider(model: str | None) -> Literal["openai", "anthropic"]:
+def _detect_provider(model: str | None) -> Provider:
     """Detect provider from model name or environment.
 
-    Cloud-first priority: Anthropic, then OpenAI.
+    Cloud-first priority: Anthropic, then Ollama, then OpenAI.
     """
+    # A tag carrying a colon is an Ollama tag; nothing else names models
+    # that way, so it settles the provider before any env var is consulted.
+    if model and ":" in model:
+        return "ollama"
+
     # Anthropic is the primary cloud default.
     if os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_MODEL"):
         return "anthropic"
@@ -137,103 +300,139 @@ def _detect_provider(model: str | None) -> Literal["openai", "anthropic"]:
     # Fallback to model name detection
     if not model:
         return "anthropic"
-    model_lower = model.lower()
-    if "claude" in model_lower:
+    if "claude" in model.lower():
         return "anthropic"
     return "openai"
 
 
-def get_agent_llm(
-    agent: Literal["planner", "researcher", "builder"],
-    temperature: float = 0.1,
-) -> Any:
-    """Get the LLM configured for a specific agent role.
+def _resolve_seat(agent: str) -> dict[str, str | None]:
+    """Resolve one agent's provider, model, base URL and key.
 
-    Reads per-agent environment variables:
-        PLANNER_PROVIDER, PLANNER_MODEL, PLANNER_BASE_URL, PLANNER_API_KEY
-        RESEARCHER_PROVIDER, RESEARCHER_MODEL, RESEARCHER_BASE_URL, RESEARCHER_API_KEY
-        BUILDER_PROVIDER, BUILDER_MODEL, BUILDER_BASE_URL, BUILDER_API_KEY
+    Precedence: a console override, then per-agent environment variables, then
+    the agent's default seat. `get_agent_llm`, `get_agent_model_info` and
+    `get_agent_status` all route through here -- if they resolved seats
+    independently the console could name one model while the run used another,
+    which is the failure this function exists to prevent.
 
-    Falls back to the legacy single-model configuration when per-agent variables
-    are not set, preserving backward compatibility.
-
-    Recommended 3-model setup (cloud):
-        Planner    -> Anthropic Claude 3.5 Sonnet  (main architect / structural planning)
-        Researcher -> Anthropic Claude 3.5 Haiku   (knowledge gathering)
-        Builder    -> Anthropic Claude 3.5 Haiku   (code implementation)
+    Per-agent environment variables, for each of ARCHITECT, PLANNER,
+    RESEARCHER and BUILDER:
+        {ROLE}_PROVIDER, {ROLE}_MODEL, {ROLE}_BASE_URL, {ROLE}_API_KEY
     """
-    provider: str | None
-    model: str | None
-    base_url: str | None
-    api_key: str | None
-
-    # Runtime console override takes precedence over env vars.
     override = _agent_llm_overrides.get(agent)
     if override:
-        provider = override["provider"]
-        model = override["model"]
-        base_url = os.getenv(f"{provider.upper()}_BASE_URL") if provider else None
-        api_key = None
-    else:
-        prefix = agent.upper()
-        provider = os.getenv(f"{prefix}_PROVIDER")
-        model = os.getenv(f"{prefix}_MODEL")
-        base_url = os.getenv(f"{prefix}_BASE_URL")
-        api_key = os.getenv(f"{prefix}_API_KEY")
+        chosen = override["provider"]
+        return {
+            "provider": chosen,
+            "model": override["model"],
+            # A console selection carries no key of its own, so the provider's
+            # own credentials apply -- the same ones the default seat uses.
+            "base_url": os.getenv(f"{chosen.upper()}_BASE_URL"),
+            "api_key": None,
+        }
 
-        per_agent_configured = bool(provider or model)
+    prefix = agent.upper()
+    provider: str | None = os.getenv(f"{prefix}_PROVIDER")
+    model: str | None = os.getenv(f"{prefix}_MODEL")
 
-        if not per_agent_configured:
-            # Legacy single-model fallback: every agent uses the same provider/model.
-            provider = _detect_provider(None)
-            model = None
-        elif not model and provider:
-            # Per-agent provider was explicitly chosen; apply a sensible default
-            # model for that provider + agent combination.
-            model = _DEFAULT_AGENT_MODELS.get((provider, agent))
+    if not provider and not model:
+        # Deliberately not consulting a provider-wide {PROVIDER}_MODEL here:
+        # the four seats run four different models on purpose, and a single
+        # OLLAMA_MODEL would silently collapse three of them onto one. Retune
+        # a seat with {ROLE}_MODEL or the console dropdown instead.
+        seat = DEFAULT_SEATS.get(agent, DEFAULT_SEATS["builder"])
+        provider, model = seat["provider"], seat["model"]
+    elif provider and not model:
+        model = _DEFAULT_AGENT_MODELS.get((provider, agent))
+    elif model and not provider:
+        provider = _detect_provider(model)
 
-    return get_llm(
-        provider=provider,  # type: ignore[arg-type]
-        model=model,
-        temperature=temperature,
-        base_url=base_url,
-        api_key=api_key,
+    return {
+        "provider": provider,
+        "model": model,
+        "base_url": os.getenv(f"{prefix}_BASE_URL"),
+        "api_key": os.getenv(f"{prefix}_API_KEY"),
+    }
+
+
+def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
+    """Get the LLM configured for a specific agent role.
+
+    Default seats (cloud only -- see DEFAULT_SEATS):
+        Architect  -> Anthropic claude-opus-5      (leading authority)
+        Planner    -> Ollama    qwen3.5:397b-cloud
+        Researcher -> Ollama    gemma4:cloud
+        Builder    -> Ollama    kimi-k3:cloud
+    """
+    seat = _resolve_seat(agent)
+    return _SeatLLM(
+        agent,
+        get_llm(
+            provider=seat["provider"],  # type: ignore[arg-type]
+            model=seat["model"],
+            temperature=temperature,
+            base_url=seat["base_url"],
+            api_key=seat["api_key"],
+        ),
     )
 
 
-def get_agent_model_info(
-    agent: Literal["planner", "researcher", "builder"],
-) -> dict[str, str]:
-    """Resolve the configured provider/model name for an agent without instantiating an LLM.
+def get_agent_model_info(agent: AgentName) -> dict[str, str]:
+    """Resolve an agent's provider/model without instantiating an LLM."""
+    seat = _resolve_seat(agent)
+    return {
+        "provider": seat["provider"] or "anthropic",
+        "model": seat["model"] or "claude-opus-5",
+    }
 
-    Mirrors the fallback logic of `get_agent_llm()` so the UI can display the
-    model each agent will use.
+
+def get_agent_status(agent: AgentName) -> dict[str, Any]:
+    """Resolve an agent's seat and say whether it can actually run.
+
+    `get_llm` falls back to `StubLLM` when a key is missing, while
+    `get_agent_model_info` keeps reporting the configured model either way --
+    so without this the console shows a model name while canned text comes out
+    of the run. `live` is the field that tells the truth about that, and it is
+    what drives the NO KEY chip and the offline banner.
     """
-    # Runtime console override takes precedence over env vars.
-    override = _agent_llm_overrides.get(agent)
-    if override:
-        return {"provider": override["provider"], "model": override["model"]}
+    info = get_agent_model_info(agent)
+    provider, model = info["provider"], info["model"]
 
-    prefix = agent.upper()
-    provider = os.getenv(f"{prefix}_PROVIDER")
-    model = os.getenv(f"{prefix}_MODEL")
+    # `stubbed` and `live` are different failures and must not be conflated.
+    # A seat with no key at all silently becomes StubLLM and the run completes
+    # with canned text; a seat with a key that does not work fails the run
+    # outright. The console words those two cases differently.
+    live, reason, badge, stubbed = True, "", "", False
 
-    per_agent_configured = bool(provider or model)
+    # A real failure from the last call outranks every static check: the key
+    # can be present and correct and the seat still unable to run.
+    failure = _seat_failures.get(agent)
+    if failure:
+        live, reason, badge = False, failure, "FAILING"
+    elif provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
+        live, reason, badge, stubbed = False, "ANTHROPIC_API_KEY not set", "NO KEY", True
+    elif provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+        live, reason, badge, stubbed = False, "OPENAI_API_KEY not set", "NO KEY", True
+    elif provider == "ollama":
+        tags = list_ollama_models()
+        if not tags:
+            live, reason, badge = False, "Ollama daemon unreachable", "OFFLINE"
+        elif model not in tags:
+            live, reason, badge = False, f"{model} not pulled", "NOT PULLED"
 
-    if not per_agent_configured:
-        provider = _detect_provider(None)
-        model = None
-    elif not model and provider:
-        model = _DEFAULT_AGENT_MODELS.get((provider, agent))
+    # Where the prompt goes, read off the seat rather than guessed: an Ollama
+    # tag ending `:cloud` is proxied to ollama.com by the local daemon, so the
+    # transport is local but the prompt still leaves the machine.
+    remote = provider in ("anthropic", "openai") or model.endswith((":cloud", "-cloud"))
 
-    # Fallback to provider-specific global defaults if no per-agent default applies.
-    if not model:
-        if provider == "anthropic":
-            model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
-        else:
-            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-    return {"provider": provider or "anthropic", "model": model}
+    return {
+        "provider": provider,
+        "model": model,
+        "live": live,
+        "reason": reason,
+        "badge": badge,
+        "stubbed": stubbed,
+        "placement": "REMOTE" if remote else "LOCAL",
+    }
 
 
 class StubLLM:
@@ -246,21 +445,46 @@ class StubLLM:
         """Return canned responses for testing."""
         from langchain_core.messages import AIMessage
 
-        # Check all messages for agent detection
+        # Role comes from the system message; everything else is data.
+        # The Researcher injects retrieved documents into the Builder's prompt,
+        # and this repository indexes its own prompt files -- so a corpus hit
+        # can put "You are the Architect" inside a Builder call. Reading the
+        # role off user content makes the stub answer as the wrong agent.
+        system_content = ""
         all_content = ""
         last_content = ""
         for msg in messages:
             content = str(msg.content) if hasattr(msg, "content") else str(msg)
             all_content += content + " "
             last_content = content
+            if getattr(msg, "type", "") == "system":
+                system_content += content + " "
 
         all_lower = all_content.lower()
         last_lower = last_content.lower()
+        # Fall back to the whole prompt only when no system message was given.
+        role_source = system_content.lower() or all_lower
 
-        # Detect which agent is being called based on prompt content
-        is_planner = "planner" in all_lower or "understand the user's goal" in all_lower
-        is_researcher = "researcher" in all_lower or "gather high-quality" in all_lower
-        is_builder = "builder" in all_lower or "implement the plan" in all_lower
+        # Detect which agent is being called. Every prompt names the other
+        # roles in order to route between them, so a bare role keyword matches
+        # all four -- the Builder's prompt says "Planner" twice. Identify on
+        # the self-identifying opening instead, and only fall back to the
+        # looser phrases when a caller supplied its own prompt.
+        roles = ("architect", "planner", "researcher", "builder")
+        identified = next(
+            (role for role in roles if f"you are the {role}" in role_source), None
+        )
+
+        is_architect = identified == "architect"
+        is_planner = identified == "planner"
+        is_researcher = identified == "researcher"
+        is_builder = identified == "builder"
+
+        if identified is None:
+            is_architect = "## verdict" in role_source
+            is_planner = "understand the user's goal" in role_source
+            is_researcher = "gather high-quality" in role_source
+            is_builder = "implement the plan" in role_source
 
         # For the Planner, decide whether the *user goal* asks for research.
         # Ignore the state-injection block, which contains a "Research:" label.
@@ -270,7 +494,36 @@ class StubLLM:
         user_goal = user_goal_match.group(1).lower() if user_goal_match else last_lower
         needs_research = "research" in user_goal
 
-        if is_planner:
+        if is_architect:
+            # The Architect runs twice per cycle: once to set direction, and
+            # again as the approval gate. A populated builder report is what
+            # separates the two.
+            reviewing = (
+                "builder report:" in all_lower
+                and "builder report: (empty)" not in all_lower
+            )
+            if reviewing:
+                response = """## Architecture
+Change stays within the existing module boundaries.
+
+## Constraints
+- Preserve the existing state schema
+- No new external services
+
+## Verdict
+approved"""
+            else:
+                response = """## Architecture
+Single-module change against the current structure.
+
+## Constraints
+- Preserve the existing state schema
+- No new external services
+
+## Verdict
+plan"""
+
+        elif is_planner:
             # Planner response format
             if needs_research:
                 response = """## Goal

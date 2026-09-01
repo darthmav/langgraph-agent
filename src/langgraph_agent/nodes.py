@@ -1,6 +1,7 @@
-"""Agent nodes: Planner, Researcher, Builder.
+"""Agent nodes: Architect, Planner, Researcher, Builder.
 
-Implements the 3-Agent System specification with strict prompts and tool binding:
+Implements the 4-Agent System with strict prompts and tool binding:
+- Architect: reasoning only, no tools; sets direction and holds the approval gate
 - Planner: reasoning only, no tools
 - Researcher: GraphRAG MCP tools only
 - Builder: filesystem, git, terminal tools only
@@ -8,13 +9,14 @@ Implements the 3-Agent System specification with strict prompts and tool binding
 
 import asyncio
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from langgraph_agent.config import get_agent_llm
 from langgraph_agent.mcp_client import mcp_client
-from langgraph_agent.state import AgentState, ResearchStatus
+from langgraph_agent.state import AgentState, ResearchStatus, Verdict
 
 
 def _call_mcp_tool_sync(tool_name: str, arguments: dict[str, Any]) -> Any:
@@ -52,8 +54,34 @@ def _load_prompt(name: str, fallback: str) -> str:
 
 # System prompts from the 3-Agent System documentation.
 # Loaded from prompts/ when available, with inline fallbacks.
-_PLANNER_PROMPT_INLINE = """You are the Planner agent in a three-agent software system.
-The other agents are Researcher and Builder. You are not them.
+_ARCHITECT_PROMPT_INLINE = """You are the Architect. You are the leading authority
+on this project: you set the architectural direction before any work starts, and
+you decide when work is finished.
+
+You run twice per cycle. Before the Planner sees the goal, you decide how the
+work should be shaped and rule `plan`. After the Builder reports, you judge the
+result against the goal and your own constraints and rule `approved` (the goal
+is met -- this ends the run), `revise` (the approach needs replanning), or
+`need_research` (blocked on knowledge nobody has gathered).
+
+You must not write code, call tools, or gather knowledge yourself.
+
+Output exactly this format and nothing else:
+
+## Architecture
+<how this work should be shaped>
+
+## Constraints
+- <a constraint the Planner and Builder must respect>
+
+## Verdict
+plan | approved | revise | need_research"""
+
+
+_PLANNER_PROMPT_INLINE = """You are the Planner agent in a four-agent software system.
+The other agents are Architect, Researcher and Builder. You are not them.
+The Architect is the authority on architecture and rules on when the
+work is done; treat its constraints as binding.
 
 Your only job:
 1. Understand the user's goal.
@@ -95,8 +123,10 @@ Builder
 [assumptions, risks, why this next agent, what to skip]
 """
 
-_RESEARCHER_PROMPT_INLINE = """You are the Researcher agent in a three-agent software system.
-The other agents are Planner and Builder. You are not them.
+_RESEARCHER_PROMPT_INLINE = """You are the Researcher agent in a four-agent software system.
+The other agents are Architect, Planner and Builder. You are not them.
+The Architect is the authority on architecture and rules on when the
+work is done; treat its constraints as binding.
 
 Your only job:
 Gather high-quality, relevant knowledge so the Builder can implement the plan.
@@ -135,8 +165,10 @@ OR
 no_relevant_knowledge
 """
 
-_BUILDER_PROMPT_INLINE = """You are the Builder agent in a three-agent software system.
-The other agents are Planner and Researcher. You are not them.
+_BUILDER_PROMPT_INLINE = """You are the Builder agent in a four-agent software system.
+The other agents are Architect, Planner and Researcher. You are not them.
+The Architect is the authority on architecture and rules on when the
+work is done; treat its constraints as binding.
 
 Your only job:
 Implement the plan using the research provided. Use tools to make real changes.
@@ -168,6 +200,7 @@ Output exactly this format after you finish using tools:
 [none | what is blocked and what information is needed]
 """
 
+ARCHITECT_PROMPT = _load_prompt("architect", _ARCHITECT_PROMPT_INLINE)
 PLANNER_PROMPT = _load_prompt("planner", _PLANNER_PROMPT_INLINE)
 RESEARCHER_PROMPT = _load_prompt("researcher", _RESEARCHER_PROMPT_INLINE)
 BUILDER_PROMPT = _load_prompt("builder", _BUILDER_PROMPT_INLINE)
@@ -190,6 +223,8 @@ def _get_state_injection(state: AgentState) -> str:
 
     return f"""## Current state
 Goal: {_fmt("goal")}
+Architecture: {_fmt("architecture")}
+Verdict: {_fmt("verdict")}
 Plan: {_fmt("plan")}
 Research: {_fmt("research")}
 Builder report: {_fmt("builder_report")}
@@ -332,6 +367,92 @@ def _parse_builder_output(content: str) -> dict[str, Any]:
         result["next_steps_blockers"] = blockers_match.group(1).strip()
 
     return result
+
+
+def _parse_architect_output(content: str, reviewing: bool = False) -> dict[str, Any]:
+    """Parse Architect output into architecture text and a verdict.
+
+    Args:
+        content: Raw model output.
+        reviewing: Whether this was the gate pass. It picks the fallback when
+            no verdict parses: before the Builder has reported the only sound
+            ruling is `plan`, and after it the sound ruling is `approved`, so a
+            malformed response ends the run instead of looping on it forever.
+    """
+    result: dict[str, Any] = {
+        "architecture": "",
+        "verdict": Verdict.APPROVED.value if reviewing else Verdict.PLAN.value,
+    }
+
+    architecture = ""
+    arch_match = re.search(
+        r"## Architecture\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE
+    )
+    if arch_match:
+        architecture = arch_match.group(1).strip()
+
+    # Constraints ride along in the same field: they are the half the Planner
+    # and Builder actually have to obey, and state injection renders one value.
+    constraints_match = re.search(
+        r"## Constraints\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE
+    )
+    if constraints_match and constraints_match.group(1).strip():
+        constraints = constraints_match.group(1).strip()
+        architecture = f"{architecture}\n\nConstraints:\n{constraints}".strip()
+
+    result["architecture"] = architecture
+
+    verdicts = "|".join(verdict.value for verdict in Verdict)
+    verdict_match = re.search(
+        rf"## Verdict\s*\n({verdicts})\b", content, re.IGNORECASE
+    )
+    if verdict_match:
+        result["verdict"] = verdict_match.group(1).strip().lower()
+
+    return result
+
+
+def architect_node(state: AgentState) -> AgentState:
+    """Architect: set direction, then rule on whether the work is done.
+
+    No tools. Runs twice per cycle -- as the entry authority before the Planner,
+    and as the approval gate after the Builder reports. A populated builder
+    report is what tells the two passes apart.
+    """
+    reviewing = bool(state.get("builder_report"))
+
+    state_injection = _get_state_injection(state)
+    goal = state.get("goal", "")
+    task = (
+        "The Builder has reported. Rule on the work."
+        if reviewing
+        else "Set the architectural direction for this goal."
+    )
+
+    messages = [
+        SystemMessage(content=ARCHITECT_PROMPT),
+        HumanMessage(content=f"{state_injection}\n\nUser goal: {goal}\n\n{task}"),
+    ]
+
+    llm = get_agent_llm("architect")
+    response = llm.invoke(messages)
+    parsed = _parse_architect_output(response.content, reviewing=reviewing)
+
+    # Keep the opening architecture if the gate pass did not restate it --
+    # losing it mid-run would strip the constraints out of every later prompt.
+    if parsed["architecture"]:
+        state["architecture"] = parsed["architecture"]
+    state["verdict"] = parsed["verdict"]
+
+    # The gate is the one point every cycle passes through, so it is where the
+    # loop counter belongs. The Builder used to own it, which let a
+    # Planner/Researcher loop run without ever counting a step.
+    if reviewing:
+        state["step_count"] = state.get("step_count", 0) + 1
+
+    state["messages"].append(f"[Architect] Verdict: {state['verdict']}")
+
+    return state
 
 
 def planner_node(state: AgentState) -> AgentState:
@@ -553,13 +674,17 @@ def builder_node(state: AgentState) -> AgentState:
                 if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
                     content_matches.append(match)
 
-        if create_matches:
+        # Both halves are required. With a filename but no content the
+        # heuristics used to write a literal "Content for <name>" placeholder
+        # and report the file as changed -- a silent success that the Architect
+        # then approved. Without content this falls through to the LLM path,
+        # which is what that path is for.
+        if create_matches and content_matches:
             for filename in create_matches:
                 # Clean up filename
                 filename = filename.strip().strip('`"\'')
 
-                # Get content (use first match or default)
-                content = content_matches[0] if content_matches else f"Content for {filename}"
+                content = content_matches[0]
 
                 # Write the file through the MCP filesystem tool, preserving
                 # the documented tool boundary (Builder only uses filesystem/git
@@ -603,7 +728,21 @@ def builder_node(state: AgentState) -> AgentState:
 
         if not files_changed:
             builder_report = parsed.get("changes_made", response.content)
-            files_changed = parsed.get("files_modified", [])
+
+            # files_changed is deliberately NOT taken from the model's prose.
+            # A file counts as changed only when the Builder actually called
+            # filesystem_write for it; a model that describes writing a module
+            # it never wrote would otherwise have the console report "changed
+            # this machine" for work that never touched the disk.
+            claimed = [
+                path for path in parsed.get("files_modified", [])
+                if not Path(path).exists()
+            ]
+            if claimed:
+                builder_report += (
+                    "\n\nDescribed but not written (no filesystem_write call): "
+                    + ", ".join(claimed)
+                )
 
         # Capture any blockers reported by the LLM, but treat "none" as no
         # blockers so the graph can finish cleanly.
@@ -621,6 +760,9 @@ def builder_node(state: AgentState) -> AgentState:
     state["files_changed"] = files_changed
     state["blockers"] = blockers
     state["messages"].append(f"[Builder] Implementation complete. Files: {len(files_changed)}")
-    state["step_count"] = state.get("step_count", 0) + 1
+
+    # step_count is incremented by the Architect gate, not here: every cycle
+    # passes through the gate, but a Planner/Researcher loop never reaches the
+    # Builder, and counting here let those loops run uncounted.
 
     return state

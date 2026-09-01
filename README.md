@@ -1,13 +1,20 @@
-# 3-Agent AI System
+# 4-Agent AI System
 
-**Planner · Researcher · Builder**
+**Architect · Planner · Researcher · Builder**
 
 A multi-agent system for software development experiments, powered by LangGraph + GraphRAG + MCP.
-Cloud-only by default: **Anthropic** is the primary LLM provider. **OpenAI** remains available as an optional cloud provider.
+
+Inference is **cloud only**. Claude is the leading authority and takes the
+Architect seat via the Anthropic API; the other three seats run Ollama Cloud
+tags, which the local daemon proxies to ollama.com. The only thing that runs on
+this machine is the embedding model.
 
 ## 🎨 Web Console
 
 ```bash
+# Build the knowledge graph first — the Graph tab is empty without it
+python scripts/reindex.py
+
 # Quick launch
 ./launch_console.sh
 
@@ -16,23 +23,40 @@ python serve.py
 # Open: http://localhost:8080
 ```
 
+Five tabs: **Engineer** (give the Architect a goal, watch the stages),
+**Graph** (the knowledge graph as a force-directed map — press *Sweep all*),
+**Retrieval** (semantic search plus an RPC telemetry log), **Corpus**
+(documents and a reindex button), and **State** (the raw `AgentState`).
+
+The left rail is the crew: one card per seat, each with its model, where the
+prompt goes (`REMOTE` / `LOCAL`), and a status chip when the seat cannot
+actually run — `NO KEY`, `FAILING`, `OFFLINE` or `NOT PULLED`.
+
 See [`frontend/README.md`](frontend/README.md) for full documentation.
 
 ## Architecture
 
 ```
-Human (optional gates) → Planner → Researcher → Builder → END
-                              ^                    |
-                              +------ loop --------+
+START → Architect → Planner → (Researcher | Builder) → Architect → END
+             ^                                             |
+             +--------- revise / need_research -------------+
 ```
 
-### The Three Agents
+The Architect runs twice per cycle: once to set direction before anything is
+planned, and again as the approval gate. The Builder does not decide the work is
+finished — it reports, and the authority that set the constraints rules on it.
 
-| Agent        | Responsibility                                      | Tools                          |
-|--------------|-----------------------------------------------------|--------------------------------|
-| **Planner**  | Turns goals into structured plans, routes next      | None (reasoning only)          |
-| **Researcher** | Gathers deep, relationship-aware knowledge        | GraphRAG MCP only              |
-| **Builder**  | Implements the plan (writes code, edits files)      | Filesystem, Git, Terminal      |
+### The Four Agents
+
+| Agent | Responsibility | Default seat | Tools |
+|---|---|---|---|
+| **Architect** | Sets direction and constraints; rules `approved` / `revise` / `need_research` | `claude-opus-5` (anthropic) | None (reasoning only) |
+| **Planner** | Turns goals into structured plans, routes next | `qwen3.5:397b-cloud` (ollama) | None (reasoning only) |
+| **Researcher** | Gathers deep, relationship-aware knowledge | `gemma4:cloud` (ollama) | GraphRAG MCP only |
+| **Builder** | Implements the plan (writes code, edits files) | `kimi-k3:cloud` (ollama) | Filesystem, Git, Terminal |
+
+Every seat is reassignable live from its dropdown in the console; selections last
+for the life of the process.
 
 ### The Three Technologies
 
@@ -56,11 +80,27 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-The default uses Anthropic:
+The Architect seat needs an Anthropic key:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+```
+
+Without it that seat falls back to a canned stub. It does so **visibly** — the
+seat card shows a `NO KEY` chip and the console banners it — rather than
+pretending to run the model.
+
+A key that exists but does not work (no credits, rate limited, model not on the
+account) is a different failure: the seat shows `FAILING` with the provider's own
+message and runs abort rather than quietly producing stub text. That state is
+recorded from the actual outcome of a call, so it appears after the first run.
+
+The three Ollama seats need the daemon running and signed in, since it holds the
+ollama.com credentials for `:cloud` tags:
+
+```bash
+ollama signin
+ollama pull kimi-k3:cloud       # and qwen3.5:397b-cloud, gemma4:cloud
 ```
 
 ### Optional OpenAI provider
@@ -160,12 +200,14 @@ python example_usage.py
 
 ## Shared State Schema
 
-Per the 3-Agent System specification:
+Per the 4-Agent System specification:
 
 | Field              | Written By  | Description                                    |
 |--------------------|-------------|------------------------------------------------|
 | `goal`             | User        | The user's original goal                       |
 | `messages`         | All         | Conversation history / log                     |
+| `architecture`     | Architect   | Direction and constraints, injected downstream  |
+| `verdict`          | Architect   | `plan` \| `approved` \| `revise` \| `need_research` |
 | `plan`             | Planner     | Structured plan with steps                     |
 | `research`         | Researcher  | Findings from GraphRAG queries                 |
 | `builder_report`   | Builder     | Implementation report                          |
@@ -173,7 +215,7 @@ Per the 3-Agent System specification:
 | `research_status`  | Researcher  | `ready_for_builder` \| `need_replan` \| `no_relevant_knowledge` |
 | `blockers`         | Builder     | What's blocking progress                       |
 | `files_changed`    | Builder     | List of modified file paths                    |
-| `step_count`       | Builder     | Number of steps (for loop limit, max 8)        |
+| `step_count`       | Architect   | Cycles through the gate (loop limit, max 8)    |
 
 ## MCP Integration
 
@@ -194,6 +236,7 @@ unified MCP-style interface:
 The Researcher and Builder nodes call these tools through `MCPClient`, preserving
 the documented specialization:
 
+- Architect → no tools
 - Planner → no tools
 - Researcher → GraphRAG read-only tools only
 - Builder → filesystem / git / terminal / test tools only
@@ -210,7 +253,7 @@ tool name to the external server.
 │   ├── __init__.py
 │   ├── state.py                # AgentState, ResearchStatus
 │   ├── config.py               # LLM setup (Anthropic primary, OpenAI optional)
-│   ├── nodes.py                # Planner, Researcher, Builder
+│   ├── nodes.py                # Architect, Planner, Researcher, Builder
 │   ├── graph.py                # StateGraph wiring
 │   ├── graphrag_server.py      # GraphRAG MCP server
 │   └── mcp_client.py           # MCP client / tool bindings

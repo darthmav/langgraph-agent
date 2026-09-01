@@ -13,28 +13,11 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
-
-
-def get_project_files(root: str = ".", exclude_dirs: list[str] | None = None) -> list[Path]:
-    """Get all relevant project files."""
-    if exclude_dirs is None:
-        exclude_dirs = [
-            "__pycache__", ".git", ".venv", "venv", "node_modules",
-            ".pytest_cache", ".mypy_cache", "build", "dist", "*.egg-info",
-            "knowledge/", "scripts/", ".qwen/"
-        ]
-
-    files = []
-    root_path = Path(root)
-
-    for pattern in ["**/*.py", "**/*.md", "**/*.txt", "**/*.rst"]:
-        for file_path in root_path.glob(pattern):
-            if any(excl in str(file_path) for excl in exclude_dirs):
-                continue
-            files.append(file_path)
-
-    return files
+from langgraph_agent.graphrag_server import (
+    GraphRAGKnowledgeBase,
+    index_project_files,
+    iter_project_files,
+)
 
 
 def main():
@@ -43,30 +26,22 @@ def main():
     kb = GraphRAGKnowledgeBase()
 
     print("\nScanning project files...")
-    files = get_project_files()
+    files = iter_project_files()
     print(f"Found {len(files)} files to index\n")
 
     print("Indexing files...")
-    for file_path in files:
-        try:
-            content = file_path.read_text(encoding="utf-8")
+    report = index_project_files(kb)
 
-            if len(content) > 100_000:
-                print(f"  Skipping large file: {file_path}")
-                continue
+    for failure in report["errors"]:
+        print(f"  \u2717 {failure}")
 
-            metadata = {
-                "path": str(file_path),
-                "type": "python" if file_path.suffix == ".py" else "markdown",
-            }
-
-            kb.add_document(str(file_path), content, metadata)
-            print(f"  ✓ {file_path}")
-
-        except Exception as e:
-            print(f"  ✗ Error {file_path}: {e}")
-
-    print(f"\n✅ Indexed {len(files)} files")
+    print(f"\n\u2705 Indexed {report['indexed']} files ({report['skipped']} skipped)")
+    if report["errors"]:
+        print(f"\u26a0\ufe0f  {len(report['errors'])} file(s) failed to index")
+    print(
+        f"Graph: {report['total_nodes']} nodes, {report['total_edges']} edges, "
+        f"{report['total_documents']} documents"
+    )
     print(f"Knowledge base stored in: {kb.persist_dir}")
 
     # Test queries
