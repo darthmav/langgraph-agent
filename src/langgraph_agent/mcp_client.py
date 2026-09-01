@@ -79,7 +79,7 @@ class MCPClient:
         tools = {}
 
         # Always provide GraphRAG read-only tools (local or stub).
-        # GraphRAG is read-only per the 3-Agent System specification; adding
+        # GraphRAG is read-only per the 4-Agent System specification; adding
         # documents is done through indexing scripts, not the Researcher tool belt.
         tools["search_knowledge_graph"] = self._graphrag_search
         tools["query_knowledge_graph"] = self._graphrag_query_graph

@@ -52,7 +52,7 @@ def _load_prompt(name: str, fallback: str) -> str:
         return fallback
 
 
-# System prompts from the 3-Agent System documentation.
+# System prompts from the 4-Agent System documentation.
 # Loaded from prompts/ when available, with inline fallbacks.
 _ARCHITECT_PROMPT_INLINE = """You are the Architect. You are the leading authority
 on this project: you set the architectural direction before any work starts, and

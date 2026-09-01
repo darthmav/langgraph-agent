@@ -1,6 +1,6 @@
 ---
 name: test
-description: Run the full pytest suite for the 3-agent system.
+description: Run the full pytest suite for the 4-agent system.
 ---
 
 # Run tests

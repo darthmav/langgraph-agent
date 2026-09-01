@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quick verification and testing for the 3-Agent System
+# Quick verification and testing for the 4-Agent System
 # Usage: ./scripts/quick_test.sh
 
 set -e
@@ -10,7 +10,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 echo "========================================"
-echo "  3-AGENT SYSTEM - QUICK TEST"
+echo "  4-AGENT SYSTEM - QUICK TEST"
 echo "========================================"
 
 echo -e "\n► Checking dependencies..."

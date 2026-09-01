@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Automated verification and testing for the 3-Agent System.
+"""Automated verification and testing for the 4-Agent System.
 
 Usage:
     python scripts/verify_and_test.py [--index] [--test-graphrag] [--run-example]
@@ -215,7 +215,7 @@ def run_tests() -> bool:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Verify and test the 3-Agent System"
+        description="Verify and test the 4-Agent System"
     )
     parser.add_argument(
         "--index",
@@ -250,7 +250,7 @@ def main():
         [args.index, args.test_graphrag, args.run_example, args.run_tests]
     )
 
-    print_header("3-AGENT SYSTEM VERIFICATION")
+    print_header("4-AGENT SYSTEM VERIFICATION")
 
     # Step 1: Always check dependencies
     if not check_dependencies():

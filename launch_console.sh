@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch the 3-Agent Console with frontend and auto-open browser
+# Launch the 4-Agent Console with frontend and auto-open browser
 
 set -e
 
@@ -9,7 +9,7 @@ PORT=8080
 URL="http://localhost:${PORT}"
 
 echo "============================================"
-echo "  Ambiguity 3-Agent Console"
+echo "  Ambiguity 4-Agent Console"
 echo "============================================"
 echo ""
 

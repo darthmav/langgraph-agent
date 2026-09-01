@@ -438,7 +438,7 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
 class StubLLM:
     """Stub LLM for testing without API key.
 
-    Returns responses in the 3-Agent System format.
+    Returns responses in the 4-Agent System format.
     """
 
     def invoke(self, messages: list[Any]) -> Any:

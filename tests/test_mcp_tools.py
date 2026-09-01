@@ -1,4 +1,4 @@
-"""Tests for the MCP tool bindings used by the 3-Agent System.
+"""Tests for the MCP tool bindings used by the 4-Agent System.
 
 Verifies that the documented tool belts are exposed and functional:
 - Researcher: search_knowledge_graph, query_knowledge_graph

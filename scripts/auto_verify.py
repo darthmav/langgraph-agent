@@ -71,7 +71,7 @@ def main():
 
     # Summary
     print("\n" + "=" * 50)
-    print("3-AGENT SYSTEM STATUS")
+    print("4-AGENT SYSTEM STATUS")
     print("=" * 50)
     for r in results:
         print(r)

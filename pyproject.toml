@@ -1,7 +1,7 @@
 [project]
 name = "langgraph-agent"
 version = "0.2.0"
-description = "3-Agent AI System: Planner, Researcher, Builder"
+description = "4-Agent AI System: Architect, Planner, Researcher, Builder"
 requires-python = ">=3.10"
 dependencies = [
     "langgraph>=0.2.0",

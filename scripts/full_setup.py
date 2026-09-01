@@ -121,9 +121,9 @@ def run_tests():
 def main():
     """Run all setup steps."""
     print("=" * 60)
-    print("3-AGENT SYSTEM - FULL AUTOMATED SETUP")
+    print("4-AGENT SYSTEM - FULL AUTOMATED SETUP")
     print("=" * 60)
-    print("\nDefault backend: Anthropic Claude 3.5 Sonnet.")
+    print("\nDefault backend: Anthropic claude-opus-5 for the Architect seat.")
     print("Set ANTHROPIC_API_KEY in .env for live agent runs.\n")
 
     # Step 1: Fix GraphRAG server

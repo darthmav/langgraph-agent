@@ -1,6 +1,6 @@
 ---
 name: console
-description: Start the web console for the 3-agent system.
+description: Start the web console for the 4-agent system.
 ---
 
 # Start the web console
