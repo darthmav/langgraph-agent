@@ -65,12 +65,14 @@ open_browser() {
 echo ""
 echo "Starting frontend server on ${URL}..."
 
+echo "  (Knowledge base preloads in the background; first run may take a moment)"
+
 python serve.py > /tmp/ambiguity-console.log 2>&1 &
 SERVER_PID=$!
 
-# Wait for server to be ready
+# Wait for server to be ready (generous timeout for slower CPUs)
 echo -n "  Waiting for server"
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
     if is_server_ready; then
         echo ""
         echo "✓ Server ready"

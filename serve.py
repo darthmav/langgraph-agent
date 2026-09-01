@@ -10,43 +10,72 @@ Then open: http://localhost:8080
 import json
 import os
 import sys
-from pathlib import Path
+import threading
+import warnings
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
+
+# Upstream libraries (langsmith, chromadb) emit DeprecationWarnings on Python 3.14+
+# about asyncio.iscoroutinefunction. They are harmless and outside our control,
+# so suppress them before importing any third-party code.
+warnings.filterwarnings(
+    "ignore",
+    message=".*asyncio\\.iscoroutinefunction.*",
+    category=DeprecationWarning,
+)
 
 # Ensure src directory is in Python path
 src_path = Path(__file__).parent / "src"
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
-from langgraph_agent import create_agent_graph, AgentState
-from langgraph_agent.config import get_agent_model_info
-from langgraph_agent.graphrag_server import get_knowledge_base
+from langgraph_agent import AgentState, create_agent_graph  # noqa: E402
+from langgraph_agent.config import get_agent_model_info  # noqa: E402
+from langgraph_agent.graphrag_server import (  # noqa: E402
+    get_knowledge_base,
+    is_knowledge_base_indexed,
+)
 
 # Initialize graph and knowledge base
 graph = create_agent_graph()
 kb = None
+_kb_loaded = threading.Event()
+
+
+def _preload_kb() -> None:
+    """Load the knowledge base in the background so the first run is fast."""
+    global kb
+    try:
+        kb = get_knowledge_base()
+    except Exception:
+        # If the knowledge base cannot be loaded, the first run will attempt
+        # again and fall back to LLM-only research. The server stays usable.
+        pass
+    finally:
+        _kb_loaded.set()
+
+
+# Start background preload as soon as the server module loads.
+threading.Thread(target=_preload_kb, daemon=True).start()
+
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory="frontend", **kwargs)
-    
-    def do_GET(self):
+
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == '/api/status':
-            # Check if knowledge base is indexed
-            global kb
-            kb_indexed = False
-            embedding_model = "unknown"
-            
+            # Use the lightweight index check so this endpoint never blocks on
+            # loading the embedding model.
             try:
-                if kb is None:
-                    kb = get_knowledge_base()
-                kb_indexed = kb.collection.count() > 0 if kb.collection else False
-                embedding_model = getattr(kb, 'embedder_model_name', 'all-MiniLM-L6-v2')
+                kb_indexed, embedding_model = is_knowledge_base_indexed()
             except Exception:
                 kb_indexed = False
-            
+                embedding_model = "unknown"
+
             self.send_json({
                 "llm": os.getenv("OLLAMA_MODEL", "qwen3:8b"),
                 "embedding": embedding_model,
@@ -62,11 +91,11 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         else:
             super().do_GET()
-    
-    def do_POST(self):
+
+    def do_POST(self) -> None:
         parsed = urlparse(self.path)
         length = int(self.headers.get('Content-Length', 0))
-        data = json.loads(self.rfile.read(length)) if length else {}
+        data: dict[str, Any] = json.loads(self.rfile.read(length)) if length else {}
 
         if parsed.path == '/api/run':
             goal = data.get('goal', '')
@@ -84,10 +113,10 @@ class Handler(SimpleHTTPRequestHandler):
             global kb
             if kb is None:
                 kb = get_knowledge_base()
-            
+
             query = data.get("query", "")
             top_k = data.get("top_k", 5)
-            
+
             try:
                 results = kb.search(query, top_k)
                 self.send_json({"results": results, "source": "local_graphrag"})
@@ -96,20 +125,21 @@ class Handler(SimpleHTTPRequestHandler):
 
         else:
             self.send_error(404)
-    
-    def send_json(self, obj):
+
+    def send_json(self, obj: Any) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps(obj, default=str).encode())
-    
-    def log_message(self, format, *args):
+
+    def log_message(self, format: str, *args: Any) -> None:
         request_line = args[0] if args else ""
         # Suppress noisy routine status-poll logs; everything else is still logged.
         if "GET /api/status" in request_line:
             return
         print(f"[API] {request_line}")
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))

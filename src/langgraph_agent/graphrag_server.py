@@ -197,6 +197,32 @@ def get_knowledge_base() -> GraphRAGKnowledgeBase:
     return _kb_instance
 
 
+def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, str]:
+    """Check whether a knowledge base exists and has documents.
+
+    This is intentionally lightweight: it opens the Chroma collection directly
+    without loading the sentence-transformers model, so it can be used in
+    health/status endpoints without blocking startup.
+
+    Returns:
+        (indexed, embedding_model_name)
+    """
+    persist_path = Path(persist_dir)
+    chroma_dir = persist_path / "chroma"
+    if not chroma_dir.exists():
+        return False, "all-MiniLM-L6-v2"
+
+    try:
+        client = chromadb.PersistentClient(str(chroma_dir))
+        collection = client.get_or_create_collection(
+            name="knowledge",
+            metadata={"hnsw:space": "cosine"},
+        )
+        return collection.count() > 0, "all-MiniLM-L6-v2"
+    except Exception:
+        return False, "all-MiniLM-L6-v2"
+
+
 # Create MCP server
 server = MCPServer("graphrag")
 
