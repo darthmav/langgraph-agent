@@ -12,6 +12,7 @@ This script:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,15 +37,16 @@ def check_dependencies() -> bool:
     required = {
         "langgraph": "LangGraph",
         "langchain_core": "LangChain Core",
-        "langchain_openai": "LangChain OpenAI",
-        "langchain_anthropic": "LangChain Anthropic",
-        "langchain_ollama": "LangChain Ollama",
         "mcp": "MCP",
         "chromadb": "ChromaDB",
         "sentence_transformers": "Sentence Transformers",
         "networkx": "NetworkX",
-        "faiss": "FAISS",
         "dotenv": "python-dotenv",
+    }
+
+    optional = {
+        "langchain_openai": "LangChain OpenAI",
+        "langchain_anthropic": "LangChain Anthropic",
     }
 
     missing = []
@@ -56,6 +58,13 @@ def check_dependencies() -> bool:
             print(f"  ✗ {name} (module: {module})")
             missing.append(name)
 
+    for module, name in optional.items():
+        try:
+            __import__(module)
+            print(f"  ✓ {name} (optional)")
+        except ImportError:
+            print(f"  ○ {name} (optional, not installed)")
+
     if missing:
         print(f"\n✗ Missing dependencies: {', '.join(missing)}")
         print("\nInstall with: pip install -e '.[dev]'")
@@ -65,29 +74,19 @@ def check_dependencies() -> bool:
     return True
 
 
-def check_ollama() -> bool:
-    """Check if Ollama is running."""
-    print_step("Checking Ollama service")
+def check_cloud_llm() -> bool:
+    """Check whether a cloud LLM API key is configured."""
+    print_step("Checking cloud LLM configuration")
 
-    try:
-        import requests
+    if os.getenv("ANTHROPIC_API_KEY"):
+        print("  ✓ Anthropic API key configured")
+        return True
+    if os.getenv("OPENAI_API_KEY"):
+        print("  ✓ OpenAI API key configured")
+        return True
 
-        response = requests.get("http://localhost:11434/api/tags", timeout=5)
-        if response.status_code == 200:
-            models = response.json().get("models", [])
-            model_names = [m["name"] for m in models]
-            print(f"  ✓ Ollama running with {len(models)} model(s): {', '.join(model_names)}")
-            return True
-        else:
-            print(f"  ✗ Ollama returned status {response.status_code}")
-            return False
-    except requests.exceptions.ConnectionError:
-        print("  ✗ Ollama not running (connection refused)")
-        print("     Start with: ollama serve")
-        return False
-    except Exception as e:
-        print(f"  ✗ Error checking Ollama: {e}")
-        return False
+    print("  ⚠ No cloud API key configured. Live agent runs require ANTHROPIC_API_KEY or OPENAI_API_KEY.")
+    return False
 
 
 def index_knowledge_base() -> bool:
@@ -145,7 +144,7 @@ def test_graphrag_search() -> bool:
 
             if results:
                 print(f"    Found {len(results)} result(s)")
-                for i, result in enumerate(results[:1], 1):
+                for result in results[:1]:
                     print(f"    - Score: {result['score']:.3f}")
                     print(f"      Source: {result['id']}")
             else:
@@ -257,8 +256,8 @@ def main():
     if not check_dependencies():
         sys.exit(1)
 
-    # Check Ollama (optional, for local LLM)
-    check_ollama()
+    # Check cloud LLM (non-blocking)
+    check_cloud_llm()
 
     # Step 2: Index knowledge base
     if args.index or run_all:
@@ -283,11 +282,9 @@ def main():
     print_header("VERIFICATION COMPLETE")
     print("\nNext steps:")
     print("  - Review output above for any issues")
+    print("  - Set ANTHROPIC_API_KEY in .env for live agent runs")
     print("  - Run: python example_usage.py")
-    print("  - Check logs in: .qwen/tmp/")
 
 
 if __name__ == "__main__":
-    import os
-
     main()

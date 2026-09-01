@@ -14,13 +14,15 @@ echo "  3-AGENT SYSTEM - QUICK TEST"
 echo "========================================"
 
 echo -e "\n► Checking dependencies..."
-python -c "import langgraph, langchain_core, chromadb, sentence_transformers, networkx, faiss; print('  ✓ All deps OK')"
+python -c "import langgraph, langchain_core, chromadb, sentence_transformers, networkx; print('  ✓ Core deps OK')"
 
-echo -e "\n► Checking Ollama..."
-if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-    echo "  ✓ Ollama running"
+echo -e "\n► Checking LLM configuration..."
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "  ℹ Using Anthropic cloud backend"
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+    echo "  ℹ Using OpenAI cloud backend"
 else
-    echo "  ⚠ Ollama not running (skip local LLM tests)"
+    echo "  ⚠ No cloud API key detected. Tests will use the StubLLM."
 fi
 
 echo -e "\n► Testing GraphRAG..."

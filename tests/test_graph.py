@@ -18,7 +18,7 @@ from langgraph_agent.config import StubLLM
 def agent_graph(monkeypatch):
     """Create a fresh agent graph for testing using the deterministic StubLLM."""
     # Force every agent node to use the canned StubLLM so tests do not depend
-    # on a live Ollama server or cloud API keys.
+    # on a live cloud LLM endpoint or API keys.
     monkeypatch.setattr(
         "langgraph_agent.nodes.get_agent_llm",
         lambda agent, temperature=0.1: StubLLM(),

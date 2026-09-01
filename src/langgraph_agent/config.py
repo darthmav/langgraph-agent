@@ -1,8 +1,8 @@
 """Configuration and LLM setup.
 
 Supports per-agent LLM selection so Planner, Researcher, and Builder can each
-use a different model/provider. Falls back to the legacy single-model config
-when per-agent variables are not set.
+use a different model/provider. Defaults are cloud-only: Anthropic is the primary
+provider. OpenAI remains available as an optional cloud provider.
 """
 
 import os
@@ -17,67 +17,38 @@ load_dotenv()
 
 
 # Default model per (provider, agent) when a per-agent provider is configured
-# but no model is supplied.
+# but no model is supplied. Cloud-first defaults.
 _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
-    ("kimi", "planner"): "moonshot-v1-8k",    # main architect / planner
-    ("ollama", "researcher"): "gemma4:27b",  # science & dev research
-    ("ollama", "builder"): "qwen3:32b",       # code evaluation / builder
+    ("anthropic", "planner"): "claude-3-5-sonnet-20241022",
+    ("anthropic", "researcher"): "claude-3-5-haiku-20241022",
+    ("anthropic", "builder"): "claude-3-5-haiku-20241022",
+    ("openai", "planner"): "gpt-4o",
+    ("openai", "researcher"): "gpt-4o-mini",
+    ("openai", "builder"): "gpt-4o-mini",
 }
 
 
-# Cloud LLM options exposed in the console. Each option maps to a provider/model
-# pair already supported by get_llm().
+# Cloud LLM options exposed in the console.
 AGENT_LLM_OPTIONS: list[dict[str, str]] = [
-    {"label": "OpenAI GPT-4o mini", "provider": "openai", "model": "gpt-4o-mini"},
+    {
+        "label": "Anthropic Claude 3.5 Sonnet",
+        "provider": "anthropic",
+        "model": "claude-3-5-sonnet-20241022",
+    },
+    {
+        "label": "Anthropic Claude 3.5 Haiku",
+        "provider": "anthropic",
+        "model": "claude-3-5-haiku-20241022",
+    },
+    # Optional cloud provider
     {"label": "OpenAI GPT-4o", "provider": "openai", "model": "gpt-4o"},
-    {"label": "Anthropic Claude 3.5 Sonnet", "provider": "anthropic", "model": "claude-3-5-sonnet-20241022"},
-    {"label": "Anthropic Claude 3.5 Haiku", "provider": "anthropic", "model": "claude-3-5-haiku-20241022"},
-    {"label": "Kimi Moonshot v1 8k", "provider": "kimi", "model": "moonshot-v1-8k"},
-    {"label": "Kimi Moonshot v1 32k", "provider": "kimi", "model": "moonshot-v1-32k"},
-    {"label": "Kimi Moonshot v1 128k", "provider": "kimi", "model": "moonshot-v1-128k"},
+    {"label": "OpenAI GPT-4o mini", "provider": "openai", "model": "gpt-4o-mini"},
 ]
 
 
 # Runtime per-agent LLM selections set from the console. These override the
 # environment-variable defaults for the lifetime of the process.
 _agent_llm_overrides: dict[str, dict[str, str]] = {}
-
-
-def get_ollama_base_url() -> str:
-    """Return the configured Ollama base URL."""
-    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
-
-def list_ollama_models() -> list[dict[str, str]]:
-    """Query the Ollama server for installed models.
-
-    Returns a list of {"name": ..., "label": ...} dicts. Returns an empty
-    list if Ollama is unreachable or returns an unexpected response.
-    """
-    import json as _json
-    import urllib.error
-    import urllib.request
-
-    base_url = get_ollama_base_url()
-    url = f"{base_url.rstrip('/')}/api/tags"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            data = _json.loads(response.read().decode("utf-8"))
-    except Exception:
-        # Ollama is optional; fail silently so the console still works with
-        # cloud providers when the local server is not running.
-        return []
-
-    models = data.get("models", []) if isinstance(data, dict) else []
-    result: list[dict[str, str]] = []
-    for model in models:
-        if not isinstance(model, dict):
-            continue
-        name = model.get("model") or model.get("name")
-        if not name:
-            continue
-        result.append({"name": str(name), "label": str(name)})
-    return result
 
 
 def set_agent_llm(agent: str, provider: str, model: str) -> None:
@@ -90,7 +61,7 @@ def set_agent_llm(agent: str, provider: str, model: str) -> None:
 
 
 def get_llm(
-    provider: Literal["openai", "anthropic", "ollama", "kimi"] | None = None,
+    provider: Literal["openai", "anthropic"] | None = None,
     model: str | None = None,
     temperature: float = 0.1,
     base_url: str | None = None,
@@ -99,7 +70,7 @@ def get_llm(
     """Get an LLM instance.
 
     Args:
-        provider: LLM provider ("openai", "anthropic", "ollama", "kimi").
+        provider: LLM provider ("openai" or "anthropic").
                   Auto-detected from model name/env if not specified.
         model: Model name (default from provider-specific env var).
         temperature: Sampling temperature.
@@ -110,17 +81,17 @@ def get_llm(
         Chat model instance.
 
     Environment variables:
-        OPENAI_API_KEY, OPENAI_MODEL
         ANTHROPIC_API_KEY, ANTHROPIC_MODEL
-        OLLAMA_BASE_URL, OLLAMA_MODEL
-        KIMI_API_KEY, KIMI_MODEL, KIMI_BASE_URL
+        OPENAI_API_KEY, OPENAI_MODEL  (optional)
     """
     provider = provider or _detect_provider(model)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        model_name = model or os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+        model_name = model or os.getenv(
+            "ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"
+        )
         key = api_key or os.getenv("ANTHROPIC_API_KEY")
         if not key:
             return StubLLM()
@@ -133,32 +104,7 @@ def get_llm(
             kwargs["base_url"] = base_url
         return ChatAnthropic(**kwargs)
 
-    if provider == "ollama":
-        from langchain_ollama import ChatOllama
-
-        model_name = model or os.getenv("OLLAMA_MODEL", "qwen3:8b")
-        base_url_val = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(
-            model=str(model_name), temperature=temperature, base_url=base_url_val
-        )
-
-    if provider == "kimi":
-        from langchain_openai import ChatOpenAI
-
-        # Kimi (Moonshot) uses an OpenAI-compatible API.
-        model_name = model or os.getenv("KIMI_MODEL", "moonshot-v1-8k")
-        key = api_key or os.getenv("KIMI_API_KEY")
-        if not key:
-            return StubLLM()
-        url = base_url or os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
-        return ChatOpenAI(
-            model=str(model_name),
-            temperature=temperature,
-            api_key=SecretStr(key),
-            base_url=url,
-        )
-
-    # openai (default)
+    # openai (optional cloud provider)
     from langchain_openai import ChatOpenAI
 
     model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -175,28 +121,25 @@ def get_llm(
     return ChatOpenAI(**kwargs)
 
 
-def _detect_provider(model: str | None) -> Literal["openai", "anthropic", "ollama", "kimi"]:
-    """Detect provider from model name or environment."""
-    # Check environment variables first
-    if os.getenv("KIMI_API_KEY") or os.getenv("KIMI_MODEL"):
-        return "kimi"
-    if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_MODEL"):
-        return "ollama"
+def _detect_provider(model: str | None) -> Literal["openai", "anthropic"]:
+    """Detect provider from model name or environment.
+
+    Cloud-first priority: Anthropic, then OpenAI.
+    """
+    # Anthropic is the primary cloud default.
     if os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_MODEL"):
         return "anthropic"
+
+    # OpenAI remains available as an optional cloud provider.
     if os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_MODEL"):
         return "openai"
 
     # Fallback to model name detection
     if not model:
-        return "ollama"  # Default to local Ollama
+        return "anthropic"
     model_lower = model.lower()
-    if "moonshot" in model_lower or "kimi" in model_lower:
-        return "kimi"
     if "claude" in model_lower:
         return "anthropic"
-    if "llama" in model_lower or "mistral" in model_lower or "qwen" in model_lower:
-        return "ollama"
     return "openai"
 
 
@@ -214,10 +157,10 @@ def get_agent_llm(
     Falls back to the legacy single-model configuration when per-agent variables
     are not set, preserving backward compatibility.
 
-    Recommended 3-model setup:
-        Planner    -> Kimi cloud           (main architect / structural planning)
-        Researcher -> Gemma4 via Ollama    (science & dev research)
-        Builder    -> Qwen via Ollama      (code evaluation / implementation)
+    Recommended 3-model setup (cloud):
+        Planner    -> Anthropic Claude 3.5 Sonnet  (main architect / structural planning)
+        Researcher -> Anthropic Claude 3.5 Haiku   (knowledge gathering)
+        Builder    -> Anthropic Claude 3.5 Haiku   (code implementation)
     """
     provider: str | None
     model: str | None
@@ -285,16 +228,12 @@ def get_agent_model_info(
 
     # Fallback to provider-specific global defaults if no per-agent default applies.
     if not model:
-        if provider == "kimi":
-            model = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
-        elif provider == "ollama":
-            model = os.getenv("OLLAMA_MODEL", "qwen3:8b")
-        elif provider == "anthropic":
+        if provider == "anthropic":
             model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
         else:
             model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    return {"provider": provider or "ollama", "model": model}
+    return {"provider": provider or "anthropic", "model": model}
 
 
 class StubLLM:
@@ -325,7 +264,9 @@ class StubLLM:
 
         # For the Planner, decide whether the *user goal* asks for research.
         # Ignore the state-injection block, which contains a "Research:" label.
-        user_goal_match = re.search(r"User goal:\s*(.+)", last_content, re.IGNORECASE | re.DOTALL)
+        user_goal_match = re.search(
+            r"User goal:\s*(.+)", last_content, re.IGNORECASE | re.DOTALL
+        )
         user_goal = user_goal_match.group(1).lower() if user_goal_match else last_lower
         needs_research = "research" in user_goal
 

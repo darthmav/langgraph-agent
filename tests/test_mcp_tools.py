@@ -30,7 +30,6 @@ async def test_list_tools(client: MCPClient):
     expected = {
         "search_knowledge_graph",
         "query_knowledge_graph",
-        "add_to_knowledge_base",
         "filesystem_read",
         "filesystem_write",
         "git_status",
@@ -92,7 +91,15 @@ async def test_terminal_execute_rejects_unsafe_characters(client: MCPClient):
 
 @pytest.mark.asyncio
 async def test_run_tests(client: MCPClient):
-    """Builder can run the pytest suite."""
+    """Builder can run the pytest suite via the test tool."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a minimal passing test so the tool has something to execute.
+        test_file = Path(tmpdir) / "test_dummy.py"
+        test_file.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+        result = await client.call_tool("run_tests", {"path": str(tmpdir)})
+        assert result["success"], result.get("stderr", "")
+        assert "passed" in result.get("stdout", "")
 
 
 def test_sync_tool_call():

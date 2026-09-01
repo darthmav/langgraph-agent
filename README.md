@@ -1,12 +1,11 @@
-# 3-Agent Local AI System
+# 3-Agent AI System
 
 **Planner · Researcher · Builder**
 
-A fully local, zero-fee multi-agent system for software development experiments. Built with LangGraph + GraphRAG + MCP.
+A multi-agent system for software development experiments, powered by LangGraph + GraphRAG + MCP.
+Cloud-only by default: **Anthropic** is the primary LLM provider. **OpenAI** remains available as an optional cloud provider.
 
-## 🎨 Web Console (NEW!)
-
-Beautiful Part 2 revamped frontend with animated gradients, agent-specific colors, and real-time state visualization.
+## 🎨 Web Console
 
 ```bash
 # Quick launch
@@ -49,31 +48,26 @@ Human (optional gates) → Planner → Researcher → Builder → END
 pip install -e ".[dev]"
 ```
 
-### Local LLM Setup (Recommended)
-
-For fully local execution with zero service fees:
-
-```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull recommended model (fits 32GB RAM, 3GB GPU)
-ollama pull qwen3:8b
-# Alternative: ollama pull qwen2.5:7b
-```
-
 ### Environment Configuration
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` to `.env`:
 
 ```bash
-# For local execution (no API keys needed)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:8b
+cp .env.example .env
+```
 
-# For cloud APIs (optional)
-OPENAI_API_KEY=sk-...
+The default uses Anthropic:
+
+```bash
 ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+```
+
+### Optional OpenAI provider
+
+```bash
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
 ```
 
 ## Usage
@@ -103,25 +97,32 @@ print(result["plan"])
 print(result["builder_report"])
 ```
 
-### With Local LLM
+### With Anthropic
 
 ```python
 import os
 
-os.environ["OLLAMA_BASE_URL"] = "http://localhost:11434"
-os.environ["OLLAMA_MODEL"] = "qwen3:8b"
+os.environ["ANTHROPIC_API_KEY"] = "sk-ant-..."
+os.environ["ANTHROPIC_MODEL"] = "claude-3-5-sonnet-20241022"
 
-# Now all LLM calls use Ollama
+result = graph.invoke(state)
+```
+
+### With OpenAI
+
+```python
+import os
+
+os.environ["OPENAI_API_KEY"] = "sk-..."
+os.environ["OPENAI_MODEL"] = "gpt-4o-mini"
+
 result = graph.invoke(state)
 ```
 
 ## Running Tests
 
 ```bash
-# With stub LLM (fast, no setup needed)
-OPENAI_API_KEY="" python -m pytest tests/ -v
-
-# With local Ollama
+# With stub LLM (fast, no API key needed)
 python -m pytest tests/ -v
 
 # With test coverage
@@ -150,14 +151,10 @@ pytest --cov=langgraph_agent tests/
 ## Example
 
 ```bash
-# Run with stub LLM
-OPENAI_API_KEY="" python example_usage.py
-
-# Run with Ollama (ensure ollama is running)
+# Run with stub LLM (no API key needed)
 python example_usage.py
 
-# Run with OpenAI
-export OPENAI_API_KEY=sk-...
+# Run with Anthropic (ensure ANTHROPIC_API_KEY is set)
 python example_usage.py
 ```
 
@@ -201,7 +198,7 @@ the documented specialization:
 - Researcher → GraphRAG read-only tools only
 - Builder → filesystem / git / terminal / test tools only
 
-To switch from the bundled local tool implementations to external MCP servers,
+To switch from the bundled tool implementations to external MCP servers,
 update `MCPClient._discover_tools()` to connect over stdio or HTTP and route each
 tool name to the external server.
 
@@ -212,7 +209,7 @@ tool name to the external server.
 ├── src/langgraph_agent/
 │   ├── __init__.py
 │   ├── state.py                # AgentState, ResearchStatus
-│   ├── config.py               # LLM setup (Ollama, OpenAI, Anthropic)
+│   ├── config.py               # LLM setup (Anthropic primary, OpenAI optional)
 │   ├── nodes.py                # Planner, Researcher, Builder
 │   ├── graph.py                # StateGraph wiring
 │   ├── graphrag_server.py      # GraphRAG MCP server
@@ -222,9 +219,9 @@ tool name to the external server.
 │   ├── researcher.txt          # Researcher system prompt
 │   └── builder.txt             # Builder system prompt
 ├── tests/
-│   └── test_graph.py           # 8 passing tests
+│   └── test_graph.py           # Graph tests
 ├── example_usage.py            # Demo script
-├── test_ollama.py              # Local Ollama end-to-end test
+├── test_cloud.py               # Cloud LLM end-to-end test
 ├── README.md
 ├── .env.example                # Environment variables template
 ├── ruff.toml                   # Linter config
@@ -233,15 +230,11 @@ tool name to the external server.
 
 ## Hardware Requirements
 
-**Recommended:** 32 GB RAM, 3 GB GPU (your machine)
-
-- **Qwen3 8B** (Q4/Q5 quant) — fits comfortably, primary recommendation
-- **Qwen2.5 7B/8B** — alternative, similar performance
-- Avoid 32B+ models (require 75GB+ even at 1-bit quant)
+**Cloud providers:** no local GPU required. The embedding model runs locally for GraphRAG, but no conversational LLM is hosted on-device.
 
 ## Next Steps
 
-1. **Run local LLM** — Set up Ollama with `qwen3:8b`
+1. **Configure cloud LLM** — Set `ANTHROPIC_API_KEY` in `.env`
 2. **MCP Servers** — Connect to actual GraphRAG and filesystem MCP servers
 3. **Human-in-the-loop** — Add approval gates before Builder executes
 4. **Persistence** — Add checkpointing for long-running agents

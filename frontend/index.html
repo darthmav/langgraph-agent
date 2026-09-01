@@ -998,9 +998,9 @@ button.ghost:hover {
     <div class="progress"><div class="progress-bar"></div></div>
   </div>
   <div style="padding: 12px 18px; font: 11px var(--mono); color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 10px;">
-    <div>Planner: <span id="llm-planner" style="color: var(--planner)">moonshot-v1-8k (Kimi)</span></div>
-    <div style="margin-top: 6px;">Researcher: <span id="llm-researcher" style="color: var(--researcher)">gemma4:27b (cloud Ollama)</span></div>
-    <div style="margin-top: 6px;">Builder: <span id="llm-builder" style="color: var(--builder)">qwen3:32b (cloud Ollama)</span></div>
+    <div>Planner: <span id="llm-planner" style="color: var(--planner)">claude-3-5-sonnet-20241022 (Anthropic)</span></div>
+    <div style="margin-top: 6px;">Researcher: <span id="llm-researcher" style="color: var(--researcher)">claude-3-5-haiku-20241022 (Anthropic)</span></div>
+    <div style="margin-top: 6px;">Builder: <span id="llm-builder" style="color: var(--builder)">claude-3-5-haiku-20241022 (Anthropic)</span></div>
     <div style="margin-top: 6px;">Embedding: <span id="embedding-info" style="color: var(--ink-2)">all-MiniLM-L6-v2</span></div>
     <div style="margin-top: 6px;">GraphRAG: <span id="graphrag-info" style="color: var(--ok)">● indexed</span></div>
   </div>
@@ -1045,9 +1045,9 @@ button.ghost:hover {
         <div class="layer-status">Status: <span id="diag-graphrag" style="color: var(--ok)">● indexed</span></div>
       </div>
       <div class="llm-info-bar">
-        Planner: <span id="diag-llm-planner">moonshot-v1-8k (Kimi)</span> ·
-        Researcher: <span id="diag-llm-researcher">gemma4:27b (cloud Ollama)</span> ·
-        Builder: <span id="diag-llm-builder">qwen3:32b (cloud Ollama)</span>
+        Planner: <span id="diag-llm-planner">claude-3-5-sonnet-20241022 (Anthropic)</span> ·
+        Researcher: <span id="diag-llm-researcher">claude-3-5-haiku-20241022 (Anthropic)</span> ·
+        Builder: <span id="diag-llm-builder">claude-3-5-haiku-20241022 (Anthropic)</span>
       </div>
     </div>
     
@@ -1669,26 +1669,14 @@ async function pollStatus() {
   } catch {}
 }
 
-// Load available cloud LLM options and local Ollama models, then build dropdowns.
+// Load available cloud LLM options and build dropdowns.
 async function loadLLMOptions() {
   try {
-    const [cloudRes, ollamaRes] = await Promise.all([
-      fetch(`${API_BASE}/api/llm-options`),
-      fetch(`${API_BASE}/api/ollama-models`)
-    ]);
+    const cloudRes = await fetch(`${API_BASE}/api/llm-options`);
     if (!cloudRes.ok) throw new Error(`HTTP ${cloudRes.status}`);
     const cloud = (await cloudRes.json()).options || [];
-    const ollamaModels = ollamaRes.ok ? (await ollamaRes.json()).models || [] : [];
 
-    const ollamaOptions = ollamaModels.map(m => ({
-      label: m.label || m.name,
-      provider: "ollama",
-      model: m.name,
-      group: "Ollama"
-    }));
-    const cloudOptions = cloud.map(opt => ({ ...opt, group: "Cloud" }));
-
-    llmOptions = [...cloudOptions, ...ollamaOptions];
+    llmOptions = cloud.map(opt => ({ ...opt, group: opt.group || "Cloud" }));
     ["planner", "researcher", "builder"].forEach(agent => updateLLMSelect(agent));
   } catch (err) {
     console.error("Failed to load LLM options:", err);
@@ -1704,9 +1692,15 @@ function updateLLMSelect(agent) {
   const currentValue = select.value;
 
   select.innerHTML = "";
-  const groups = { Cloud: document.createElement("optgroup"), Ollama: document.createElement("optgroup") };
-  groups.Cloud.label = "Cloud";
-  groups.Ollama.label = "Ollama";
+  const groups = {};
+  const getGroup = (name) => {
+    if (!groups[name]) {
+      const g = document.createElement("optgroup");
+      g.label = name;
+      groups[name] = g;
+    }
+    return groups[name];
+  };
 
   llmOptions.forEach(opt => {
     const option = document.createElement("option");
@@ -1716,8 +1710,8 @@ function updateLLMSelect(agent) {
       agentLLMs[agent].provider === opt.provider &&
       agentLLMs[agent].model === opt.model;
     if (selected) option.selected = true;
-    const group = groups[opt.group || "Cloud"];
-    if (group) group.appendChild(option);
+    const groupName = opt.group || "Cloud";
+    getGroup(groupName).appendChild(option);
   });
 
   Object.values(groups).forEach(g => {

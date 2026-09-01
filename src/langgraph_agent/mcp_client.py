@@ -78,10 +78,11 @@ class MCPClient:
         """
         tools = {}
 
-        # Always provide GraphRAG tools (local or stub)
+        # Always provide GraphRAG read-only tools (local or stub).
+        # GraphRAG is read-only per the 3-Agent System specification; adding
+        # documents is done through indexing scripts, not the Researcher tool belt.
         tools["search_knowledge_graph"] = self._graphrag_search
         tools["query_knowledge_graph"] = self._graphrag_query_graph
-        tools["add_to_knowledge_base"] = self._graphrag_add
 
         # Real filesystem, git, terminal, and test tools
         tools["filesystem_read"] = self._filesystem_read
@@ -168,30 +169,6 @@ class MCPClient:
                 "subgraph_edges": 0,
                 "source": "stub",
                 "note": "Run 'python scripts/index_knowledge.py' to build the knowledge base",
-            }
-
-    async def _graphrag_add(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Add a document to the knowledge base."""
-        doc_id = args.get("doc_id", "")
-        content = args.get("content", "")
-        metadata = args.get("metadata", {})
-
-        if self._kb is None:
-            try:
-                from langgraph_agent.graphrag_server import get_knowledge_base
-
-                self._kb = get_knowledge_base()
-            except Exception:
-                self._kb = None
-
-        if self._kb:
-            self._kb.add_document(doc_id, content, metadata)
-            return {"success": True, "doc_id": doc_id, "source": "local_graphrag"}
-        else:
-            return {
-                "success": False,
-                "error": "Knowledge base not initialized",
-                "note": "Run 'python scripts/index_knowledge.py' first",
             }
 
     # Real filesystem implementations

@@ -242,13 +242,6 @@ def query_tool(entity: str, hops: int = 2) -> str:
     return json.dumps(result, indent=2)
 
 
-@server.tool(name="add_to_knowledge_base")
-def add_tool(doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> str:
-    """Add a document to the knowledge base."""
-    get_knowledge_base().add_document(doc_id, content, metadata)
-    return f"Added document '{doc_id}' to knowledge base"
-
-
 async def main() -> None:
     """Run the GraphRAG MCP server."""
     server.run(transport="stdio")

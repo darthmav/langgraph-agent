@@ -4,7 +4,7 @@ Planner, Researcher, Builder architecture with:
 - Strict system prompts
 - State injection on every turn
 - Tool binding per agent
-- Ollama support for local LLMs
+- Cloud-only LLM support (Anthropic primary, OpenAI optional)
 """
 
 from langgraph_agent.graph import create_agent_graph

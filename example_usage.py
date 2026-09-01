@@ -5,7 +5,7 @@ Demonstrates:
 - Planner → Researcher → Builder flow
 - State injection on every turn
 - Strict output format parsing
-- Ollama (local) or OpenAI (cloud) LLM support
+- Cloud LLM support (Anthropic by default, OpenAI optional)
 """
 
 import os
@@ -20,10 +20,11 @@ def run_example(goal: str, max_steps: int = 8):
         goal: The goal to achieve
         max_steps: Maximum steps before stopping (default 8)
     """
-    # Set Ollama as default for local execution
-    if not os.getenv("OPENAI_API_KEY"):
-        print("No OPENAI_API_KEY found, using Ollama (ensure 'ollama pull qwen3:8b' first)")
-        os.environ["OLLAMA_BASE_URL"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    # Cloud-only default: Anthropic. Set ANTHROPIC_API_KEY in your environment.
+    # For optional OpenAI execution, set OPENAI_API_KEY and OPENAI_MODEL.
+    if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+        print("Note: ANTHROPIC_API_KEY and OPENAI_API_KEY are not set. The LLM will fall back to the StubLLM.")
+        print("Set ANTHROPIC_API_KEY to use the default cloud provider, or OPENAI_API_KEY for the optional provider.")
 
     graph = create_agent_graph()
 

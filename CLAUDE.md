@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is **langgraph-agent**, a fully local 3-Agent AI system for software development experiments:
+This is **langgraph-agent**, a cloud-only 3-Agent AI system for software development experiments.
 
 - **Planner** — interprets goals, creates structured plans, routes to next agent.
 - **Researcher** — gathers context via the GraphRAG MCP tool (`search_knowledge_graph`).
@@ -17,9 +17,9 @@ Tech stack: Python 3.10+, LangGraph, Chroma + sentence-transformers + NetworkX, 
 pip install -e ".[dev]"
 
 # Run all checks
-ruff check src/ tests/
-mypy src/langgraph_agent/
-OPENAI_API_KEY="" python -m pytest tests/ -v
+ruff check src/ tests/ serve.py scripts/ example_usage.py test_cloud.py
+mypy src/langgraph_agent/ serve.py
+python -m pytest tests/ -v
 
 # Start the web console
 ./launch_console.sh
@@ -28,7 +28,7 @@ OPENAI_API_KEY="" python -m pytest tests/ -v
 python scripts/reindex.py
 
 # Run the example
-OPENAI_API_KEY="" python example_usage.py
+python example_usage.py
 ```
 
 ## Project Structure
@@ -37,7 +37,7 @@ OPENAI_API_KEY="" python example_usage.py
 ├── src/langgraph_agent/
 │   ├── __init__.py            # create_agent_graph, AgentState, ResearchStatus
 │   ├── state.py               # AgentState schema + ResearchStatus enum
-│   ├── config.py              # LLM setup (Ollama/OpenAI/Anthropic) + StubLLM
+│   ├── config.py              # LLM setup (Anthropic primary, OpenAI optional) + StubLLM
 │   ├── nodes.py               # Planner, Researcher, Builder nodes + prompt loading
 │   ├── graph.py               # StateGraph wiring + conditional edges
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
@@ -60,7 +60,7 @@ OPENAI_API_KEY="" python example_usage.py
 │   └── README.md
 ├── serve.py                   # Python HTTP server + API backend
 ├── example_usage.py           # Demo script
-├── test_ollama.py             # Local Ollama end-to-end test
+├── test_cloud.py              # Cloud LLM end-to-end test
 ├── README.md                  # User-facing documentation
 └── .env.example               # Environment variables template
 ```
@@ -70,7 +70,7 @@ OPENAI_API_KEY="" python example_usage.py
 - **Python formatting/linting:** `ruff` configured in `ruff.toml`.
 - **Type checking:** `mypy` configured in `mypy.ini`.
 - **Tests:** `pytest` in `tests/`.
-- **Default LLM:** `qwen3:8b` via Ollama (local, zero fees). Cloud providers require API keys.
+- **Default LLM:** Anthropic `claude-3-5-sonnet-20241022` for Planner and `claude-3-5-haiku-20241022` for Researcher/Builder. OpenAI remains an optional cloud provider.
 - **Tool specialization (critical):**
   - Planner → no tools.
   - Researcher → GraphRAG read-only tools only.
@@ -99,7 +99,7 @@ Every node reads/writes `AgentState`:
 
 ### Run the test suite
 ```bash
-OPENAI_API_KEY="" python -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 ### Add a new Builder tool
@@ -130,3 +130,4 @@ OPENAI_API_KEY="" python -m pytest tests/ -v
 - **Tests are slow** — The first run loads `sentence-transformers` and Chroma. Subsequent runs use the cached singleton.
 - **Mypy errors from upstream stubs** — Prefer `# type: ignore[...]` with a comment over disabling strict mode.
 - **GraphRAG returns no results** — Run `python scripts/reindex.py` to rebuild the knowledge base.
+- **No LLM output** — Verify `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) is set in `.env`.

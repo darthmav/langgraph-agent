@@ -35,7 +35,6 @@ from langgraph_agent import AgentState, create_agent_graph  # noqa: E402
 from langgraph_agent.config import (  # noqa: E402
     AGENT_LLM_OPTIONS,
     get_agent_model_info,
-    list_ollama_models,
     set_agent_llm,
 )
 from langgraph_agent.graphrag_server import (  # noqa: E402
@@ -81,25 +80,29 @@ class Handler(SimpleHTTPRequestHandler):
                 kb_indexed = False
                 embedding_model = "unknown"
 
+            # Determine a sensible display string for the active LLM.
+            planner_info = get_agent_model_info("planner")
+            provider = planner_info.get("provider", "anthropic")
+            model = planner_info.get("model", "claude-3-5-sonnet-20241022")
+            active_llm = f"{model} ({provider})"
+
             self.send_json({
-                "llm": os.getenv("OLLAMA_MODEL", "qwen3:8b"),
+                "llm": active_llm,
                 "embedding": embedding_model,
                 "graphrag": kb_indexed,
                 "agents": {
-                    "planner": get_agent_model_info("planner"),
+                    "planner": planner_info,
                     "researcher": get_agent_model_info("researcher"),
                     "builder": get_agent_model_info("builder"),
                 },
                 "selected": {
-                    "planner": get_agent_model_info("planner"),
+                    "planner": planner_info,
                     "researcher": get_agent_model_info("researcher"),
                     "builder": get_agent_model_info("builder"),
                 },
             })
         elif parsed.path == '/api/llm-options':
             self.send_json({"options": AGENT_LLM_OPTIONS})
-        elif parsed.path == '/api/ollama-models':
-            self.send_json({"models": list_ollama_models()})
         elif parsed.path == '/' or parsed.path == '/index.html':
             self.path = '/index.html'
             return super().do_GET()

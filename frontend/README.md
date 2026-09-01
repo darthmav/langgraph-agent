@@ -1,6 +1,6 @@
 # 3-Agent Console - Frontend
 
-A beautiful, modern web interface for the 3-Agent Local AI System.
+A beautiful, modern web interface for the 3-Agent AI System.
 
 ## Visual Design
 
@@ -66,6 +66,8 @@ Note: Direct file access won't have API connectivity. Use Option 1 for full func
 | `/api/search` | POST | Search GraphRAG knowledge base |
 | `/api/status` | GET | Get system status (LLM, GraphRAG) |
 | `/api/state` | GET | Get current agent state |
+| `/api/llm-options` | GET | Available cloud LLM options |
+| `/api/set-llm` | POST | Set per-agent LLM provider/model |
 
 ### Example API Usage
 
@@ -94,7 +96,7 @@ Edit CSS variables in `frontend/index.html`:
   --planner: #4ea3ff;      /* Agent colors */
   --researcher: #76d13a;
   --builder: #ff6a8a;
-  
+
   --bg: #0a0b0d;           /* Background colors */
   --bg-2: #101216;
   --bg-3: #15181e;
@@ -116,6 +118,7 @@ python serve.py
 **API not responding:**
 - Ensure 3-Agent system is installed: `pip install -e ".[dev]"`
 - Check `.env` configuration for LLM settings
+- The default uses Anthropic cloud models
 
 **GraphRAG not indexed:**
 - Run: `python scripts/index_knowledge.py`

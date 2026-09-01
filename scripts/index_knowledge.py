@@ -8,9 +8,10 @@ This will:
 1. Scan the project for .py, .md, .txt files
 2. Extract content and metadata
 3. Add to Chroma vector store + NetworkX graph
+
+The embedding model runs on-device for GraphRAG and does not require an API key.
 """
 
-import os
 from pathlib import Path
 
 from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase

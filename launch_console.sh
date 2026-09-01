@@ -26,16 +26,10 @@ if [ -f ".env" ]; then
     . ./.env
     set +a
     echo "✓ Loaded .env"
-    echo "  LLM: ${OLLAMA_MODEL:-${OPENAI_MODEL:-unknown}}"
-fi
-
-# Check Ollama
-if command -v ollama &> /dev/null; then
-    if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-        echo "✓ Ollama running"
-    else
-        echo "⚠️  Ollama not running. Start with: ollama serve"
-    fi
+    # Report the active provider/model for the primary agent
+    provider="${PLANNER_PROVIDER:-anthropic}"
+    model="${PLANNER_MODEL:-${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}}"
+    echo "  LLM: ${model} (${provider})"
 fi
 
 is_server_ready() {
