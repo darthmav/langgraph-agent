@@ -168,6 +168,9 @@ body {
 .tab[data-p="researcher"] { color: var(--researcher); }
 .tab[data-p="builder"] { color: var(--builder); }
 .tab[data-p="state"] { color: var(--ink-2); }
+.tab[data-p="graph"] { color: #b48cff; }
+.tab[data-p="interactive"] { color: #4ade80; }
+.tab[data-p="stream"] { color: #fbbf24; }
 
 .tab::after {
   content: "";
@@ -730,6 +733,196 @@ button.ghost:hover {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Graph Panel */
+#agent-graph {
+  width: 100%;
+  max-width: 960px;
+  height: auto;
+  min-height: 360px;
+  flex: 1;
+  background: #0d1117;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: inset 0 0 40px #00000066;
+}
+
+.graph-hint {
+  font: 11px var(--mono);
+  color: var(--ink-3);
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: #ffffff05;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.graph-node rect,
+.graph-node circle {
+  fill: #11151c;
+  stroke: var(--line-2);
+  stroke-width: 2;
+  transition: all 0.3s ease;
+}
+
+.graph-node text {
+  text-anchor: middle;
+  font-family: var(--sans);
+  pointer-events: none;
+  fill: var(--ink-2);
+  transition: all 0.3s ease;
+}
+
+.graph-node .icon {
+  font-size: 22px;
+}
+
+.graph-node .label {
+  font-size: 13px;
+  font-weight: 600;
+  fill: var(--ink);
+}
+
+.graph-node .sublabel {
+  font-size: 9px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  fill: var(--ink-3);
+}
+
+#node-planner rect { stroke: var(--planner); }
+#node-researcher rect { stroke: var(--researcher); }
+#node-builder rect { stroke: var(--builder); }
+#node-end circle { stroke: #b48cff; }
+#node-kb rect { stroke: #8b95a6; }
+
+#node-planner.active rect { fill: #14304a; filter: url(#glow-planner); }
+#node-researcher.active rect { fill: #1a3a14; filter: url(#glow-researcher); }
+#node-builder.active rect { fill: #3a1420; filter: url(#glow-builder); }
+#node-end.active circle { fill: #261638; stroke: #d8b4fe; }
+
+.graph-node.active text { fill: var(--ink); }
+.graph-node.active .sublabel { fill: var(--ink-2); }
+
+.edge {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-width: 2.5;
+  marker-end: url(#arrow);
+  transition: stroke 0.3s, stroke-width 0.3s;
+}
+
+.edge.feedback {
+  stroke-dasharray: 6 4;
+}
+
+.edge.kb {
+  stroke-dasharray: 4 4;
+  marker-end: none;
+}
+
+.edge.active {
+  stroke: url(#edge-gradient);
+  stroke-width: 3.5;
+  marker-end: url(#arrow-active);
+  animation: dash-flow 1.2s linear infinite;
+}
+
+.edge.feedback.active {
+  stroke: var(--warn);
+  stroke-width: 3;
+}
+
+.edge.kb.active {
+  stroke: var(--researcher);
+  marker-end: url(#arrow-active);
+}
+
+@keyframes dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+
+.graph-caption {
+  font: 10px var(--mono);
+  fill: var(--ink-3);
+}
+
+#interactive-graph {
+  width: 100%;
+  max-width: 960px;
+  flex: 1;
+  min-height: 360px;
+  background: #0d1117;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: inset 0 0 40px #00000066;
+  cursor: grab;
+}
+
+#interactive-graph:active {
+  cursor: grabbing;
+}
+
+#stream-layout {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+#stream-diagram {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+#stream-arrows {
+  width: 100%;
+  height: auto;
+  min-height: 140px;
+  position: absolute;
+  top: 50%;
+  left: 0;
+  transform: translateY(-40%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.stream-node {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-3);
+}
+
+.stream-node.active {
+  transform: scale(1.08);
+  box-shadow: 0 0 30px #4ea3ff33;
+}
+
+#stream-log {
+  max-height: none;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+@media (max-width: 900px) {
+  #stream-layout { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  #stream-log { max-height: 220px; }
+}
+
+@media (max-width: 700px) {
+  #agent-graph { min-height: 280px; }
+}
 </style>
 </head>
 <body>
@@ -745,6 +938,9 @@ button.ghost:hover {
   <button class="tab" data-p="planner">Planner</button>
   <button class="tab" data-p="researcher">Researcher</button>
   <button class="tab" data-p="builder">Builder</button>
+  <button class="tab" data-p="graph">Graph</button>
+  <button class="tab" data-p="interactive">Interactive</button>
+  <button class="tab" data-p="stream">Stream</button>
   <button class="tab" data-p="state">State</button>
   <div id="stats">
     <span>steps <b id="stat-steps">0</b></span>
@@ -884,6 +1080,157 @@ button.ghost:hover {
     </div>
   </section>
 
+  <!-- Graph Panel -->
+  <section class="panel" data-p="graph">
+    <h2>Live Agent Graph</h2>
+    <div class="graph-hint">
+      Nodes update as agents run. Active paths pulse; gray paths are idle.
+    </div>
+    <svg id="agent-graph" viewBox="0 0 800 460" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L0,6 L9,3 z" fill="#5a6474" />
+        </marker>
+        <marker id="arrow-active" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L0,6 L9,3 z" fill="#dde3ec" />
+        </marker>
+        <filter id="glow-planner">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+        <filter id="glow-researcher">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+        <filter id="glow-builder">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+        <linearGradient id="edge-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#4ea3ff" />
+          <stop offset="50%" stop-color="#76d13a" />
+          <stop offset="100%" stop-color="#ff6a8a" />
+        </linearGradient>
+      </defs>
+
+      <g class="graph-edges">
+        <!-- Planner -> Researcher -->
+        <path id="edge-planner-researcher" class="edge" d="M 150 180 L 280 180" />
+        <!-- Researcher -> Builder -->
+        <path id="edge-researcher-builder" class="edge" d="M 380 180 L 510 180" />
+        <!-- Builder -> END -->
+        <path id="edge-builder-end" class="edge" d="M 610 180 L 720 180" />
+        <!-- Feedback: Builder -> Planner (replan) -->
+        <path id="edge-builder-planner" class="edge feedback" d="M 560 230 C 560 330, 200 330, 200 230" />
+        <!-- Researcher -> Planner (need replan / no knowledge) -->
+        <path id="edge-researcher-planner" class="edge feedback" d="M 330 130 C 330 60, 200 60, 200 130" />
+        <!-- Researcher -> GraphRAG -->
+        <path id="edge-researcher-kb" class="edge kb" d="M 330 230 L 330 320" />
+      </g>
+
+      <g class="graph-nodes">
+        <g class="graph-node" id="node-planner" data-agent="planner" transform="translate(110, 180)">
+          <rect x="-60" y="-45" width="120" height="90" rx="12" />
+          <text class="icon" y="-10">🧠</text>
+          <text class="label" y="14">Planner</text>
+          <text class="sublabel" y="32">Reasoning</text>
+        </g>
+
+        <g class="graph-node" id="node-researcher" data-agent="researcher" transform="translate(330, 180)">
+          <rect x="-60" y="-45" width="120" height="90" rx="12" />
+          <text class="icon" y="-10">📚</text>
+          <text class="label" y="14">Researcher</text>
+          <text class="sublabel" y="32">GraphRAG Query</text>
+        </g>
+
+        <g class="graph-node" id="node-builder" data-agent="builder" transform="translate(550, 180)">
+          <rect x="-60" y="-45" width="120" height="90" rx="12" />
+          <text class="icon" y="-10">🔨</text>
+          <text class="label" y="14">Builder</text>
+          <text class="sublabel" y="32">Implementation</text>
+        </g>
+
+        <g class="graph-node end" id="node-end" transform="translate(730, 180)">
+          <circle r="32" />
+          <text class="label" y="5">END</text>
+        </g>
+
+        <g class="graph-node kb" id="node-kb" transform="translate(330, 340)">
+          <rect x="-70" y="-30" width="140" height="60" rx="10" />
+          <text class="label" y="5">GraphRAG KB</text>
+        </g>
+      </g>
+
+      <text class="graph-caption" x="400" y="430" text-anchor="middle">
+        Feedback loops return to Planner on blockers or insufficient knowledge.
+      </text>
+    </svg>
+  </section>
+
+  <!-- Interactive Graph Panel -->
+  <section class="panel" data-p="interactive">
+    <h2>Interactive Agent Graph</h2>
+    <div class="graph-hint">
+      Drag nodes to rearrange. Physics keeps the graph tidy. Active paths pulse; click nodes to focus.
+    </div>
+    <canvas id="interactive-graph"></canvas>
+  </section>
+
+  <!-- Streaming Overlay Panel -->
+  <section class="panel" data-p="stream">
+    <h2>Execution Stream</h2>
+    <div class="graph-hint">
+      Live architecture overlay showing each step as it happens, with step log on the side.
+    </div>
+    <div id="stream-layout">
+      <div id="stream-diagram">
+        <div class="flow-row">
+          <div class="flow-node stream-node planner-node" id="stream-planner">
+            <span class="node-icon">🧠</span>
+            <span class="node-name">Planner</span>
+            <span class="node-desc">Reasoning &amp; routing</span>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stream-node researcher-node" id="stream-researcher">
+            <span class="node-icon">📚</span>
+            <span class="node-name">Researcher</span>
+            <span class="node-desc">GraphRAG queries</span>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stream-node builder-node" id="stream-builder">
+            <span class="node-icon">🔨</span>
+            <span class="node-name">Builder</span>
+            <span class="node-desc">Implementation</span>
+          </div>
+        </div>
+        <div class="feedback-loop">↺ Feedback Loop</div>
+        <svg id="stream-arrows" viewBox="0 0 700 180" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <marker id="stream-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,5 L7,2.5 z" fill="#5a6474" />
+            </marker>
+            <marker id="stream-arrow-active" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,5 L7,2.5 z" fill="#dde3ec" />
+            </marker>
+          </defs>
+          <path id="stream-edge-planner-researcher" class="edge" d="M 120 90 L 280 90" marker-end="url(#stream-arrow)" />
+          <path id="stream-edge-researcher-builder" class="edge" d="M 420 90 L 580 90" marker-end="url(#stream-arrow)" />
+          <path id="stream-edge-feedback" class="edge feedback" d="M 525 140 C 525 220, 120 220, 120 140" marker-end="url(#stream-arrow)" />
+        </svg>
+      </div>
+      <div id="stream-log" class="messages"></div>
+    </div>
+  </section>
+
   <!-- State Panel -->
   <section class="panel" data-p="state">
     <h2>System State</h2>
@@ -992,15 +1339,15 @@ function updateDisplays() {
   // Planner
   $("#planner-plan").textContent = currentState.plan || "(no plan yet)";
   $("#planner-next").textContent = currentState.next_agent || "—";
-  
+
   // Researcher
   $("#researcher-findings").textContent = currentState.research || "(no research yet)";
-  
+
   // Builder
   $("#builder-report").textContent = currentState.builder_report || "(no implementation yet)";
-  $("#builder-files").textContent = currentState.files_changed.length ? 
+  $("#builder-files").textContent = currentState.files_changed.length ?
     currentState.files_changed.join(", ") : "—";
-  
+
   // State
   $("#state-goal").textContent = currentState.goal || "(empty)";
   $("#state-plan").textContent = currentState.plan || "(empty)";
@@ -1008,44 +1355,181 @@ function updateDisplays() {
   $("#state-builder").textContent = currentState.builder_report || "(empty)";
   $("#state-blockers").textContent = currentState.blockers || "(empty)";
   $("#state-steps").textContent = currentState.step_count;
-  
+
+  updateGraph();
+  updateInteractiveGraph();
+  updateStreamOverlay();
   updateStats();
+}
+
+// Update the live agent graph
+function updateGraph() {
+  // Clear active states
+  $$(".graph-node").forEach(n => n.classList.remove("active"));
+  $$(".edge").forEach(e => e.classList.remove("active"));
+  $$(".flow-node").forEach(n => n.classList.remove("active"));
+
+  const next = currentState.next_agent || "";
+  const status = currentState.research_status || "";
+  const blockers = currentState.blockers || "";
+
+  // Highlight final path based on which agents produced output
+  if (currentState.plan) {
+    $("#node-planner").classList.add("active");
+    highlightEdge("planner", "researcher");
+    $(".flow-node.planner-node").classList.add("active");
+  }
+  if (currentState.research) {
+    $("#node-researcher").classList.add("active");
+    highlightEdge("researcher", "builder");
+    $(".flow-node.researcher-node").classList.add("active");
+  }
+  if (currentState.builder_report || currentState.files_changed.length) {
+    $("#node-builder").classList.add("active");
+    highlightEdge("builder", "end");
+    $(".flow-node.builder-node").classList.add("active");
+  }
+
+  // Highlight next routing
+  if (next === "END") {
+    $("#node-end").classList.add("active");
+    highlightEdge("builder", "end");
+  }
+
+  // Feedback loops
+  if (status === "need_replan" || blockers) {
+    highlightEdge("builder", "planner");
+  }
+  if (status === "no_relevant_knowledge" || status === "need_replan") {
+    highlightEdge("researcher", "planner");
+  }
+
+  // Researcher queries KB whenever researcher has output
+  if (currentState.research) {
+    highlightEdge("researcher", "kb");
+  }
+}
+
+function highlightEdge(from, to) {
+  const id = `edge-${from}-${to}`;
+  const edge = $(`#${id}`);
+  if (edge) edge.classList.add("active");
+}
+
+// Stream overlay helpers
+const streamLog = $("#stream-log");
+
+function addStreamStep(text, agent = "system") {
+  if (!streamLog) return;
+  const msg = document.createElement("div");
+  msg.className = `msg ${agent}`;
+  msg.textContent = text;
+  streamLog.appendChild(msg);
+  streamLog.scrollTop = streamLog.scrollHeight;
+}
+
+function clearStreamLog() {
+  if (streamLog) streamLog.innerHTML = "";
+}
+
+function updateStreamOverlay() {
+  $$(".stream-node").forEach(n => n.classList.remove("active"));
+  $$("#stream-arrows .edge").forEach(e => e.classList.remove("active"));
+
+  if (currentState.plan) {
+    $("#stream-planner").classList.add("active");
+    $("#stream-edge-planner-researcher").classList.add("active");
+  }
+  if (currentState.research) {
+    $("#stream-researcher").classList.add("active");
+    $("#stream-edge-researcher-builder").classList.add("active");
+  }
+  if (currentState.builder_report || currentState.files_changed.length) {
+    $("#stream-builder").classList.add("active");
+  }
+  if (currentState.blockers || currentState.research_status === "need_replan") {
+    $("#stream-edge-feedback").classList.add("active");
+  }
+}
+
+// Animate the agent graph through a simulated sequence
+function animateGraphSequence(steps) {
+  // steps: array of { agent, edgeFrom, edgeTo, duration }
+  let i = 0;
+  function step() {
+    if (i >= steps.length) return;
+    const s = steps[i];
+    if (s.agent) {
+      $("#node-planner").classList.remove("active");
+      $("#node-researcher").classList.remove("active");
+      $("#node-builder").classList.remove("active");
+      if (s.agent !== "kb") $(`#node-${s.agent}`).classList.add("active");
+    }
+    $$(".edge").forEach(e => e.classList.remove("active"));
+    if (s.edgeFrom && s.edgeTo) highlightEdge(s.edgeFrom, s.edgeTo);
+    if (s.edgeFrom === "researcher" && s.edgeTo === "builder") highlightEdge("researcher", "kb");
+
+    // Also pulse interactive graph node
+    if (s.agent && s.agent !== "kb" && s.agent !== "end") {
+      pulseInteractiveNode(s.agent);
+    }
+
+    i++;
+    setTimeout(step, s.duration || 900);
+  }
+  step();
 }
 
 // Run the 3-Agent system
 async function runGoal() {
   const goal = $("#goal-input").value.trim();
   if (!goal) return;
-  
+
   if (isRunning) return;
   isRunning = true;
-  
+
   $("#run-btn").disabled = true;
   $("#run-btn").textContent = "Running...";
   addMessage(`Starting: ${goal}`, "system");
-  
+  clearStreamLog();
+  addStreamStep(`Goal: ${goal}`, "system");
+
+  // Show dynamic graph sequence while the backend runs
+  animateGraphSequence([
+    { agent: "planner", edgeFrom: "planner", edgeTo: "researcher", duration: 1000 },
+    { agent: "researcher", edgeFrom: "researcher", edgeTo: "kb", duration: 1200 },
+    { agent: "builder", edgeFrom: "researcher", edgeTo: "builder", duration: 1200 },
+    { agent: "end", edgeFrom: "builder", edgeTo: "end", duration: 1000 },
+  ]);
+
+  addStreamStep("Planner: creating plan", "planner");
+  addStreamStep("Researcher: querying GraphRAG KB", "researcher");
+  addStreamStep("Builder: executing implementation", "builder");
+
   try {
     const response = await fetch(`${API_BASE}/api/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ goal })
     });
-    
+
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
+
     const result = await response.json();
     currentState = { ...currentState, ...result };
-    
+
     // Add messages
     if (result.messages) {
       result.messages.forEach(msg => addMessage(msg, "system"));
     }
-    
+
     updateDisplays();
     addMessage("✓ Task completed", "system");
-    
+    addStreamStep("✓ Task completed", "system");
+
   } catch (err) {
     addMessage(`✕ Error: ${err.message}`, "system");
+    addStreamStep(`✕ Error: ${err.message}`, "system");
   } finally {
     isRunning = false;
     $("#run-btn").disabled = false;
@@ -1070,6 +1554,7 @@ function clearState() {
   };
   $("#goal-input").value = "";
   $("#overview-messages").innerHTML = '<div class="msg system">Cleared. Enter a new goal.</div>';
+  clearStreamLog();
   updateDisplays();
 }
 
@@ -1131,6 +1616,296 @@ async function pollStatus() {
 // Initial poll
 pollStatus();
 setInterval(pollStatus, 10000);
+
+// Interactive force-directed graph
+(function initInteractiveGraph() {
+  const canvas = $("#interactive-graph");
+  if (!canvas) return;
+
+  const ctx = canvas.getContext("2d");
+  let width, height;
+  let dpr = window.devicePixelRatio || 1;
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    width = rect.width;
+    height = rect.height;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  const nodes = [
+    { id: "planner", label: "Planner", sub: "Reasoning", x: 0.2, y: 0.3, color: "#4ea3ff", radius: 42 },
+    { id: "researcher", label: "Researcher", sub: "GraphRAG Query", x: 0.5, y: 0.2, color: "#76d13a", radius: 42 },
+    { id: "builder", label: "Builder", sub: "Implementation", x: 0.8, y: 0.3, color: "#ff6a8a", radius: 42 },
+    { id: "kb", label: "GraphRAG KB", sub: "Knowledge", x: 0.5, y: 0.72, color: "#8b95a6", radius: 34 },
+    { id: "end", label: "END", sub: "", x: 0.9, y: 0.3, color: "#b48cff", radius: 30 }
+  ];
+
+  const edges = [
+    { from: "planner", to: "researcher" },
+    { from: "researcher", to: "builder" },
+    { from: "builder", to: "end" },
+    { from: "builder", to: "planner", dashed: true },
+    { from: "researcher", to: "planner", dashed: true },
+    { from: "researcher", to: "kb", dashed: true }
+  ];
+
+  let dragging = null;
+  let hover = null;
+  let pulses = {}; // id -> timestamp
+
+  function toScreen(n) {
+    return { x: n.x * width, y: n.y * height };
+  }
+
+  function fromScreen(x, y) {
+    return { x: x / width, y: y / height };
+  }
+
+  function getEdgePoint(n, angle) {
+    const r = n.radius;
+    return { x: Math.cos(angle) * r, y: Math.sin(angle) * r };
+  }
+
+  function drawArrow(from, to, active, dashed) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const angle = Math.atan2(dy, dx);
+    const start = getEdgePoint({ radius: from.radius + 4 }, angle);
+    const endOff = getEdgePoint({ radius: to.radius + 6 }, angle);
+    const sx = from.x + start.x;
+    const sy = from.y + start.y;
+    const ex = to.x - endOff.x;
+    const ey = to.y - endOff.y;
+
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = active ? "#dde3ec" : "#3a4555";
+    ctx.lineWidth = active ? 3 : 2;
+    ctx.setLineDash(dashed ? (active ? [8, 4] : [6, 4]) : []);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Arrowhead
+    ctx.beginPath();
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - 10 * Math.cos(angle - 0.4), ey - 10 * Math.sin(angle - 0.4));
+    ctx.lineTo(ex - 10 * Math.cos(angle + 0.4), ey - 10 * Math.sin(angle + 0.4));
+    ctx.closePath();
+    ctx.fillStyle = active ? "#dde3ec" : "#3a4555";
+    ctx.fill();
+
+    // Active flow animation
+    if (active) {
+      const t = (Date.now() / 800) % 1;
+      const px = sx + (ex - sx) * t;
+      const py = sy + (ey - sy) * t;
+      ctx.beginPath();
+      ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+    }
+  }
+
+  function drawNode(n) {
+    const p = toScreen(n);
+    const isActive = currentState.plan && n.id === "planner" ||
+                     currentState.research && n.id === "researcher" ||
+                     (currentState.builder_report || currentState.files_changed.length) && n.id === "builder" ||
+                     currentState.next_agent === "END" && n.id === "end" ||
+                     currentState.research && n.id === "kb";
+    const isPulsing = pulses[n.id] && Date.now() - pulses[n.id] < 800;
+
+    // Glow
+    if (isActive || isPulsing) {
+      const glow = ctx.createRadialGradient(p.x, p.y, n.radius * 0.5, p.x, p.y, n.radius * 2.5);
+      glow.addColorStop(0, n.color + "44");
+      glow.addColorStop(1, n.color + "00");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, n.radius * 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Body
+    ctx.beginPath();
+    if (n.id === "end") {
+      ctx.arc(p.x, p.y, n.radius, 0, Math.PI * 2);
+    } else {
+      ctx.roundRect(p.x - n.radius, p.y - n.radius * 0.75, n.radius * 2, n.radius * 1.5, 10);
+    }
+    ctx.fillStyle = isActive || isPulsing ? n.color + "22" : "#11151c";
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = n.color;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = (isActive || isPulsing) ? "#dde3ec" : "#8b95a6";
+    ctx.font = "600 13px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(n.label, p.x, p.y - (n.sub ? 6 : 0));
+
+    if (n.sub) {
+      ctx.fillStyle = "#5a6474";
+      ctx.font = "9px ui-monospace, monospace";
+      ctx.fillText(n.sub, p.x, p.y + 12);
+    }
+
+    // Hover ring
+    if (hover === n.id) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, n.radius + 8, 0, Math.PI * 2);
+      ctx.strokeStyle = n.color + "66";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  function applyForces() {
+    const kRepel = 1200;
+    const kSpring = 0.03;
+    const kCenter = 0.002;
+
+    nodes.forEach(n => {
+      n.vx = (n.vx || 0) * 0.85;
+      n.vy = (n.vy || 0) * 0.85;
+    });
+
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const pa = toScreen(a), pb = toScreen(b);
+        let dx = pa.x - pb.x;
+        let dy = pa.y - pb.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const f = kRepel / (dist * dist);
+        dx /= dist; dy /= dist;
+        a.vx += dx * f / width;
+        a.vy += dy * f / height;
+        b.vx -= dx * f / width;
+        b.vy -= dy * f / height;
+      }
+    }
+
+    edges.forEach(e => {
+      const a = nodes.find(n => n.id === e.from);
+      const b = nodes.find(n => n.id === e.to);
+      if (!a || !b || a === dragging || b === dragging) return;
+      const pa = toScreen(a), pb = toScreen(b);
+      const target = e.dashed ? 120 : 160;
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (dist - target) * kSpring;
+      a.vx += (dx / dist) * f;
+      a.vy += (dy / dist) * f;
+      b.vx -= (dx / dist) * f;
+      b.vy -= (dy / dist) * f;
+    });
+
+    nodes.forEach(n => {
+      if (n === dragging) return;
+      n.vx += (n.x - 0.5) * -kCenter * width;
+      n.vy += (n.y - 0.4) * -kCenter * height;
+      n.x += n.vx / width;
+      n.y += n.vy / height;
+      n.x = Math.max(0.08, Math.min(0.92, n.x));
+      n.y = Math.max(0.1, Math.min(0.85, n.y));
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+
+    applyForces();
+
+    const positions = {};
+    nodes.forEach(n => positions[n.id] = toScreen(n));
+
+    edges.forEach(e => {
+      const active =
+        (e.from === "planner" && e.to === "researcher" && currentState.plan) ||
+        (e.from === "researcher" && e.to === "builder" && currentState.research) ||
+        (e.from === "builder" && e.to === "end" && (currentState.builder_report || currentState.files_changed.length)) ||
+        (e.from === "builder" && e.to === "planner" && (currentState.blockers || currentState.research_status === "need_replan")) ||
+        (e.from === "researcher" && e.to === "planner" && (currentState.research_status === "no_relevant_knowledge" || currentState.research_status === "need_replan")) ||
+        (e.from === "researcher" && e.to === "kb" && currentState.research);
+      drawArrow(positions[e.from], positions[e.to], active, e.dashed);
+    });
+
+    nodes.forEach(drawNode);
+  }
+
+  function loop() {
+    if (document.visibilityState === "visible") draw();
+    requestAnimationFrame(loop);
+  }
+
+  function hitNode(x, y) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      const p = toScreen(n);
+      const dx = x - p.x;
+      const dy = y - p.y;
+      if (dx * dx + dy * dy <= n.radius * n.radius * 1.5) return n;
+    }
+    return null;
+  }
+
+  canvas.addEventListener("pointerdown", e => {
+    const rect = canvas.getBoundingClientRect();
+    const n = hitNode(e.clientX - rect.left, e.clientY - rect.top);
+    if (n) {
+      dragging = n;
+      canvas.setPointerCapture(e.pointerId);
+      pulses[n.id] = Date.now();
+    }
+  });
+
+  canvas.addEventListener("pointermove", e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const n = hitNode(x, y);
+    hover = n ? n.id : null;
+    canvas.style.cursor = dragging || hover ? "grabbing" : "grab";
+    if (dragging) {
+      const pos = fromScreen(x, y);
+      dragging.x = Math.max(0.08, Math.min(0.92, pos.x));
+      dragging.y = Math.max(0.1, Math.min(0.85, pos.y));
+    }
+  });
+
+  canvas.addEventListener("pointerup", e => {
+    dragging = null;
+    canvas.releasePointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    hover = null;
+  });
+
+  window.addEventListener("resize", resize);
+  window.addEventListener("pulse-node", e => {
+    pulses[e.detail] = Date.now();
+  });
+  resize();
+  loop();
+})();
+
+function updateInteractiveGraph() {
+  // Canvas loop reads currentState directly; no extra work needed.
+}
+
+function pulseInteractiveNode(id) {
+  const event = new CustomEvent("pulse-node", { detail: id });
+  window.dispatchEvent(event);
+}
 
 // Keyboard shortcuts
 document.addEventListener("keydown", e => {
