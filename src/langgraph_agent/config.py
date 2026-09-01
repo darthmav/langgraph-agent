@@ -25,6 +25,33 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
 }
 
 
+# Cloud LLM options exposed in the console. Each option maps to a provider/model
+# pair already supported by get_llm().
+AGENT_LLM_OPTIONS: list[dict[str, str]] = [
+    {"label": "OpenAI GPT-4o mini", "provider": "openai", "model": "gpt-4o-mini"},
+    {"label": "OpenAI GPT-4o", "provider": "openai", "model": "gpt-4o"},
+    {"label": "Anthropic Claude 3.5 Sonnet", "provider": "anthropic", "model": "claude-3-5-sonnet-20241022"},
+    {"label": "Anthropic Claude 3.5 Haiku", "provider": "anthropic", "model": "claude-3-5-haiku-20241022"},
+    {"label": "Kimi Moonshot v1 8k", "provider": "kimi", "model": "moonshot-v1-8k"},
+    {"label": "Kimi Moonshot v1 32k", "provider": "kimi", "model": "moonshot-v1-32k"},
+    {"label": "Kimi Moonshot v1 128k", "provider": "kimi", "model": "moonshot-v1-128k"},
+]
+
+
+# Runtime per-agent LLM selections set from the console. These override the
+# environment-variable defaults for the lifetime of the process.
+_agent_llm_overrides: dict[str, dict[str, str]] = {}
+
+
+def set_agent_llm(agent: str, provider: str, model: str) -> None:
+    """Set the LLM for an agent at runtime.
+
+    The selection is stored in memory only; it does not modify environment
+    variables or persist across server restarts.
+    """
+    _agent_llm_overrides[agent] = {"provider": provider, "model": model}
+
+
 def get_llm(
     provider: Literal["openai", "anthropic", "ollama", "kimi"] | None = None,
     model: str | None = None,
@@ -155,22 +182,35 @@ def get_agent_llm(
         Researcher -> Gemma4 via Ollama    (science & dev research)
         Builder    -> Qwen via Ollama      (code evaluation / implementation)
     """
-    prefix = agent.upper()
-    provider = os.getenv(f"{prefix}_PROVIDER")
-    model = os.getenv(f"{prefix}_MODEL")
-    base_url = os.getenv(f"{prefix}_BASE_URL")
-    api_key = os.getenv(f"{prefix}_API_KEY")
+    provider: str | None
+    model: str | None
+    base_url: str | None
+    api_key: str | None
 
-    per_agent_configured = bool(provider or model)
+    # Runtime console override takes precedence over env vars.
+    override = _agent_llm_overrides.get(agent)
+    if override:
+        provider = override["provider"]
+        model = override["model"]
+        base_url = os.getenv(f"{provider.upper()}_BASE_URL") if provider else None
+        api_key = None
+    else:
+        prefix = agent.upper()
+        provider = os.getenv(f"{prefix}_PROVIDER")
+        model = os.getenv(f"{prefix}_MODEL")
+        base_url = os.getenv(f"{prefix}_BASE_URL")
+        api_key = os.getenv(f"{prefix}_API_KEY")
 
-    if not per_agent_configured:
-        # Legacy single-model fallback: every agent uses the same provider/model.
-        provider = _detect_provider(None)
-        model = None
-    elif not model and provider:
-        # Per-agent provider was explicitly chosen; apply a sensible default
-        # model for that provider + agent combination.
-        model = _DEFAULT_AGENT_MODELS.get((provider, agent))
+        per_agent_configured = bool(provider or model)
+
+        if not per_agent_configured:
+            # Legacy single-model fallback: every agent uses the same provider/model.
+            provider = _detect_provider(None)
+            model = None
+        elif not model and provider:
+            # Per-agent provider was explicitly chosen; apply a sensible default
+            # model for that provider + agent combination.
+            model = _DEFAULT_AGENT_MODELS.get((provider, agent))
 
     return get_llm(
         provider=provider,  # type: ignore[arg-type]
@@ -189,6 +229,11 @@ def get_agent_model_info(
     Mirrors the fallback logic of `get_agent_llm()` so the UI can display the
     model each agent will use.
     """
+    # Runtime console override takes precedence over env vars.
+    override = _agent_llm_overrides.get(agent)
+    if override:
+        return {"provider": override["provider"], "model": override["model"]}
+
     prefix = agent.upper()
     provider = os.getenv(f"{prefix}_PROVIDER")
     model = os.getenv(f"{prefix}_MODEL")

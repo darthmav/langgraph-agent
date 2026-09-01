@@ -32,7 +32,11 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from langgraph_agent import AgentState, create_agent_graph  # noqa: E402
-from langgraph_agent.config import get_agent_model_info  # noqa: E402
+from langgraph_agent.config import (  # noqa: E402
+    AGENT_LLM_OPTIONS,
+    get_agent_model_info,
+    set_agent_llm,
+)
 from langgraph_agent.graphrag_server import (  # noqa: E402
     get_knowledge_base,
     is_knowledge_base_indexed,
@@ -85,7 +89,14 @@ class Handler(SimpleHTTPRequestHandler):
                     "researcher": get_agent_model_info("researcher"),
                     "builder": get_agent_model_info("builder"),
                 },
+                "selected": {
+                    "planner": get_agent_model_info("planner"),
+                    "researcher": get_agent_model_info("researcher"),
+                    "builder": get_agent_model_info("builder"),
+                },
             })
+        elif parsed.path == '/api/llm-options':
+            self.send_json({"options": AGENT_LLM_OPTIONS})
         elif parsed.path == '/' or parsed.path == '/index.html':
             self.path = '/index.html'
             return super().do_GET()
@@ -123,6 +134,24 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e), "results": []})
 
+        elif parsed.path == '/api/set-llm':
+            agent = data.get("agent", "")
+            provider = data.get("provider", "")
+            model = data.get("model", "")
+            if agent not in {"planner", "researcher", "builder"}:
+                self.send_error(400, explain="Invalid agent")
+                return
+            if not provider or not model:
+                self.send_error(400, explain="Provider and model required")
+                return
+            set_agent_llm(str(agent), str(provider), str(model))
+            self.send_json({
+                "ok": True,
+                "agent": agent,
+                "provider": provider,
+                "model": model,
+            })
+
         else:
             self.send_error(404)
 
@@ -136,7 +165,7 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         request_line = args[0] if args else ""
         # Suppress noisy routine status-poll logs; everything else is still logged.
-        if "GET /api/status" in request_line:
+        if isinstance(request_line, str) and "GET /api/status" in request_line:
             return
         print(f"[API] {request_line}")
 
