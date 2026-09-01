@@ -99,10 +99,22 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps(obj, default=str).encode())
     
     def log_message(self, format, *args):
-        print(f"[API] {args[0]}")
+        request_line = args[0] if args else ""
+        # Suppress noisy routine status-poll logs; everything else is still logged.
+        if "GET /api/status" in request_line:
+            return
+        print(f"[API] {request_line}")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     print(f"Serving at http://localhost:{port}")
     print("Press Ctrl+C to stop")
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    server = None
+    try:
+        server = HTTPServer(("0.0.0.0", port), Handler)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        if server:
+            server.shutdown()
