@@ -35,6 +35,7 @@ from langgraph_agent import AgentState, create_agent_graph  # noqa: E402
 from langgraph_agent.config import (  # noqa: E402
     AGENT_LLM_OPTIONS,
     get_agent_model_info,
+    list_ollama_models,
     set_agent_llm,
 )
 from langgraph_agent.graphrag_server import (  # noqa: E402
@@ -97,6 +98,8 @@ class Handler(SimpleHTTPRequestHandler):
             })
         elif parsed.path == '/api/llm-options':
             self.send_json({"options": AGENT_LLM_OPTIONS})
+        elif parsed.path == '/api/ollama-models':
+            self.send_json({"models": list_ollama_models()})
         elif parsed.path == '/' or parsed.path == '/index.html':
             self.path = '/index.html'
             return super().do_GET()

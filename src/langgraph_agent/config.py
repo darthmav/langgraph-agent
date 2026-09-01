@@ -43,6 +43,43 @@ AGENT_LLM_OPTIONS: list[dict[str, str]] = [
 _agent_llm_overrides: dict[str, dict[str, str]] = {}
 
 
+def get_ollama_base_url() -> str:
+    """Return the configured Ollama base URL."""
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+
+def list_ollama_models() -> list[dict[str, str]]:
+    """Query the Ollama server for installed models.
+
+    Returns a list of {"name": ..., "label": ...} dicts. Returns an empty
+    list if Ollama is unreachable or returns an unexpected response.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    base_url = get_ollama_base_url()
+    url = f"{base_url.rstrip('/')}/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            data = _json.loads(response.read().decode("utf-8"))
+    except Exception:
+        # Ollama is optional; fail silently so the console still works with
+        # cloud providers when the local server is not running.
+        return []
+
+    models = data.get("models", []) if isinstance(data, dict) else []
+    result: list[dict[str, str]] = []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = model.get("model") or model.get("name")
+        if not name:
+            continue
+        result.append({"name": str(name), "label": str(name)})
+    return result
+
+
 def set_agent_llm(agent: str, provider: str, model: str) -> None:
     """Set the LLM for an agent at runtime.
 
