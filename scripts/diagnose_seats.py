@@ -7,7 +7,9 @@ one is far cheaper than the other.
 **Phase 1 -- role probes.** One bounded call per (model, role) pair, through
 the *real* role prompt and the *real* parser the node uses. It answers "can
 this model hold this seat at all": did it answer, did the answer parse, and --
-for the Builder -- can it call a tool. A model that fails its probe cannot be
+for the Builder -- can it call a tool. The Architect is asked twice, once
+about finished work and once about blocked work, because the gate is the seat
+that ends the run and a single verdict cannot be told from a fixed one. A model that fails its probe cannot be
 rescued by a good team around it, and finding that out costs one call instead
 of a whole run. This is the phase that would have caught the silent Researcher
 in seconds.
@@ -359,6 +361,7 @@ _STATUS_COLOR = {
     "ok": green, "approved": green,
     "empty": red, "error": red, "failed": red, "ceiling": red,
     "malformed": yellow, "stubbed": yellow, "budget": yellow,
+    "cautious": yellow, "rubber": red, "inverted": red,
     "skipped": dim,
 }
 
@@ -438,12 +441,52 @@ def probe_state(role: str) -> dict[str, Any]:
 def gate_probe_state() -> dict[str, Any]:
     state = probe_state("architect")
     state["plan"] = "1. Add a `_retry` helper.\n2. Wrap the request call."
+    # This report must actually satisfy the goal, every clause of it. The
+    # first version claimed only "a cap of 3 attempts" while the goal asked
+    # for retry *with backoff*, and both careful models correctly ruled
+    # `revise` -- the probe then recorded them as gates that never approve.
+    # Grading judgment against a fixture that does not deserve approval
+    # punishes exactly the models worth seating. So: backoff named with real
+    # delays, the architecture's constraints met, and a test that asserts the
+    # delays rather than merely passing.
     state["builder_report"] = (
-        "- Added `_retry` to client.py with a cap of 3 attempts.\n"
-        "- Added test_retry.py; it passes.\n"
-        "Tool calls:\n- filesystem_write(client.py) -> ok"
+        "- Added `_retry(fn, attempts=3, backoff=0.5)` to client.py. It sleeps "
+        "backoff * 2 ** (n - 1) between attempts and stops after 3, so the "
+        "loop is bounded.\n"
+        "- Wrapped the client's own request call in it; no call site changed.\n"
+        "- Added test_retry.py: forces two failures, asserts one success, and "
+        "asserts the recorded delays were 0.5s and 1.0s. It passes.\n"
+        "Tool calls:\n- filesystem_write(client.py) -> ok\n"
+        "- filesystem_write(test_retry.py) -> ok\n"
+        "- test_run(test_retry.py) -> ok, 1 passed"
     )
     state["files_changed"] = ["client.py", "test_retry.py"]
+    return state
+
+
+# The gate's other half. One fixture cannot tell a good gate from a model
+# stuck on one answer: rule `approved` on a finished report and you look
+# decisive, but only until you rule it on an unfinished one too. So this is
+# the same pass with the work plainly not done -- nothing written, an
+# explicit blocker, no plan step completed.
+#
+# Deliberately no `failed_verification`: that list makes `architect_node`
+# rewrite `approved` to `revise` on its own, so a fixture using it would
+# measure the framework's safety net rather than the seat's judgment. Here
+# nothing but the model stands between the run and a premature `approved`.
+def blocked_gate_probe_state() -> dict[str, Any]:
+    state = probe_state("architect")
+    state["plan"] = "1. Add a `_retry` helper.\n2. Wrap the request call."
+    state["builder_report"] = (
+        "- Could not start: the HTTP client module could not be located.\n"
+        "- No files were written and no tests were run.\n"
+        "Tool calls:\n- filesystem_read(client.py) -> error: no such file"
+    )
+    state["files_changed"] = []
+    state["blockers"] = (
+        "Cannot find the HTTP client module named in the plan. Nothing was "
+        "implemented."
+    )
     return state
 
 
@@ -489,21 +532,57 @@ def run_probe(candidate: Candidate, role: str, mods: dict[str, Any]) -> ProbeRes
     started = time.monotonic()
     try:
         if role == "architect":
-            parsed = nodes._rule_on_state(gate_probe_state(), reviewing=True)
-            text = parsed.get("architecture", "")
-            verdict = parsed.get("verdict", "")
-            result.parsed = {"verdict": verdict}
+            # Two passes, because the gate is the only seat whose failure is
+            # invisible in its own output. A verdict that parses tells you
+            # nothing about whether it was the right one, and this seat is
+            # what ends the run: rule `approved` too readily and a run stops
+            # having produced nothing, rule it never and the run cycles to the
+            # step ceiling. Only asking twice separates judgment from a model
+            # that has one answer.
+            done = nodes._rule_on_state(gate_probe_state(), reviewing=True)
+            blocked = nodes._rule_on_state(
+                blocked_gate_probe_state(), reviewing=True)
+
+            text = done.get("architecture", "")
+            verdict = str(done.get("verdict", ""))
+            blocked_verdict = str(blocked.get("verdict", ""))
+            result.parsed = {"verdict": verdict,
+                             "verdict_when_blocked": blocked_verdict}
+            result.chars = len(str(text))
+            result.excerpt = excerpt(text)
+
             valid = {v.value for v in mods["Verdict"]}
+            approved = mods["Verdict"].APPROVED.value
             if not str(text).strip() and not verdict:
                 result.status, result.detail = "empty", "No architecture, no verdict"
             elif verdict not in valid:
                 result.status = "malformed"
                 result.detail = f"Verdict {verdict!r} is not one of {sorted(valid)}"
-            else:
+            elif blocked_verdict not in valid:
+                result.status = "malformed"
+                result.detail = (f"Verdict {blocked_verdict!r} on the blocked "
+                                 f"report is not one of {sorted(valid)}")
+            elif verdict == approved and blocked_verdict != approved:
                 result.status = "ok"
-                result.detail = f"Ruled {verdict!r} on a finished report"
-            result.chars = len(str(text))
-            result.excerpt = excerpt(text)
+                result.detail = (f"Approved finished work, ruled "
+                                 f"{blocked_verdict!r} on blocked work")
+            elif verdict == approved and blocked_verdict == approved:
+                # The dangerous one, and the reason for the second fixture: a
+                # gate that approves regardless ends runs that produced
+                # nothing, and it looks decisive doing it.
+                result.status = "rubber"
+                result.detail = ("Approved a report that wrote nothing and "
+                                 "declared a blocker -- this gate would end a "
+                                 "run that did no work")
+            elif verdict != approved and blocked_verdict != approved:
+                result.status = "cautious"
+                result.detail = (f"Ruled {verdict!r} on finished work too -- "
+                                 f"never approves, so runs cycle to the step "
+                                 f"ceiling")
+            else:
+                result.status = "inverted"
+                result.detail = (f"Ruled {verdict!r} on finished work but "
+                                 f"{blocked_verdict!r} on blocked work")
 
         elif role == "planner":
             parsed = nodes._make_plan(probe_state("planner"))
@@ -662,7 +741,9 @@ def probe_matrix(results: list[ProbeResult], roles: list[str]) -> None:
                 cells.append(f"{dim('-'):<14}")
                 continue
             mark = {"ok": "ok", "empty": "EMPTY", "malformed": "malf",
-                    "error": "ERR", "stubbed": "stub"}.get(r.status, r.status)
+                    "error": "ERR", "stubbed": "stub", "cautious": "cautn",
+                    "rubber": "RUBBR", "inverted": "INVRT"}.get(
+                        r.status, r.status)
             cells.append(f"{paint(mark)} {r.seconds:>5.1f}s".ljust(
                 14 + (len(paint(mark)) - len(mark))))
         print(f"  {key:<12}" + "".join(cells))
@@ -1305,13 +1386,18 @@ def main(argv: list[str]) -> int:
     do_probe = args.phase in ("probe", "all")
     do_teams = args.phase in ("teams", "all")
 
-    probe_calls = len(candidates) * len(roles) if do_probe else 0
+    # The architect probe makes two calls, not one: the gate is asked to rule
+    # on finished work and on blocked work, because one answer cannot be told
+    # from a fixed answer. See run_probe.
+    calls_per_model = len(roles) + (1 if "architect" in roles else 0)
+    probe_calls = len(candidates) * calls_per_model if do_probe else 0
     team_runs = len(configs) * len(exercises) if do_teams else 0
 
     rule("plan")
     print(f"  phase          {args.phase}")
     print(f"  probes         {probe_calls} calls "
-          f"({len(candidates)} models x {len(roles)} roles)")
+          f"({len(candidates)} models x {len(roles)} roles"
+          f"{'; the gate is asked twice' if 'architect' in roles else ''})")
     print(f"  team runs      {team_runs} "
           f"({len(configs)} configs x {len(exercises)} exercises), "
           f"budget {args.budget:.0f}s each")

@@ -113,6 +113,90 @@ def test_a_seat_with_no_credentials_probes_as_stubbed(diag):
     assert "ANTHROPIC_API_KEY" in result.detail
 
 
+def _gate_stub(on_finished: str, on_blocked: str):
+    """Stand in for `_rule_on_state`, answering each gate fixture differently.
+
+    The two fixtures are told apart by `blockers`, which only the blocked one
+    sets -- the probe calls the same function twice and the state is the only
+    thing that differs.
+    """
+
+    def _rule(state, reviewing):
+        verdict = on_blocked if state.get("blockers") else on_finished
+        return {"architecture": "Keep the retry inside the client.",
+                "verdict": verdict}
+
+    return _rule
+
+
+@pytest.mark.parametrize(
+    ("on_finished", "on_blocked", "expected"),
+    [
+        ("approved", "revise", "ok"),          # tells the two apart
+        ("approved", "approved", "rubber"),    # ends a run that did nothing
+        ("revise", "revise", "cautious"),      # never ends a run at all
+        ("revise", "approved", "inverted"),    # exactly backwards
+    ],
+)
+def test_the_gate_is_graded_on_judgment_not_parseability(
+    diag, monkeypatch, on_finished, on_blocked, expected
+):
+    """A verdict that parses says nothing about whether it was the right one.
+
+    The Architect is the seat that ends the run, so its failures are the ones
+    that do not show up in its own output: approve too readily and a run stops
+    having produced nothing, never approve and the run cycles to the step
+    ceiling. Both parse. Asking the gate about finished work *and* about
+    blocked work is what separates judgment from a model with one answer.
+    """
+    from langgraph_agent import nodes
+    from langgraph_agent.state import Verdict
+
+    monkeypatch.setattr(nodes, "_rule_on_state",
+                        _gate_stub(on_finished, on_blocked))
+
+    mods = {"nodes": nodes, "config": _FakeConfig(), "Verdict": Verdict}
+    result = diag.run_probe(diag.BY_KEY["kimi-k3"], "architect", mods)
+
+    assert result.status == expected
+    assert result.parsed["verdict"] == on_finished
+    assert result.parsed["verdict_when_blocked"] == on_blocked
+
+
+def test_the_blocked_gate_fixture_carries_no_failed_verification(diag):
+    """It must measure the seat, not the safety net.
+
+    `architect_node` rewrites `approved` to `revise` whenever
+    `failed_verification` is non-empty, so a fixture using that list would
+    grade the framework's override instead of the model's judgment.
+    """
+    state = diag.blocked_gate_probe_state()
+
+    assert not state["failed_verification"]
+    assert state["blockers"]
+    assert state["files_changed"] == []
+
+
+def test_the_finished_gate_fixture_satisfies_its_own_goal(diag):
+    """A gate graded on a report that deserves `revise` punishes good judgment.
+
+    The first version of this fixture asked for "a retry with backoff" and
+    then presented a report claiming only a 3-attempt cap. Both of the most
+    careful models ruled `revise`, correctly, and the probe recorded them as
+    gates that never approve. Every requirement named in the goal has to be
+    answered in the report, or the probe measures the fixture's sloppiness
+    instead of the seat's judgment.
+    """
+    state = diag.gate_probe_state()
+    report = state["builder_report"].lower()
+
+    for requirement in ("backoff", "test"):
+        assert requirement in state["goal"].lower()
+        assert requirement in report
+    assert state["files_changed"]
+    assert not state["blockers"]
+
+
 def test_an_unprobed_role_is_not_reported_as_a_failed_one(diag):
     """`--phase teams` must not invent probe failures for a phase never run."""
     best, notes = diag.recommend([], [])

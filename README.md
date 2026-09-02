@@ -241,6 +241,14 @@ can hold a seat at all: did it answer, did the answer parse, and — for the
 Builder — can it call a tool. `empty` is the status that matters, because a
 seat that returns nothing loops the run rather than failing it.
 
+The Architect is asked twice: to rule on finished work and on blocked work.
+It is the seat that ends the run, so its failures do not show up in its own
+output — a gate that approves regardless ends runs that produced nothing
+(`rubber`), and one that never approves cycles to the step ceiling
+(`cautious`). One verdict cannot be told apart from a fixed one. Both fixtures
+must be fair: grade a gate against a report that does not deserve approval and
+the models with the best judgment are the ones marked down.
+
 **Phase 2 — team runs.** Each configuration runs the same short exercise through
 the same graph the console drives, instrumented per node. It answers what the
 probes cannot: whether four seats that each work alone make progress *together*.
