@@ -9,6 +9,8 @@ Verifies:
 - Graph loops on the Architect's verdict and stops at the step limit
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from langgraph_agent import AgentState, ResearchStatus, Verdict, create_agent_graph
@@ -894,6 +896,78 @@ def test_a_failing_researcher_still_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="credit balance"):
         nodes.researcher_node(initial_state("Research something"))
+
+
+class _SilentSeat:
+    """A seat whose model answers with nothing at all."""
+
+    def __init__(self, content=""):
+        self.content = content
+
+    def invoke(self, messages):
+        return SimpleNamespace(content=self.content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",                                  # nothing at all
+        "   \n\n  ",                         # whitespace
+        "## Key Findings\n\n## Status\nready_for_builder",   # headings, no content
+        [],                                  # empty content blocks
+    ],
+)
+def test_a_silent_researcher_is_not_reported_as_research(monkeypatch, content):
+    """An empty answer must not route as `ready_for_builder`.
+
+    The parsed status defaults to `ready_for_builder`, so silence was being
+    announced as "Research complete" while `research` reached the Builder
+    empty. The Builder then reports an empty store, the gate rules
+    `need_research`, and the run goes back round to the same silent seat --
+    a loop that burns a step per cycle up to the ceiling.
+    """
+    from langgraph_agent import nodes
+
+    monkeypatch.setattr(nodes, "get_agent_llm", lambda agent: _SilentSeat(content))
+    monkeypatch.setattr(
+        nodes, "_call_mcp_tool_sync", lambda *a, **k: {"results": []}
+    )
+
+    state = initial_state("Research something the seat will not answer")
+    state["plan"] = "1. Look it up"
+
+    result = nodes.researcher_node(state)
+
+    assert result["research_status"] == "no_relevant_knowledge"
+    assert result["next_agent"] == "Builder"          # not back to the Planner
+    assert "returned no findings" in result["research"]
+    assert not any("Research complete" in m for m in result["messages"])
+    assert any("check the Researcher's model" in m for m in result["messages"])
+
+
+def test_real_findings_still_route_as_research(monkeypatch):
+    """The guard must not swallow a seat that actually answered."""
+    from langgraph_agent import nodes
+
+    answer = (
+        "## Key Findings\nThe Laplacian is D - A.\n\n"
+        "## Relevant Context\nSpectral graph theory.\n\n"
+        "## Recommendations for Builder\nStart from the Laplacian.\n\n"
+        "## Status\nready_for_builder"
+    )
+    monkeypatch.setattr(nodes, "get_agent_llm", lambda agent: _SilentSeat(answer))
+    monkeypatch.setattr(
+        nodes, "_call_mcp_tool_sync", lambda *a, **k: {"results": []}
+    )
+
+    state = initial_state("Research spectral graph theory")
+    state["plan"] = "1. Look it up"
+
+    result = nodes.researcher_node(state)
+
+    assert result["research_status"] == "ready_for_builder"
+    assert "Laplacian" in result["research"]
+    assert any("Research complete" in m for m in result["messages"])
 
 
 def test_every_provider_client_carries_a_request_timeout(monkeypatch):

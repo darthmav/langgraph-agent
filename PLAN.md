@@ -19,7 +19,7 @@ The implementation follows the documented architecture: Architect, Planner, Rese
 |------------|---------|-------|
 | Architect  | Ollama `kimi-k3:cloud` | Override with `ARCHITECT_PROVIDER` / `ARCHITECT_MODEL` |
 | Planner    | Ollama `qwen3.5:397b-cloud` | Override with `PLANNER_PROVIDER` / `PLANNER_MODEL` |
-| Researcher | Ollama `gemma4:cloud` | Override with `RESEARCHER_PROVIDER` / `RESEARCHER_MODEL` |
+| Researcher | Ollama `nemotron-3-ultra:cloud` | Override with `RESEARCHER_PROVIDER` / `RESEARCHER_MODEL` |
 | Builder    | Ollama `kimi-k3:cloud` | Override with `BUILDER_PROVIDER` / `BUILDER_MODEL` |
 | OpenAI fallback | `gpt-4o-mini` | Set `OPENAI_API_KEY` and `OPENAI_MODEL` to use |
 | Embeddings | `all-MiniLM-L6-v2` | Runs on-device for GraphRAG; no API key required |

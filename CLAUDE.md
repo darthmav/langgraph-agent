@@ -82,7 +82,7 @@ python example_usage.py
   |---|---|---|
   | Architect | ollama | `kimi-k3:cloud` |
   | Planner | ollama | `qwen3.5:397b-cloud` |
-  | Researcher | ollama | `gemma4:cloud` |
+  | Researcher | ollama | `nemotron-3-ultra:cloud` |
   | Builder | ollama | `kimi-k3:cloud` |
 
   Anthropic and OpenAI remain optional cloud providers; no seat uses either by
@@ -218,6 +218,19 @@ deliver the reply.
   the report says how many were skipped and that a package module only proves
   itself through a root-level script that imports it. Those scripts are
   ordinary files and still get executed.
+- **A silent Researcher is not research.** `_parse_researcher_output` defaults
+  the status to `ready_for_builder`, so a seat that answered with nothing was
+  announced as "Research complete" while `research` reached the Builder empty.
+  The cost was not one bad cycle but a loop: the Builder reports an empty
+  store, the gate rules `need_research`, and the run goes back round to the
+  same silent seat, burning a step per cycle to the ceiling. `_said_nothing`
+  catches both shapes — an empty response, and one that filled in the headings
+  and left every section blank — and `_as_text` flattens content blocks first,
+  because a list reads as truthy and non-empty to `len()` and to the section
+  regexes alike. It routes to the **Builder**, not back to the Planner: the
+  plan is not what failed, and re-planning would aim the run at the same seat
+  again. The feed message names the seat's model, since changing it is the
+  only thing that actually fixes this.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step

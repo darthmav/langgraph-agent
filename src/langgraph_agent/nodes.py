@@ -693,6 +693,67 @@ def planner_node(state: AgentState) -> AgentState:
     return state
 
 
+def _as_text(content: Any) -> str:
+    """Flatten a message's content to text.
+
+    Providers differ: some return a plain string, some a list of content
+    blocks. `len()` and the section regexes both read a list as truthy
+    non-empty, so an answer that carried no text at all still looked like
+    findings.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        ]
+        return "\n".join(p for p in parts if p)
+    return "" if content is None else str(content)
+
+
+def _said_nothing(content: str, parsed: dict[str, Any]) -> bool:
+    """True when the Researcher's answer carries no findings.
+
+    Two shapes count as nothing: an empty (or whitespace) response, and one
+    that filled in the headings and the status line but left every section
+    blank. Both reach the Builder as an empty `research`.
+    """
+    if not content.strip():
+        return True
+    return not any(
+        parsed.get(section, "").strip()
+        for section in ("key_findings", "relevant_context", "recommendations")
+    )
+
+
+# Internal marker, never a `research_status` in state: `researcher_node` maps
+# it to `no_relevant_knowledge` and emits its own message. It exists for the
+# same reason the deadline's does -- a seat that answered with nothing and a
+# corpus with nothing to say both reach the Builder empty-handed, and the feed
+# is where an operator finds out which one happened.
+_SEAT_EMPTY = "seat_empty"
+
+
+# What the Researcher hands the Builder when its seat answered with nothing.
+# Worded apart from the timeout and from a genuinely empty corpus: all three
+# arrive with no findings, and only this one means the seat is not working.
+# Saying so in the text is what stops the Builder's report from implying the
+# corpus was searched and found wanting.
+_RESEARCH_EMPTY = (
+    "## Key Findings\nNone -- the Researcher's seat returned no findings.\n\n"
+    "## Relevant Context\nThe model answered with nothing usable, so no "
+    "retrieval was summarized. This says nothing about the knowledge base: "
+    "the corpus may hold relevant material that was never reported. Check "
+    "the seat's model on the console before reading this as an empty "
+    "corpus.\n\n"
+    "## Recommendations for Builder\nWork from the plan alone, and say in the "
+    "report that it was built without research because the Researcher seat "
+    "returned nothing.\n\n"
+    "## Status\nno_relevant_knowledge"
+)
+
+
 def _gather_research(state: AgentState) -> tuple[str, str]:
     """Retrieve for the Researcher and return `(findings, status)`.
 
@@ -783,11 +844,23 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
 
         llm = get_agent_llm("researcher")
         response = llm.invoke(messages)
-        research_findings = response.content
+        research_findings = _as_text(response.content)
 
         # Parse status from LLM response
-        parsed = _parse_researcher_output(response.content)
+        parsed = _parse_researcher_output(research_findings)
         research_status = parsed.get("status", "ready_for_builder")
+
+        # A seat that answered with nothing has not done research, whatever the
+        # parsed status says -- and the status defaults to `ready_for_builder`,
+        # so silence was being announced as success. That is the same rule the
+        # Builder is held to: the seat's account of its own work is not
+        # evidence. The cost of missing it is not one bad cycle but a loop --
+        # empty `research` reaches the Builder, whose report says the store is
+        # empty, so the gate rules `need_research` and sends it back to the
+        # same silent seat, burning a step at the ceiling every time.
+        if _said_nothing(research_findings, parsed):
+            research_findings = _RESEARCH_EMPTY
+            research_status = _SEAT_EMPTY
 
     return research_findings, research_status
 
@@ -841,8 +914,9 @@ def researcher_node(state: AgentState) -> AgentState:
     )
 
     deadline_hit = research_status == "timed_out"
-    if deadline_hit:
-        research_status = "no_relevant_knowledge"
+    seat_empty = research_status == _SEAT_EMPTY
+    if deadline_hit or seat_empty:
+        research_status = ResearchStatus.NO_RELEVANT_KNOWLEDGE.value
 
     # Update state
     state["research"] = research_findings
@@ -857,6 +931,16 @@ def researcher_node(state: AgentState) -> AgentState:
         state["messages"].append(
             f"[Researcher] No response within {int(NODE_DEADLINE_SECONDS)}s; "
             "routing to Builder without research"
+        )
+    elif seat_empty:
+        # Routed to the Builder, not back to the Planner: the plan is not what
+        # failed, and re-planning would send the run at the same silent seat
+        # again. Named in the feed so the operator can change the seat's model,
+        # which is the only thing that actually fixes it.
+        state["next_agent"] = "Builder"
+        state["messages"].append(
+            "[Researcher] Seat returned no findings; routing to Builder "
+            "without research (check the Researcher's model)"
         )
     elif research_status == "need_replan":
         state["next_agent"] = "Planner"
