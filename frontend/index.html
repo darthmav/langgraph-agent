@@ -623,14 +623,39 @@ async function run(){
   $("#director").innerHTML += `<div class="msg user">${esc(goal)}</div>`;
   $("#eng-prompt").value = "";
 
-  // There is no per-node event stream, so the feed says what is actually
-  // known — the loop is running — instead of animating a guessed path.
+  // A run is many cloud calls long and the POST does not return until the last
+  // one lands, so the feed polls the server for the nodes that have finished so
+  // far. Showing only an elapsed counter made a working run and a wedged one
+  // look identical, which is the whole reason a slow run reads as a hang.
   const started = Date.now();
-  $("#feed").innerHTML = stageCard("architect", "Loop running…", `<span class="badge run">RUN</span>`);
-  const timer = setInterval(() => {
-    const s = ((Date.now()-started)/1000).toFixed(0);
-    $("#feed").innerHTML = stageCard("architect", `Loop running… ${s}s`, `<span class="badge run">RUN</span>`);
-  }, 500);
+  let done = [], node = "", budget = 0, polling = false;
+
+  const paint = () => {
+    const secs = ((Date.now() - started) / 1000).toFixed(0);
+    // The budget is shown alongside the clock so a long run reads as one that
+    // still has time left, rather than as one that may never stop.
+    const clock = budget ? `${secs}s / ${Math.round(budget)}s` : `${secs}s`;
+    $("#feed").innerHTML =
+      stagesFrom(done).map(s =>
+        stageCard(s.role || "graph", s.text, `<span class="badge ok">DONE</span>`)).join("")
+      + stageCard(node || "architect", `${node || "Loop"} running… ${clock}`,
+                  `<span class="badge run">RUN</span>`);
+    $("#feed").scrollTop = $("#feed").scrollHeight;
+  };
+  paint();
+
+  const timer = setInterval(async () => {
+    paint();
+    if(polling) return;              // never stack polls behind a slow one
+    polling = true;
+    try{
+      const p = await rpc("run_progress", {}, true);
+      if(p && p.running){
+        done = p.messages || []; node = p.node || ""; budget = p.budget || 0;
+      }
+    }catch(e){ /* the run itself reports failure; a missed poll is not news */ }
+    finally{ polling = false; }
+  }, 1000);
 
   try{
     const r = await rpc("run_goal", {goal});
@@ -654,15 +679,19 @@ async function run(){
   }
 }
 
-function renderRun(r){
-  $("#state-dump").textContent = JSON.stringify(r, null, 2);
-
-  // Each node logs "[Role] ..." into messages; that log is the run's actual
-  // path, so the feed is built from it rather than from a fixed sequence.
-  const stages = (r.messages || []).map(m => {
+// Each node logs "[Role] ..." into messages; that log is the run's actual
+// path, so the feed is built from it rather than from a fixed sequence.
+function stagesFrom(messages){
+  return (messages || []).map(m => {
     const hit = /^\[(\w+)\]\s*(.*)$/.exec(m);
     return hit ? {role: hit[1].toLowerCase(), text: hit[2]} : {role:"", text:m};
   });
+}
+
+function renderRun(r){
+  $("#state-dump").textContent = JSON.stringify(r, null, 2);
+
+  const stages = stagesFrom(r.messages);
   $("#feed").innerHTML = stages.map(s =>
     stageCard(s.role || "graph", s.text, `<span class="badge ok">DONE</span>`)).join("");
 

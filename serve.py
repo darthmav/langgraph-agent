@@ -176,6 +176,35 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# What the in-flight run has done so far. A run is many cloud calls long, and
+# the POST that started it does not return until all of them are done, so
+# without this the console can only show elapsed seconds -- a working run and a
+# wedged one look exactly alike from the browser.
+_run_progress: dict[str, Any] = {"running": False, "goal": "", "messages": [], "node": ""}
+_run_lock = threading.Lock()
+
+# Wall-clock budget for one run. MAX_STEPS bounds how many times the Architect
+# may send work back, which is the right logical bound but says nothing about
+# how long that takes: giving the Builder a tool loop raised the cost of a
+# single step from about four cloud calls to as many as eleven, and a step is
+# only as fast as the slowest model in it. A run that never converges was
+# reaching tens of minutes with nothing to show. This bounds the symptom
+# directly and does not have to be re-guessed when a seat or a model changes.
+RUN_BUDGET_SECONDS = float(os.getenv("RUN_BUDGET_SECONDS", "300"))
+
+
+def rpc_run_progress(_: dict[str, Any]) -> dict[str, Any]:
+    """A snapshot of the run currently in flight, for the console to poll."""
+    with _run_lock:
+        return {
+            "running": bool(_run_progress["running"]),
+            "goal": str(_run_progress["goal"]),
+            "node": str(_run_progress["node"]),
+            "messages": list(_run_progress["messages"]),
+            "budget": RUN_BUDGET_SECONDS,
+        }
+
+
 def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     """Run a goal through the four-agent loop and return the final state."""
     state: AgentState = {
@@ -197,11 +226,32 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     # that ran for minutes and produced real work reported nothing at all --
     # from the console it was indistinguishable from a request never sent.
     last = state
+    started = time.monotonic()
+    over_budget = False
+    with _run_lock:
+        _run_progress.update(
+            running=True, goal=state["goal"], messages=[], node=""
+        )
+
     try:
         for event in graph.stream(state, {"recursion_limit": RECURSION_LIMIT}):
-            for node_state in event.values():
-                if isinstance(node_state, dict):
-                    last = node_state  # type: ignore[assignment]
+            for node, node_state in event.items():
+                if not isinstance(node_state, dict):
+                    continue
+                last = node_state  # type: ignore[assignment]
+                messages = list(node_state.get("messages", []))
+                with _run_lock:
+                    _run_progress["node"] = node
+                    _run_progress["messages"] = messages
+                # Also on the server's own terminal: a run that is working and
+                # a run that is wedged are otherwise indistinguishable there too.
+                print(f"[run] {node} -> {messages[-1] if messages else '...'}")
+
+            # Checked between supersteps, so the run stops at a node boundary
+            # with its state intact rather than mid-call.
+            if time.monotonic() - started > RUN_BUDGET_SECONDS:
+                over_budget = True
+                break
     except GraphRecursionError:
         last["messages"] = [
             *last.get("messages", []),
@@ -209,6 +259,18 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             "verdict. The work below is what the run produced before it "
             "was cut off.",
         ]
+
+    if over_budget:
+        elapsed = int(time.monotonic() - started)
+        last["messages"] = [
+            *last.get("messages", []),
+            f"[Graph] Stopped after {elapsed}s, over the {int(RUN_BUDGET_SECONDS)}s "
+            "budget, without an approved verdict. The work above is what the run "
+            "produced. Raise RUN_BUDGET_SECONDS to give it longer.",
+        ]
+
+    with _run_lock:
+        _run_progress["running"] = False
 
     return dict(last)
 
@@ -224,10 +286,11 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "llm_options": rpc_llm_options,
     "status": rpc_status,
     "run_goal": rpc_run_goal,
+    "run_progress": rpc_run_progress,
 }
 
 # Methods the console polls on a timer. Logging these buries everything else.
-QUIET_METHODS = {"status", "rag_stats", "list_seats"}
+QUIET_METHODS = {"status", "rag_stats", "list_seats", "run_progress"}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -328,6 +391,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # launch_console.sh redirects this process to a log file and tails it, and
+    # a redirected stdout is block-buffered -- so the progress and timing lines
+    # sat in an 8KB buffer instead of appearing as they happened, which is the
+    # opposite of what they are for. A TTY would have line-buffered them, which
+    # is why this only shows up under the launcher.
+    # (typed as TextIO, which does not declare reconfigure; it is a
+    # TextIOWrapper at runtime whenever stdout is a real stream.)
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+
     port = int(os.getenv("PORT", "8080"))
     print(f"Serving at http://localhost:{port}")
     print("Press Ctrl+C to stop")
