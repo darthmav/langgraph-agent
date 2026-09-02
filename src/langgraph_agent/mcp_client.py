@@ -228,6 +228,11 @@ class MCPClient:
         """Run a shell command in the project workspace.
 
         Safety: rejects shell metacharacters and only allows simple commands.
+
+        `env` overlays the current environment for this one command; a key
+        mapped to None is removed rather than set. It is not offered to the
+        Builder in BUILDER_TOOLS -- only callers inside the process set it,
+        which today means the verification pass asking for a headless run.
         """
         command = args.get("command", "")
         # Allow only simple commands: alphanumerics, dashes, underscores, dots,
@@ -246,12 +251,31 @@ class MCPClient:
                 capture_output=True,
                 text=True,
                 timeout=args.get("timeout", 30),
+                env=_child_env(args.get("env")),
+                # No human is at the keyboard behind a Builder tool call, so a
+                # command that reads stdin must get EOF and fail, never block
+                # until its timeout and report as a hang.
+                stdin=subprocess.DEVNULL,
             )
             return {
                 "success": result.returncode == 0,
                 "returncode": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "command": command,
+            }
+        except subprocess.TimeoutExpired as e:
+            # Keep what the command managed to print. `str(e)` alone says only
+            # that it timed out, and a caller with no output to look at cannot
+            # tell a command that hung immediately from one that did all its
+            # work and then blocked at the end -- so it guesses, and pays the
+            # full timeout again on a retry that was never going to differ.
+            return {
+                "success": False,
+                "error": str(e),
+                "timed_out": True,
+                "stdout": _as_captured_text(e.stdout),
+                "stderr": _as_captured_text(e.stderr),
                 "command": command,
             }
         except Exception as e:
@@ -266,6 +290,9 @@ class MCPClient:
                 capture_output=True,
                 text=True,
                 timeout=args.get("timeout", 600),
+                # Same reason as _terminal_execute: a suite that stops to ask
+                # something would otherwise hang until its timeout.
+                stdin=subprocess.DEVNULL,
             )
             return {
                 "success": result.returncode == 0,
@@ -273,8 +300,46 @@ class MCPClient:
                 "stdout": result.stdout,
                 "stderr": result.stderr,
             }
+        except subprocess.TimeoutExpired as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "timed_out": True,
+                "stdout": _as_captured_text(e.stdout),
+                "stderr": _as_captured_text(e.stderr),
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+def _as_captured_text(captured: str | bytes | None) -> str:
+    """Normalise output hung off a TimeoutExpired to text.
+
+    `capture_output=True` with `text=True` gives str, but the attribute is
+    typed to allow bytes and is None when nothing was read before the kill.
+    """
+    if captured is None:
+        return ""
+    if isinstance(captured, bytes):
+        return captured.decode("utf-8", "replace")
+    return captured
+
+
+def _child_env(overrides: dict[str, str | None] | None) -> dict[str, str] | None:
+    """Build a child environment from os.environ plus `overrides`.
+
+    A key mapped to None is removed. Returns None when there is nothing to
+    override, so the child simply inherits ours.
+    """
+    if not overrides:
+        return None
+    env = dict(os.environ)
+    for key, value in overrides.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
 
 
 @asynccontextmanager

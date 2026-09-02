@@ -238,6 +238,27 @@ deliver the reply.
   the report says how many were skipped and that a package module only proves
   itself through a root-level script that imports it. Those scripts are
   ordinary files and still get executed.
+- **Verification runs headless, and never with a keyboard.** The subprocess
+  gets `MPLBACKEND=Agg` with `DISPLAY`/`WAYLAND_DISPLAY` removed
+  (`HEADLESS_VERIFY_ENV`), and `stdin` closed. Both are about the same
+  failure: a file that waits for a human burns its whole
+  `VERIFY_TIMEOUT_SECONDS` and is reported `FAILED` for it. A plotting
+  example ending in `plt.show()` — the ordinary way to write one — is
+  correct code that hung forever, and the first one to do it ate most of the
+  Builder's budget, so the rest of the pass came back `NOT RUN` and blocked
+  approval. The display variables are unset as well as `MPLBACKEND` set,
+  because a library that probes for a display itself never consults
+  `MPLBACKEND`. `stdin=DEVNULL` is in `_terminal_execute` and `_run_tests`
+  rather than the verify path alone: no Builder tool call ever has someone at
+  the keyboard behind it.
+- **A timeout must carry what the file printed.** `_terminal_execute` returns
+  `TimeoutExpired`'s captured `stdout`/`stderr` and sets `timed_out`;
+  `_timeout_detail` appends the *tail* to the report. The message alone cannot
+  distinguish a file that blocked on its first line from one that did all its
+  work and then waited at the end, and the Builder does not leave that blank —
+  it read a bare timeout as a missing dependency, installed a package that was
+  already there, and spent a second full timeout on an identical retry. The
+  tail is what says how far it got, so truncation trims the front.
 - **A silent Researcher is not research.** `_parse_researcher_output` defaults
   the status to `ready_for_builder`, so a seat that answered with nothing was
   announced as "Research complete" while `research` reached the Builder empty.

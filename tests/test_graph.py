@@ -1205,6 +1205,103 @@ def test_a_sliver_of_time_left_does_not_fail_a_working_file(tmp_path):
     assert statuses == ["unverified"]
 
 
+def test_verification_runs_headless(tmp_path, monkeypatch):
+    """A script that opens a window must not wait for a human to close it.
+
+    Every generated plotting example ends in `plt.show()`. Run with a display
+    inherited from the operator's session it blocks forever, so a correct file
+    burned a full VERIFY_TIMEOUT_SECONDS and came back FAILED -- and the first
+    one to do it ate most of the Builder's budget, leaving the rest of the
+    pass unverified.
+    """
+    from langgraph_agent import nodes
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os\n"
+        "assert os.environ.get('MPLBACKEND') == 'Agg'\n"
+        "assert 'DISPLAY' not in os.environ\n"
+        "assert 'WAYLAND_DISPLAY' not in os.environ\n"
+    )
+
+    results = nodes._verify_written_files([str(probe)], [])
+
+    assert [status for _, status, _ in results] == ["ok"]
+
+
+def test_a_file_reading_stdin_fails_instead_of_hanging(tmp_path):
+    """No human is at the keyboard, so a read must get EOF, not the timeout."""
+    from langgraph_agent import nodes
+
+    asks = tmp_path / "asks.py"
+    asks.write_text("input('name? ')\n")
+
+    results = nodes._verify_written_files([str(asks)], [], nodes._Deadline(30))
+
+    (_, status, detail) = results[0]
+    assert status == "failed"
+    assert "EOFError" in detail        # it failed on its own, not on the clock
+
+
+def test_a_timeout_reports_what_the_file_printed(tmp_path):
+    """A bare timeout says a file hung but not where.
+
+    The Builder read one as a missing dependency, installed a package that was
+    already present, and spent a second full timeout on an identical retry.
+    The tail of the output is what distinguishes a file that blocked on line
+    one from a file that did all its work and then waited at the end.
+    """
+    from langgraph_agent import nodes
+
+    stalls = tmp_path / "stalls.py"
+    stalls.write_text(
+        "import sys, time\n"
+        "print('the real work happened')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(300)\n"
+    )
+
+    results = nodes._verify_written_files([str(stalls)], [], nodes._Deadline(4))
+
+    (_, status, detail) = results[0]
+    assert status == "failed"
+    assert "timed out" in detail
+    assert "the real work happened" in detail
+
+
+def test_a_timeout_with_no_output_reports_just_the_timeout(tmp_path):
+    """Nothing printed means nothing to add -- and no empty heading."""
+    from langgraph_agent import nodes
+
+    silent = tmp_path / "silent.py"
+    silent.write_text("import time\ntime.sleep(300)\n")
+
+    results = nodes._verify_written_files([str(silent)], [], nodes._Deadline(4))
+
+    (_, status, detail) = results[0]
+    assert status == "failed"
+    assert "timed out" in detail
+    assert nodes._TIMEOUT_OUTPUT_HEADING.strip() not in detail
+
+
+def test_a_timeout_detail_stays_within_the_report_budget():
+    """The tail is trimmed to fit, not allowed to bury the rest of the report."""
+    from langgraph_agent import nodes
+
+    detail = nodes._timeout_detail({
+        "error": "Command 'python big.py' timed out after 60 seconds",
+        "stdout": "x" * 10_000,
+        "timed_out": True,
+    })
+
+    assert len(detail) <= nodes.MAX_VERIFY_DETAIL_CHARS
+    assert "timed out after 60 seconds" in detail
+    assert detail.endswith("x")
+
+
 def _builder_with_unverified_file(monkeypatch, tmp_path, **state_overrides):
     """Run builder_node with the verification pass reporting one unrun file.
 

@@ -1172,9 +1172,24 @@ def _run_builder_tools(
 # produces -- markdown, config, data -- has nothing to run.
 RUNNABLE_SUFFIXES = (".py",)
 
+# Verification runs a file to prove it does not raise, with nobody watching.
+# Anything that opens a window waits for a human to close it, so a correct
+# script ending in `plt.show()` -- the ordinary way to write a plotting
+# example -- burned a full VERIFY_TIMEOUT_SECONDS and came back FAILED. The
+# display variables are removed as well as MPLBACKEND being set, because a
+# library that checks for a display itself never consults MPLBACKEND.
+HEADLESS_VERIFY_ENV: dict[str, str | None] = {
+    "MPLBACKEND": "Agg",
+    "DISPLAY": None,
+    "WAYLAND_DISPLAY": None,
+}
+
 # Per-file ceiling for the verification pass. A written script that hangs is a
 # failed verification, not a reason to stall the whole run.
 VERIFY_TIMEOUT_SECONDS = 60
+
+# Introduces what a hung file printed before it was killed.
+_TIMEOUT_OUTPUT_HEADING = "\nOutput before it was killed (tail):\n"
 
 # Verification output kept in the report. Enough for the next cycle to see the
 # traceback that matters, not so much that it buries the plan.
@@ -1258,6 +1273,32 @@ def _is_package_module(path: str) -> bool:
     return (parent / "__init__.py").exists()
 
 
+def _timeout_detail(result: dict[str, Any]) -> str:
+    """Describe a timed-out verification with the output it produced.
+
+    The timeout message alone says a file hung but not where, which is the
+    difference between a script that blocked on its first line and one that
+    did all its work and then waited at `plt.show()`. Without it the Builder
+    guesses -- it read a bare timeout as a missing dependency once, installed
+    a package that was already there, and spent a second full timeout on an
+    identical retry. The tail is kept rather than the head: what a hung
+    process printed last is how far it got.
+    """
+    message = str(result.get("error") or "timed out").strip()
+    printed = str(result.get("stdout") or "").strip() or str(result.get("stderr") or "").strip()
+    if not printed:
+        return message[:MAX_VERIFY_DETAIL_CHARS]
+
+    room = MAX_VERIFY_DETAIL_CHARS - len(message) - len(_TIMEOUT_OUTPUT_HEADING)
+    if room <= 0:
+        return message[:MAX_VERIFY_DETAIL_CHARS]
+
+    tail = printed[-room:]
+    if len(tail) < len(printed):
+        tail = "..." + tail[3:]
+    return f"{message}{_TIMEOUT_OUTPUT_HEADING}{tail}"
+
+
 def _verify_written_files(
     files_changed: list[str],
     tool_log: list[str],
@@ -1325,6 +1366,7 @@ def _verify_written_files(
                         if deadline is None
                         else max(1, int(min(VERIFY_TIMEOUT_SECONDS, deadline.remaining())))
                     ),
+                    "env": HEADLESS_VERIFY_ENV,
                 },
             )
         except Exception as exc:
@@ -1339,6 +1381,8 @@ def _verify_written_files(
             detail = str(
                 result.get("stderr") or result.get("error") or result.get("stdout") or ""
             ).strip()[:MAX_VERIFY_DETAIL_CHARS]
+            if result.get("timed_out"):
+                detail = _timeout_detail(result)
 
         results.append((path, "ok" if ok else "failed", detail))
         tool_log.append(f"verify({path}) -> {'ok' if ok else 'failed'}")
