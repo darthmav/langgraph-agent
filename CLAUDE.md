@@ -50,7 +50,10 @@ python example_usage.py
 │   ├── graph.py               # StateGraph wiring + conditional edges
 │   ├── control.py             # RUN_CONTROL: the emergency stop signal
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
-│   └── mcp_client.py          # MCP client / local tool bindings
+│   ├── mcp_client.py          # MCP client / local tool bindings
+│   ├── exceptions.py          # Public error surface (re-exports _internal/)
+│   └── _internal/
+│       └── exceptions.py      # LangGraphAgentError and its five subclasses
 ├── prompts/
 │   ├── architect.txt          # System prompt (loaded by nodes.py)
 │   ├── planner.txt
@@ -58,7 +61,12 @@ python example_usage.py
 │   └── builder.txt
 ├── tests/
 │   ├── test_graph.py          # Pytest suite
-│   └── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
+│   ├── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
+│   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
+│   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
+│   ├── test_mcp_tools.py      # Builder tool belt
+│   ├── test_imports.py        # Pins the package's public surface
+│   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── reindex.py             # Re-index files into GraphRAG
 │   ├── index_knowledge.py     # First-time indexing

@@ -13,7 +13,6 @@ Or directly: python tests/test_imports.py
 """
 
 import sys
-from typing import Any
 
 
 def test_package_imports():
@@ -30,7 +29,9 @@ def test_public_api_exports():
     """Test that only public interfaces are exported."""
     import langgraph_agent
 
-    # Check that __all__ contains only expected public symbols
+    # The exported surface is pinned, not sampled: a symbol added to or dropped
+    # from __all__ is a change to the package's public API and has to be made
+    # here as well.
     expected_public = {
         "create_agent_graph",
         "AgentState",
@@ -40,8 +41,11 @@ def test_public_api_exports():
         "get_agent_graph",
     }
 
-    # Get all exported symbols
     all_symbols = set(langgraph_agent.__all__)
+    assert all_symbols == expected_public, (
+        f"__all__ drifted: added {sorted(all_symbols - expected_public)}, "
+        f"removed {sorted(expected_public - all_symbols)}"
+    )
 
     # Verify no internal modules are exported
     for symbol in all_symbols:
@@ -132,8 +136,14 @@ def test_no_internal_imports_in_public_api():
     """Verify that _internal modules are not directly accessible from public API."""
     import langgraph_agent
 
-    # Check that _internal is not in the module's public namespace
-    assert not hasattr(langgraph_agent, "_internal") or "_internal" not in langgraph_agent.__all__
+    # hasattr is not the test: importing langgraph_agent.exceptions binds
+    # _internal as an attribute of the parent package, so whether it is there
+    # depends on what ran first. What __all__ says does not.
+    assert "_internal" not in langgraph_agent.__all__
+    for symbol in langgraph_agent.__all__:
+        obj = getattr(langgraph_agent, symbol)
+        module = getattr(obj, "__module__", "")
+        assert "_internal" not in module, f"'{symbol}' is exported straight out of {module}"
 
     print("✓ _internal module is not exposed in public API")
 

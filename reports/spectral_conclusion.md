@@ -4,6 +4,13 @@
 
 This document synthesizes spectral graph theory research findings with the current implementation status of the `spectral_graph` Python package. The package provides core spectral graph theory algorithms using NumPy/SciPy, with NetworkX for graph construction and validation.
 
+> **Provenance.** Written by an agent run, and its status claims were audited
+> afterwards. The audit (commit `50d112a`) found two silent defects the run had
+> declared absent: a directed graph was accepted and answered with the
+> connectivity of a matrix nobody passed, and a self-loop broke `L @ 1 == 0`.
+> Both are fixed. The claims corrected in place below are marked; the rest of
+> the synthesis is as written.
+
 ---
 
 ## 1. Core Spectral Concepts from Research
@@ -184,15 +191,21 @@ Exports all public API:
 - Numerical stability utilities
 
 ✅ **All modules pass validation:**
-- Each file runs standalone with `python spectral_graph/<file>.py`
-- Test suite (test_spectral_graph.py) passes 56 tests
+- Each file runs standalone with `PYTHONPATH=. python spectral_graph/<file>.py`.
+  The `PYTHONPATH` is not optional: five of the seven modules import their own
+  package absolutely, and `python spectral_graph/<file>.py` puts
+  `spectral_graph/` on `sys.path` rather than the project root, so they raise
+  `ModuleNotFoundError` however correct they are. This is the same reason the
+  Builder reports a package module `SKIPPED` instead of running it.
+- Test suite (`tests/test_spectral_graph.py`) passes 80 tests — 56 when this
+  document was written, plus the 24 the directed-graph and self-loop audit added.
 - Results verified against NetworkX and theoretical values
 
 ### 3.2 What Is Missing or Could Be Extended
 
 | Area | Status | Recommendation |
 |------|--------|----------------|
-| **Directed graphs** | Not supported | Extend Laplacian functions to handle directed graphs (use symmetrization or directed Laplacian variants) |
+| **Directed graphs** | Refused, not silently mishandled | `_require_undirected` raises at every public entry point. Extending to directed Laplacian variants remains open; converting with `to_undirected()` on the caller's behalf is deliberately not done, since it asserts a reversed edge means the same thing |
 | **Hypergraphs** | Not supported | Implement hypergraph Laplacian for higher-order relationships |
 | **Dynamic graphs** | Not supported | Add incremental eigenvalue updates for evolving graphs |
 | **GPU acceleration** | Not implemented | Optional CuPy backend for large-scale graphs |
@@ -224,4 +237,4 @@ The `spectral_graph` package successfully implements all core spectral graph the
 - ✅ Cheeger inequality and sweep cut
 - ✅ Numerical stability utilities
 
-**Verdict**: The implementation is **complete** for the scope defined in the research phase. The package is ready for use in applications requiring spectral graph analysis. Optional extensions (directed graphs, visualization, GPU support) can be added based on specific user requirements.
+**Verdict**: The implementation is **complete** for the scope defined in the research phase, and the inputs outside that scope now raise instead of answering. The completeness claim above was made once before it was true: the same run that wrote it reported no broken code, and an audit against the inputs this project actually hands the package — its own knowledge graph is a `DiGraph` — found two wrong answers that neither raised nor looked implausible. Optional extensions (directed Laplacian variants, visualization, GPU support) can be added based on specific user requirements.

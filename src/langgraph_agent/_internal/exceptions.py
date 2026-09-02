@@ -5,8 +5,6 @@ error handling than generic built-in exceptions. All exceptions inherit
 from a common base class for easy catching and identification.
 """
 
-from typing import Optional
-
 
 class LangGraphAgentError(Exception):
     """Base exception class for all LangGraph Agent errors.
@@ -20,7 +18,7 @@ class LangGraphAgentError(Exception):
         details: Optional additional details about the error.
     """
 
-    def __init__(self, message: str, details: Optional[str] = None) -> None:
+    def __init__(self, message: str, details: str | None = None) -> None:
         """Initialize the LangGraphAgentError.
 
         Args:
