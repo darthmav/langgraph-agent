@@ -820,6 +820,30 @@ VERIFY_TIMEOUT_SECONDS = 60
 MAX_VERIFY_DETAIL_CHARS = 800
 
 
+# A Builder often answers the Blockers section with "none" and then keeps
+# writing -- "none - Note: this file raises by design". Only the leading token
+# is the answer; the rest is commentary, and keeping the whole string made
+# state claim something was blocked while literally saying "none".
+#
+# Matched only where the token stands as a complete clause: followed by the end
+# of the string or a separator. "none of the tests pass" continues into a real
+# sentence and stays a blocker -- swallowing that would be the silent success
+# this module spends its time preventing. The match is deliberately narrow, so
+# an unrecognised phrasing ("none needed") is kept as a blocker rather than
+# dropped: a spurious blocker costs a cycle, a dropped one costs the guarantee.
+_NO_BLOCKER = re.compile(
+    r"^\s*(?:none|n/?a|nothing|no\s+blockers?)\s*(?:$|[-\u2014\u2013:;.,])",
+    re.IGNORECASE,
+)
+
+
+def _clean_blockers(text: str) -> str:
+    """The Blockers section as an actual blocker, or empty when it says none."""
+    if not text or _NO_BLOCKER.match(text):
+        return ""
+    return text.strip()
+
+
 def _verify_written_files(
     files_changed: list[str], tool_log: list[str]
 ) -> list[tuple[str, bool, str]]:
@@ -884,7 +908,6 @@ def builder_node(state: AgentState) -> AgentState:
 
     files_changed: list[str] = []
     tool_log: list[str] = []
-    blockers = ""
     exhausted = False
 
     messages: list[Any] = [
@@ -956,9 +979,7 @@ def builder_node(state: AgentState) -> AgentState:
             + ", ".join(claimed)
         )
 
-    parsed_blockers = parsed.get("next_steps_blockers", "")
-    if parsed_blockers and parsed_blockers.strip().lower() not in {"none", "n/a", ""}:
-        blockers = parsed_blockers
+    blockers = _clean_blockers(parsed.get("next_steps_blockers", ""))
 
     # A failed verification outranks whatever the model concluded: it wrote a
     # file that does not run, and the Architect must see that as unfinished --

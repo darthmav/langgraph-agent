@@ -670,3 +670,45 @@ def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
 def test_expect_failures_defaults_off():
     """The strict behaviour is what you get without asking for otherwise."""
     assert initial_state("anything")["expect_failures"] is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "none",
+        "None.",
+        "n/a",
+        "N/A - all good",
+        "no blockers",
+        "No blockers.",
+        "nothing",
+        "none - see the report",
+        "none — Note: this file intentionally raises AssertionError by design",
+        "",
+    ],
+)
+def test_a_blockers_section_saying_none_is_not_a_blocker(text):
+    """"none" followed by commentary still means there are no blockers."""
+    from langgraph_agent.nodes import _clean_blockers
+
+    assert _clean_blockers(text) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "none of the tests pass",
+        "nothing works after the refactor",
+        "Missing API key for the provider",
+        "no blockers were resolved; the import still fails",
+    ],
+)
+def test_a_real_blocker_starting_with_none_survives(text):
+    """The match must not swallow a sentence that only begins with the word.
+
+    Dropping "none of the tests pass" would be exactly the silent success the
+    verification pass exists to prevent.
+    """
+    from langgraph_agent.nodes import _clean_blockers
+
+    assert _clean_blockers(text) == text
