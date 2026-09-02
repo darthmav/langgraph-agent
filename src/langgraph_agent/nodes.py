@@ -783,6 +783,62 @@ def _run_builder_tools(
     return "", True
 
 
+# Files the Builder writes that can be executed as a script. Anything else it
+# produces -- markdown, config, data -- has nothing to run.
+RUNNABLE_SUFFIXES = (".py",)
+
+# Per-file ceiling for the verification pass. A written script that hangs is a
+# failed verification, not a reason to stall the whole run.
+VERIFY_TIMEOUT_SECONDS = 60
+
+# Verification output kept in the report. Enough for the next cycle to see the
+# traceback that matters, not so much that it buries the plan.
+MAX_VERIFY_DETAIL_CHARS = 800
+
+
+def _verify_written_files(
+    files_changed: list[str], tool_log: list[str]
+) -> list[tuple[str, bool, str]]:
+    """Execute the runnable files the Builder wrote and report what happened.
+
+    Writing a file is not evidence that it works. The Builder previously
+    reported "Implementation complete" for a module it had never executed, and
+    the Architect approved it -- the file raised an AssertionError the first
+    time anyone ran it. Running it here means a broken file comes back as a
+    blocker the loop can act on, rather than as a success nobody checked.
+
+    Returns one (path, ok, detail) per runnable file.
+    """
+    results: list[tuple[str, bool, str]] = []
+
+    for path in files_changed:
+        if not path.endswith(RUNNABLE_SUFFIXES):
+            continue
+
+        try:
+            result = _call_mcp_tool_sync(
+                "terminal_execute",
+                {"command": f"python {path}", "timeout": VERIFY_TIMEOUT_SECONDS},
+            )
+        except Exception as exc:
+            results.append((path, False, str(exc)))
+            tool_log.append(f"verify({path}) -> failed")
+            continue
+
+        ok = bool(result.get("success")) if isinstance(result, dict) else False
+        detail = ""
+        if isinstance(result, dict) and not ok:
+            # stderr first: a traceback is what the next cycle needs to see.
+            detail = str(
+                result.get("stderr") or result.get("error") or result.get("stdout") or ""
+            ).strip()[:MAX_VERIFY_DETAIL_CHARS]
+
+        results.append((path, ok, detail))
+        tool_log.append(f"verify({path}) -> {'ok' if ok else 'failed'}")
+
+    return results
+
+
 def builder_node(state: AgentState) -> AgentState:
     """Builder: implement the plan by actually calling tools.
 
@@ -830,8 +886,23 @@ def builder_node(state: AgentState) -> AgentState:
             tool_llm, messages, files_changed, tool_log
         )
 
+    # Every runnable file the Builder wrote is executed before it gets to claim
+    # the work is done. This is in code rather than left to the prompt for the
+    # same reason files_changed is: the Builder's own account of its work is
+    # not evidence.
+    verification = _verify_written_files(files_changed, tool_log)
+    failed = [(path, detail) for path, ok, detail in verification if not ok]
+
     parsed = _parse_builder_output(content)
     builder_report = parsed.get("changes_made") or content or "No report produced."
+
+    if verification:
+        builder_report += "\n\nVerification (each runnable file was executed):\n"
+        builder_report += "\n".join(
+            f"- {path}: {'ran clean' if ok else 'FAILED'}"
+            + (f"\n{detail}" if detail else "")
+            for path, ok, detail in verification
+        )
 
     if tool_log:
         builder_report += "\n\nTool calls:\n" + "\n".join(f"- {c}" for c in tool_log)
@@ -853,6 +924,14 @@ def builder_node(state: AgentState) -> AgentState:
     if parsed_blockers and parsed_blockers.strip().lower() not in {"none", "n/a", ""}:
         blockers = parsed_blockers
 
+    # A failed verification outranks whatever the model concluded: it wrote a
+    # file that does not run, and the Architect must see that as unfinished.
+    if failed:
+        blockers = "Wrote files that do not run: " + "; ".join(
+            f"{path} ({detail.splitlines()[-1] if detail else 'no output'})"
+            for path, detail in failed
+        )
+
     if exhausted and not blockers:
         blockers = (
             f"Builder stopped after {MAX_BUILDER_TOOL_TURNS} tool turns without "
@@ -862,9 +941,14 @@ def builder_node(state: AgentState) -> AgentState:
     state["builder_report"] = builder_report
     state["files_changed"] = files_changed
     state["blockers"] = blockers
-    state["messages"].append(
-        f"[Builder] Implementation complete. Files: {len(files_changed)}"
-    )
+    # The feed line has to carry the verification result too. "Implementation
+    # complete" beside a file that does not run is the same false claim this
+    # pass exists to catch, and it is what the Architect reads in state.
+    if failed:
+        summary = f"Wrote {len(files_changed)} file(s); {len(failed)} did not run"
+    else:
+        summary = f"Implementation complete. Files: {len(files_changed)}"
+    state["messages"].append(f"[Builder] {summary}")
 
     # step_count is incremented by the Architect gate, not here: every cycle
     # passes through the gate, but a Planner/Researcher loop never reaches the

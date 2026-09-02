@@ -394,3 +394,92 @@ def test_default_seats_need_no_api_key():
 
     assert set(DEFAULT_SEATS) == set(AGENTS)
     assert all(seat["provider"] == "ollama" for seat in DEFAULT_SEATS.values())
+
+
+class _WritesFileLLM(_ToolCallingLLM):
+    """Writes a caller-supplied file body, then reports success."""
+
+    def __init__(self, path, body):
+        super().__init__(path)
+        self._body = body
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "filesystem_write",
+                    "args": {"path": str(self._path), "content": self._body},
+                    "id": "call_1",
+                }],
+            )
+        return AIMessage(
+            content=(
+                "## Changes Made\nWrote it.\n\n"
+                f"## Files Modified\n- {self._path}\n\n"
+                "## Next Steps / Blockers\nnone\n"
+            )
+        )
+
+
+def test_builder_runs_the_python_it_writes(monkeypatch, tmp_path):
+    """A written module that raises must come back as a blocker, not success.
+
+    This is the failure that shipped: a file written, reported complete, and
+    approved -- which raised an AssertionError the first time it was run.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "broken.py"
+    llm = _WritesFileLLM(target, "assert False, 'boom'\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a module"))
+
+    # The write happened, and is still reported as a change...
+    assert result["files_changed"] == [str(target)]
+    # ...but the run failed, so the Builder does not get to claim completion.
+    assert "do not run" in result["blockers"]
+    assert "boom" in result["blockers"] or "AssertionError" in result["blockers"]
+    assert "FAILED" in result["builder_report"]
+    assert "did not run" in result["messages"][-1]
+    assert "Implementation complete" not in result["messages"][-1]
+
+
+def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
+    """A file that executes cleanly verifies, and sets no blocker."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "fine.py"
+    llm = _WritesFileLLM(target, "print('ok')\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a module"))
+
+    assert result["blockers"] == ""
+    assert "ran clean" in result["builder_report"]
+    assert "Implementation complete" in result["messages"][-1]
+
+
+def test_builder_only_executes_runnable_files(monkeypatch, tmp_path):
+    """Markdown has nothing to run; the verification pass must skip it."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "notes.md"
+    llm = _WritesFileLLM(target, "# just prose\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write notes"))
+
+    assert result["files_changed"] == [str(target)]
+    assert result["blockers"] == ""
+    assert "Verification" not in result["builder_report"]

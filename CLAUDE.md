@@ -172,6 +172,14 @@ check, so it must keep working.
   `MAX_BUILDER_TOOL_TURNS`; `files_changed` is appended only when a write
   tool reports success, never from the model's prose. A seat whose model
   cannot call tools (`StubLLM`) still reports but changes nothing.
+- **The Builder must run what it writes.** Every file it wrote with a
+  `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
+  the tool loop, and a file that raises becomes a blocker plus a `FAILED` line
+  in the report — the feed says "N did not run" rather than "Implementation
+  complete". Enforced in code, not left to the prompt, for the same reason
+  `files_changed` is: the Builder's account of its own work is not evidence.
+  The Architect still rules on the result; a failed verification informs that
+  verdict rather than overriding it.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.
