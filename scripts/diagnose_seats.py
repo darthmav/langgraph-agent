@@ -745,7 +745,7 @@ def instrumented_graph(mods: dict[str, Any], sink: list[NodeVisit]) -> Any:
             setattr(graph_mod, attr, fn)
 
 
-def score_run(res: TeamResult, exercise: Exercise) -> None:
+def score_run(res: TeamResult, exercise: Exercise, budget: float) -> None:
     """A transparent score, so a ranking can be argued with.
 
     Every part is shown in the report. The weights say what this project
@@ -765,7 +765,14 @@ def score_run(res: TeamResult, exercise: Exercise) -> None:
     parts["cycles"] = -6.0 * max(0, res.gate_passes - 1)
     parts["empty_handoffs"] = -8.0 * res.empty_handoffs
     parts["unverified"] = -10.0 if res.failed_verification else 0.0
-    parts["speed"] = round(max(0.0, 20.0 - res.seconds / 15.0), 1)
+    # Scored against the budget the run was actually given, not a fixed
+    # divisor. `20 - seconds/15` reached zero at 300s, which used to be the
+    # entire budget: every run that used its time scored the same nothing, so
+    # the term stopped separating a brisk run from one that only just fit.
+    # Raising the budget would have retired it silently rather than visibly.
+    parts["speed"] = (
+        round(20.0 * max(0.0, 1.0 - res.seconds / budget), 1) if budget > 0 else 0.0
+    )
     res.score_parts = {k: round(v, 1) for k, v in parts.items()}
     res.score = round(sum(parts.values()), 1)
 
@@ -875,7 +882,7 @@ def run_team(
         else:
             res.outcome = "unfinished"
 
-    score_run(res, exercise)
+    score_run(res, exercise, budget)
     return res
 
 
@@ -1151,11 +1158,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="build | research | plan | all")
     p.add_argument("--anthropic", action="store_true",
                    help="Include the paid Anthropic candidates and configs")
-    p.add_argument("--budget", type=float, default=300.0,
-                   help="Wall-clock seconds per team run (default: 300)")
-    p.add_argument("--node-deadline", type=float, default=60.0)
-    p.add_argument("--builder-deadline", type=float, default=150.0)
-    p.add_argument("--tool-turns", type=int, default=5)
+    p.add_argument("--budget", type=float, default=900.0,
+                   help="Wall-clock seconds per team run (default: 900)")
+    p.add_argument("--node-deadline", type=float, default=150.0)
+    p.add_argument("--builder-deadline", type=float, default=240.0)
+    p.add_argument("--tool-turns", type=int, default=8,
+                   help="Builder tool turns, i.e. MAX_BUILDER_TOOL_TURNS "
+                        "(default: 8, the shipped value)")
     p.add_argument("--warm-deadline", type=float, default=120.0,
                    help="Seconds to wait for the corpus to load (default: 120)")
     p.add_argument("--out", default="",
@@ -1207,14 +1216,39 @@ def main(argv: list[str]) -> int:
         return 0
 
     # Deadlines are module constants read from the environment at import time,
-    # so they are set before the project is imported. "Short-lived" is the
-    # whole premise of this script: with the shipped 150s/240s deadlines a
-    # single wedged seat can hold one configuration for four minutes and the
-    # eight-config sweep stops being something you run while watching.
+    # so they are set before the project is imported.
+    #
+    # These started tighter than the shipped 150s/240s, on the theory that a
+    # sweep should be watchable and a wedged seat should not hold it for four
+    # minutes. Measurement beat that theory. At a 60s node deadline the qwen
+    # Planner was cut twice in one sweep while working normally -- it returned
+    # a plan in 8.6s and 27.2s on other passes -- and a cut seat is recorded as
+    # a seat failure. An impatient diagnostic does not report a slow seat as
+    # slow; it reports a working seat as broken, which is the same class of
+    # false verdict as scoring a silent Researcher `ok`.
+    #
+    # So every deadline here now equals the shipped default -- node 150s,
+    # Builder 240s, and the 60s verification reserve that goes with it. That
+    # is the point rather than a coincidence: a seat is being measured for a
+    # console that will run it under those numbers, so measuring it under
+    # tighter ones answers a question nobody asked. The budget is what keeps a
+    # sweep bounded, and it is the knob to turn.
+    #
+    # `--tool-turns` belongs to the same set. Running the Builder at 5 turns
+    # where the console gives it 8 makes it hit the cap and set the "stopped
+    # after N tool turns without finishing" blocker on work it would have
+    # finished, which is a failure the diagnostic invented -- the same shape
+    # as an under-sized verification reserve.
     os.environ["NODE_DEADLINE_SECONDS"] = str(args.node_deadline)
     os.environ["BUILDER_DEADLINE_SECONDS"] = str(args.builder_deadline)
     os.environ.setdefault("LLM_TIMEOUT_SECONDS", str(args.node_deadline))
-    os.environ["VERIFY_RESERVE_SECONDS"] = "25"
+    # Held back from the Builder's tool loop so the verification pass gets to
+    # run at all. It was cut to 25s to match a shortened Builder deadline; now
+    # that the deadline is back to the shipped 240s this goes back with it. A
+    # reserve too small for the pass leaves files `unverified`, and unverified
+    # blocks approval -- so an under-sized reserve invents blockers rather than
+    # merely saving time.
+    os.environ["VERIFY_RESERVE_SECONDS"] = "60"
 
     quiet_logs()
 
