@@ -8,11 +8,11 @@ Implements the 4-Agent System with strict prompts and tool binding:
 """
 
 import asyncio
+import json
 import re
-from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from langgraph_agent.config import get_agent_llm
 from langgraph_agent.mcp_client import mcp_client
@@ -447,7 +447,14 @@ def architect_node(state: AgentState) -> AgentState:
     # The gate is the one point every cycle passes through, so it is where the
     # loop counter belongs. The Builder used to own it, which let a
     # Planner/Researcher loop run without ever counting a step.
-    if reviewing:
+    # Every pass but the opening one closes a cycle, so that is what counts a
+    # step. Keying this off `reviewing` instead undercounted: a Builder that
+    # reports nothing leaves `reviewing` False, the gate reads the cycle as a
+    # fresh opening pass and sends the work round again, and that shape repeats
+    # uncounted until LangGraph hits its recursion limit and kills the run --
+    # discarding every message the run had produced. A missing plan is what
+    # actually marks the entry pass; a missing report does not.
+    if state.get("plan"):
         state["step_count"] = state.get("step_count", 0) + 1
 
     state["messages"].append(f"[Architect] Verdict: {state['verdict']}")
@@ -605,161 +612,259 @@ def researcher_node(state: AgentState) -> AgentState:
     return state
 
 
+# The tools the Builder is allowed to call. GraphRAG is deliberately absent:
+# retrieval belongs to the Researcher, and a Builder that can search the corpus
+# stops working from the plan it was handed.
+BUILDER_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "filesystem_read",
+            "description": (
+                "Read a UTF-8 text file and return its contents. Read a file "
+                "before rewriting it, so the rewrite keeps what is already there."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path, relative to the project root.",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "filesystem_write",
+            "description": (
+                "Write the COMPLETE new contents of a file, creating parent "
+                "directories as needed. This replaces the entire file, so to "
+                "change an existing file call filesystem_read first and send "
+                "the whole modified text back -- never send only the new lines."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write."},
+                    "content": {
+                        "type": "string",
+                        "description": "The entire contents the file should have afterwards.",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Show the working tree status as porcelain output.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show the unstaged diff, optionally limited to one path.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Optional path to diff."}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_execute",
+            "description": (
+                "Run a simple shell command in the project. Shell "
+                "metacharacters are rejected, so pipes and redirection do not work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The command to run."}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": "Run the pytest suite, optionally limited to one path.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Optional test path."}},
+            },
+        },
+    },
+]
+
+BUILDER_TOOL_NAMES = {tool["function"]["name"] for tool in BUILDER_TOOLS}
+
+# How many times the Builder may think-and-call before the node gives up. Each
+# turn is a cloud round trip, and the Architect gate gets another cycle anyway.
+MAX_BUILDER_TOOL_TURNS = 8
+
+# A tool result this long is summarised rather than pasted whole. Large reads
+# are the reason: a whole file in the transcript crowds out the plan.
+MAX_TOOL_RESULT_CHARS = 20000
+
+
+def _run_builder_tools(
+    llm: Any,
+    messages: list[Any],
+    files_changed: list[str],
+    tool_log: list[str],
+) -> tuple[str, bool]:
+    """Let the Builder call tools until it stops asking for them.
+
+    Returns the Builder's closing message and whether it ran out of turns.
+    `files_changed` is appended to only when a write tool reports success, so
+    the list stays a record of what happened rather than what was claimed.
+    """
+    for _ in range(MAX_BUILDER_TOOL_TURNS):
+        response = llm.invoke(messages)
+        calls = list(getattr(response, "tool_calls", None) or [])
+
+        if not calls:
+            return str(response.content), False
+
+        messages.append(response)
+
+        for call in calls:
+            name = str(call.get("name", ""))
+            args = dict(call.get("args") or {})
+
+            if name not in BUILDER_TOOL_NAMES:
+                # Refused rather than run: the tool split is the whole point,
+                # and a Researcher tool reaching the Builder is a real bug
+                # worth surfacing in the report instead of silently serving.
+                result: Any = {
+                    "success": False,
+                    "error": f"{name} is not a Builder tool",
+                }
+            else:
+                try:
+                    result = _call_mcp_tool_sync(name, args)
+                except Exception as exc:
+                    result = {"success": False, "error": str(exc)}
+
+            ok = bool(result.get("success")) if isinstance(result, dict) else False
+
+            if name == "filesystem_write" and ok:
+                path = str(args.get("path", ""))
+                if path and path not in files_changed:
+                    files_changed.append(path)
+
+            target = args.get("path") or args.get("command") or ""
+            tool_log.append(f"{name}({target}) -> {'ok' if ok else 'failed'}")
+
+            payload = json.dumps(result, default=str)
+            if len(payload) > MAX_TOOL_RESULT_CHARS:
+                # Flagged, not silently clipped: a truncated read that the model
+                # then writes back would delete the tail of the file.
+                payload = (
+                    payload[:MAX_TOOL_RESULT_CHARS]
+                    + '..."TRUNCATED": "Result cut short. Do not write this '
+                    'content back to a file -- it is incomplete."'
+                )
+
+            messages.append(
+                ToolMessage(content=payload, tool_call_id=str(call.get("id", "")))
+            )
+
+    return "", True
+
+
 def builder_node(state: AgentState) -> AgentState:
-    """Builder: Implement plan using tools, report changes.
+    """Builder: implement the plan by actually calling tools.
 
     As specified:
-    - Filesystem, git, test tools only (no GraphRAG)
+    - Filesystem, git, terminal and test tools only (no GraphRAG)
     - Actually make changes via tools
     - Report in strict format
     - Set blockers if stuck
 
-    Uses direct file operations. Falls back to LLM if tools fail.
+    The model drives the tools. An earlier version regex-scraped the plan for
+    `create <file>` plus a quoted string and wrote that, which meant it could
+    only ever create whole new files from a plan phrased just so -- every other
+    goal, including editing an existing file, reported "Implementation
+    complete" having changed nothing.
     """
-    import re
-
-    # Build messages with state injection
     state_injection = _get_state_injection(state)
-    plan = state.get('plan', '')
-    research = state.get('research', '')
-    goal = state.get('goal', '')
+    plan = state.get("plan", "")
+    research = state.get("research", "")
 
-    # Try to execute the plan directly
-    files_changed = []
-    builder_report_parts = []
-    execution_error = None
+    files_changed: list[str] = []
+    tool_log: list[str] = []
     blockers = ""
+    exhausted = False
 
+    messages: list[Any] = [
+        SystemMessage(content=BUILDER_PROMPT),
+        HumanMessage(
+            content=f"{state_injection}\n\nPlan to implement:\n{plan}\n\n"
+            f"Research findings:\n{research}"
+        ),
+    ]
+
+    llm = get_agent_llm("builder")
     try:
-        # Pattern: "Create <filename>" or "Builder creates <filename>" etc.
-        # Supports backticks, quotes, or bare filenames
-        create_matches = re.findall(
-            r'[Cc]reate(?:s)?\s+(?:the\s+)?(?:a\s+)?(?:new\s+)?(?:file\s+)?(?:named|called)?\s*[`"\']?([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)[`"\']?',
-            plan
+        tool_llm = llm.bind_tools(BUILDER_TOOLS)
+    except AttributeError:
+        # A seat whose model cannot call tools at all -- StubLLM, or a tag
+        # without tool support. It still reports; it just cannot change a file.
+        tool_llm = None
+
+    if tool_llm is None:
+        content = str(llm.invoke(messages).content)
+    else:
+        content, exhausted = _run_builder_tools(
+            tool_llm, messages, files_changed, tool_log
         )
 
-        # Pattern: content in quotes - multiple patterns to try
-        content_matches = []
+    parsed = _parse_builder_output(content)
+    builder_report = parsed.get("changes_made") or content or "No report produced."
 
-        # Pattern 1: "containing 'content'" or "with 'content'" - most specific
-        content_matches += re.findall(r"(?:containing|with)\s*['\"`]([^'\"`]+)['\"`]", plan, re.IGNORECASE)
+    if tool_log:
+        builder_report += "\n\nTool calls:\n" + "\n".join(f"- {c}" for c in tool_log)
 
-        # Pattern 2: "write 'content' to it" or "writes 'content'"
-        content_matches += re.findall(r"(?:write|writes?)\s+(?:to\s+it\s+)?['\"`]([^'\"`]+)['\"`]", plan, re.IGNORECASE)
+    # files_changed is deliberately NOT taken from the model's prose. A file
+    # counts as changed only when a write tool reported success for it; a model
+    # that describes writing a module it never wrote would otherwise have the
+    # console report "changed this machine" for work that never touched disk.
+    claimed = [
+        path for path in parsed.get("files_modified", []) if path not in files_changed
+    ]
+    if claimed:
+        builder_report += (
+            "\n\nDescribed but not written (no successful write call): "
+            + ", ".join(claimed)
+        )
 
-        # Pattern 3: Backtick-quoted text that's NOT a filename (LLM often uses backticks)
-        all_backtick = re.findall(r'`([^`]+)`', plan)
-        # Filter out filenames (things that look like file paths)
-        for match in all_backtick:
-            if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
-                content_matches.append(match)
+    parsed_blockers = parsed.get("next_steps_blockers", "")
+    if parsed_blockers and parsed_blockers.strip().lower() not in {"none", "n/a", ""}:
+        blockers = parsed_blockers
 
-        # Pattern 4: Double-quoted text (not filenames)
-        all_double = re.findall(r'"([^"]+)"', plan)
-        for match in all_double:
-            if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
-                content_matches.append(match)
+    if exhausted and not blockers:
+        blockers = (
+            f"Builder stopped after {MAX_BUILDER_TOOL_TURNS} tool turns without "
+            "finishing. Narrow the plan or split it into smaller steps."
+        )
 
-        # Pattern 5: Single-quoted text (not filenames)
-        all_single = re.findall(r"'([^']+)'", plan)
-        for match in all_single:
-            if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
-                content_matches.append(match)
-
-        # Pattern 6: Just standalone quoted strings in the goal (fallback)
-        if not content_matches and goal:
-            goal_content = re.findall(r"['\"`]([^'\"`]+)['\"`]", goal)
-            # Filter out filenames
-            for match in goal_content:
-                if not re.match(r'^[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+$', match):
-                    content_matches.append(match)
-
-        # Both halves are required. With a filename but no content the
-        # heuristics used to write a literal "Content for <name>" placeholder
-        # and report the file as changed -- a silent success that the Architect
-        # then approved. Without content this falls through to the LLM path,
-        # which is what that path is for.
-        if create_matches and content_matches:
-            for filename in create_matches:
-                # Clean up filename
-                filename = filename.strip().strip('`"\'')
-
-                content = content_matches[0]
-
-                # Write the file through the MCP filesystem tool, preserving
-                # the documented tool boundary (Builder only uses filesystem/git
-                # tools, never direct file operations or GraphRAG).
-                try:
-                    result = _call_mcp_tool_sync(
-                        "filesystem_write", {"path": filename, "content": content}
-                    )
-                    if result.get("success"):
-                        files_changed.append(filename)
-                        builder_report_parts.append(
-                            f"Created {filename} with content: {content[:50]}..."
-                        )
-                    else:
-                        error = result.get("error", "Unknown filesystem_write error")
-                        builder_report_parts.append(f"Failed to create {filename}: {error}")
-                        execution_error = error
-                except Exception as e:
-                    builder_report_parts.append(f"Failed to create {filename}: {e}")
-                    execution_error = str(e)
-
-        builder_report = "\n".join(builder_report_parts) if builder_report_parts else "No file operations identified in plan"
-
-    except Exception as e:
-        # Fallback to LLM-only mode
-        execution_error = str(e)
-
-    # If execution failed or no file ops identified, use LLM
-    if not files_changed or execution_error:
-        messages = [
-            SystemMessage(content=BUILDER_PROMPT),
-            HumanMessage(
-                content=f"{state_injection}\n\nPlan to implement:\n{plan}\n\n"
-                f"Research findings:\n{research}"
-            ),
-        ]
-
-        llm = get_agent_llm("builder")
-        response = llm.invoke(messages)
-        parsed = _parse_builder_output(response.content)
-
-        if not files_changed:
-            builder_report = parsed.get("changes_made", response.content)
-
-            # files_changed is deliberately NOT taken from the model's prose.
-            # A file counts as changed only when the Builder actually called
-            # filesystem_write for it; a model that describes writing a module
-            # it never wrote would otherwise have the console report "changed
-            # this machine" for work that never touched the disk.
-            claimed = [
-                path for path in parsed.get("files_modified", [])
-                if not Path(path).exists()
-            ]
-            if claimed:
-                builder_report += (
-                    "\n\nDescribed but not written (no filesystem_write call): "
-                    + ", ".join(claimed)
-                )
-
-        # Capture any blockers reported by the LLM, but treat "none" as no
-        # blockers so the graph can finish cleanly.
-        parsed_blockers = parsed.get("next_steps_blockers", "")
-        if parsed_blockers and parsed_blockers.strip().lower() not in {"none", "n/a", ""}:
-            blockers = parsed_blockers
-
-    # If direct execution failed and no actionable blocker was parsed, set one
-    # so the graph can loop back to Planner or Researcher per the specification.
-    if execution_error and not blockers:
-        blockers = f"Execution failed: {execution_error}. Need replan or additional information."
-
-    # Update state
     state["builder_report"] = builder_report
     state["files_changed"] = files_changed
     state["blockers"] = blockers
-    state["messages"].append(f"[Builder] Implementation complete. Files: {len(files_changed)}")
+    state["messages"].append(
+        f"[Builder] Implementation complete. Files: {len(files_changed)}"
+    )
 
     # step_count is incremented by the Architect gate, not here: every cycle
     # passes through the gate, but a Planner/Researcher loop never reaches the

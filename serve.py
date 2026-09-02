@@ -36,6 +36,8 @@ src_path = Path(__file__).parent / "src"
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
+from langgraph.errors import GraphRecursionError  # noqa: E402
+
 from langgraph_agent import AgentState, create_agent_graph  # noqa: E402
 from langgraph_agent.config import (  # noqa: E402
     AGENT_LLM_OPTIONS,
@@ -190,8 +192,25 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         "files_changed": [],
         "step_count": 0,
     }
-    result = graph.invoke(state, {"recursion_limit": RECURSION_LIMIT})
-    return dict(result)
+    # Streamed rather than invoked so the last state survives the ceiling.
+    # `graph.invoke` raises GraphRecursionError with no partial result, so a run
+    # that ran for minutes and produced real work reported nothing at all --
+    # from the console it was indistinguishable from a request never sent.
+    last = state
+    try:
+        for event in graph.stream(state, {"recursion_limit": RECURSION_LIMIT}):
+            for node_state in event.values():
+                if isinstance(node_state, dict):
+                    last = node_state  # type: ignore[assignment]
+    except GraphRecursionError:
+        last["messages"] = [
+            *last.get("messages", []),
+            "[Graph] Stopped at the recursion ceiling without an approved "
+            "verdict. The work below is what the run produced before it "
+            "was cut off.",
+        ]
+
+    return dict(last)
 
 
 RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {

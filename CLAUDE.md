@@ -131,7 +131,10 @@ python -m pytest tests/ -v
 ### Add a new Builder tool
 1. Add the tool method to `src/langgraph_agent/mcp_client.py` in `_discover_tools()`.
 2. Name it clearly under the `filesystem_`, `git_`, `terminal_`, or `test_` namespace.
-3. Update `src/langgraph_agent/nodes.py` if the Builder should invoke it automatically.
+3. Add a JSON schema for it to `BUILDER_TOOLS` in `src/langgraph_agent/nodes.py`.
+   The Builder can only call what is offered there — a tool the MCP client
+   exposes but `BUILDER_TOOLS` omits is refused by name in `_run_builder_tools`.
+   Keep GraphRAG out of that list; retrieval is the Researcher's.
 4. Add a test in `tests/test_graph.py` or create a focused unit test.
 5. Update `README.md` MCP Integration section.
 
@@ -162,7 +165,11 @@ check, so it must keep working.
 
 - Do not let every agent call every tool; the specialization is the whole point.
 - Empty state fields must render as `(empty)` in the state injection block.
-- The Builder must actually call a tool to claim it changed a file.
+- The Builder must actually call a tool to claim it changed a file. It drives
+  its own tools through `bind_tools` and a turn loop capped at
+  `MAX_BUILDER_TOOL_TURNS`; `files_changed` is appended only when a write
+  tool reports success, never from the model's prose. A seat whose model
+  cannot call tools (`StubLLM`) still reports but changes nothing.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.

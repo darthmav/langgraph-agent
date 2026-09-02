@@ -14,7 +14,7 @@ import os
 import re
 import time
 import urllib.request
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from dotenv import load_dotenv
 from pydantic import SecretStr
@@ -174,6 +174,21 @@ class _SeatLLM:
         _seat_failures.pop(self._agent, None)
         return result
 
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_SeatLLM":
+        """Bind tools, keeping the wrapper so the bound model still reports.
+
+        Without this the bound runnable would come back unwrapped through
+        `__getattr__`, and every failure the Builder hit while calling tools
+        would be invisible to `get_agent_status`. Seats whose model cannot call
+        tools at all (`StubLLM`) raise AttributeError here on purpose, so a
+        caller wanting the no-tools path catches AttributeError around the
+        call itself -- `hasattr` is always True once this method exists.
+        """
+        inner_bind = getattr(self._inner, "bind_tools", None)
+        if inner_bind is None:
+            raise AttributeError("bind_tools")
+        return _SeatLLM(self._agent, inner_bind(tools, **kwargs))
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
@@ -201,7 +216,19 @@ def set_agent_llm(agent: str, provider: str, model: str) -> None:
 
     The selection is stored in memory only; it does not modify environment
     variables or persist across server restarts.
+
+    Moving a seat clears any failure recorded against it. A recorded failure
+    describes the seat that produced it, so leaving it in place made the new
+    seat inherit the old one's verdict -- an Architect moved off Anthropic
+    still read "Anthropic credit balance too low", which is exactly the
+    reading that sends someone to buy credits they do not need. Re-selecting
+    the seat it already has is not a move and keeps the failure, so a dead
+    seat cannot be made to look live by picking it again.
     """
+    current = get_agent_model_info(cast("AgentName", agent))
+    if (current["provider"], current["model"]) != (provider, model):
+        _seat_failures.pop(agent, None)
+
     _agent_llm_overrides[agent] = {"provider": provider, "model": model}
 
 

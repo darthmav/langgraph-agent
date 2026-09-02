@@ -257,3 +257,128 @@ def test_architect_parser_defaults_by_pass():
     assert parsed["verdict"] == "revise"
     assert "Keep it small." in parsed["architecture"]
     assert "No new deps" in parsed["architecture"]
+
+
+class _ToolCallingLLM:
+    """A Builder seat that calls a tool once, then reports.
+
+    Stands in for a real tool-capable model: the first invoke asks for a
+    write, the second closes the report. `bind_tools` returns self so the
+    node's bind step behaves like a live seat's.
+    """
+
+    def __init__(self, path):
+        self._path = path
+        self.calls = 0
+        self.bound = None
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound = tools
+        return self
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "filesystem_write",
+                    "args": {"path": str(self._path), "content": "written by the tool loop\n"},
+                    "id": "call_1",
+                }],
+            )
+        return AIMessage(
+            content=(
+                "## Changes Made\nWrote the file.\n\n"
+                f"## Files Modified\n- {self._path}\n\n"
+                "## Next Steps / Blockers\nnone\n"
+            )
+        )
+
+
+def test_builder_writes_through_a_tool_call(monkeypatch, tmp_path):
+    """The Builder's file changes come from real tool calls, not from prose."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "written.txt"
+    llm = _ToolCallingLLM(target)
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    state = initial_state("Write a file")
+    state["plan"] = "1. Write written.txt"
+    result = builder_node(state)
+
+    # The tool actually ran: the file is on disk with the tool's content.
+    assert target.read_text() == "written by the tool loop\n"
+    assert result["files_changed"] == [str(target)]
+    assert "filesystem_write" in result["builder_report"]
+    assert result["blockers"] == ""
+
+
+def test_builder_offers_only_its_own_tools(monkeypatch, tmp_path):
+    """GraphRAG must never reach the Builder; retrieval is the Researcher's."""
+    from langgraph_agent.nodes import builder_node
+
+    llm = _ToolCallingLLM(tmp_path / "x.txt")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+    builder_node(initial_state("Write a file"))
+
+    offered = {tool["function"]["name"] for tool in llm.bound}
+    assert "filesystem_write" in offered
+    assert not offered & {"search_knowledge_graph", "query_knowledge_graph"}
+
+
+def test_builder_does_not_credit_unwritten_files(monkeypatch):
+    """A seat that cannot call tools reports, but claims no file changes."""
+    from langgraph_agent.config import StubLLM
+    from langgraph_agent.nodes import builder_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: StubLLM()
+    )
+    result = builder_node(initial_state("Create app.py"))
+
+    assert result["files_changed"] == []
+
+
+def test_moving_a_seat_clears_its_recorded_failure():
+    """A failure belongs to the seat that produced it, not to the agent."""
+    from langgraph_agent import config
+
+    config.set_agent_llm("architect", "anthropic", "claude-opus-5")
+    config._seat_failures["architect"] = "Anthropic credit balance too low"
+
+    # Moving the seat to a different provider retires that verdict.
+    config.set_agent_llm("architect", "ollama", "kimi-k3:cloud")
+    status = config.get_agent_status("architect")
+
+    assert "architect" not in config._seat_failures
+    assert status["live"] is True
+    assert status["reason"] == ""
+
+    config._agent_llm_overrides.pop("architect", None)
+    config._seat_failures.pop("architect", None)
+
+
+def test_reselecting_the_same_seat_keeps_its_failure():
+    """Picking the seat you already have must not launder a real failure."""
+    from langgraph_agent import config
+
+    config.set_agent_llm("architect", "ollama", "kimi-k3:cloud")
+    config._seat_failures["architect"] = "Provider unreachable"
+
+    config.set_agent_llm("architect", "ollama", "kimi-k3:cloud")
+    status = config.get_agent_status("architect")
+
+    assert status["live"] is False
+    assert status["reason"] == "Provider unreachable"
+    assert status["badge"] == "FAILING"
+
+    config._agent_llm_overrides.pop("architect", None)
+    config._seat_failures.pop("architect", None)

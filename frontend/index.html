@@ -639,6 +639,16 @@ async function run(){
   }catch(e){
     clearInterval(timer);
     $("#feed").innerHTML = stageCard("architect", "Run failed: "+e.message, `<span class="badge bad">FAIL</span>`);
+    // The director pane is where the goal was typed and where a finished run
+    // answers. Reporting the failure only in the feed leaves that pane showing
+    // the goal and nothing after it, which reads as a request that was never
+    // sent rather than one that died on the first call.
+    $("#director").innerHTML +=
+      `<div class="msg sys"><b>Run failed</b> <span class="badge bad">FAIL</span>\n\n${esc(e.message)}</div>`;
+    $("#director").scrollTop = $("#director").scrollHeight;
+    // A seat that just failed should lose its live chip now rather than at the
+    // next 5s poll, so the cause is on screen next to the failure.
+    poll(true);
   }finally{
     btn.disabled = false; btn.textContent = "Run";
   }

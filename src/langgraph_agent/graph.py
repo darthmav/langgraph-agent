@@ -22,10 +22,14 @@ from langgraph_agent.state import AgentState, ResearchStatus, Verdict
 # Maximum cycles through the Architect gate before escalation
 MAX_STEPS = 8
 
-# Supersteps LangGraph will run before it gives up. Four nodes and a gate that
-# can send work back means the ceiling has to be derived from MAX_STEPS rather
-# than picked -- a fixed low number aborts a legitimate run partway through.
-RECURSION_LIMIT = 4 * MAX_STEPS + 4
+# Supersteps LangGraph will run before it gives up. A counted step costs at
+# most four supersteps (architect, planner, researcher, builder), but a
+# Researcher that asks for a replan bounces back to the Planner without passing
+# the gate, so the true cost per step is higher than four. At exactly 4 *
+# MAX_STEPS the recursion limit fired before the gate ever reached MAX_STEPS,
+# which meant the run always died by exception instead of ending on its own
+# terms. The gate is the intended stop; this is only the backstop behind it.
+RECURSION_LIMIT = 6 * MAX_STEPS + 4
 
 
 # The routing functions live at module scope rather than inside the factory:
