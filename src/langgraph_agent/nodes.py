@@ -9,9 +9,13 @@ Implements the 4-Agent System with strict prompts and tool binding:
 
 import asyncio
 import json
+import os
 import re
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
@@ -36,6 +40,75 @@ def _call_mcp_tool_sync(tool_name: str, arguments: dict[str, Any]) -> Any:
         # Already running inside an event loop (e.g., some test runners).
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(_call())
+
+
+_T = TypeVar("_T")
+
+# How long one node may spend gathering its answer. This is the second half of
+# the timeout story and is not made redundant by `LLM_TIMEOUT_SECONDS`: that one
+# bounds the socket, so it catches a connection that goes quiet but not a model
+# that streams tokens slowly and indefinitely, and not a node that makes several
+# calls each of which finishes just inside its own limit.
+NODE_DEADLINE_SECONDS = float(os.getenv("NODE_DEADLINE_SECONDS", "150"))
+
+
+class _Deadline:
+    """A monotonic countdown shared across the several calls one node makes.
+
+    The Researcher runs a single retrieval and can be bounded by wrapping it.
+    A node that makes many calls in sequence -- the Builder's turn loop, then
+    its verification pass -- needs the budget to travel with it, or each call
+    gets the full allowance and the node as a whole is bounded by nothing.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._end = time.monotonic() + seconds
+
+    def remaining(self) -> float:
+        return max(0.0, self._end - time.monotonic())
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0.0
+
+
+def _with_deadline(work: Callable[[], _T], seconds: float, fallback: _T) -> _T:
+    """Run `work`, giving up on it after `seconds` and returning `fallback`.
+
+    The abandoned call cannot actually be cancelled -- Python cannot interrupt a
+    thread blocked on a socket -- so the worker is left to unwind on its own
+    when the client timeout fires. Two consequences shape this code.
+
+    First, `work` must not write to state: a late finisher would otherwise land
+    its result in a state the graph had already moved past. Callers pass a
+    function that only reads and apply what it returns themselves.
+
+    Second, the worker is a bare daemon thread rather than a
+    `ThreadPoolExecutor`. Pool threads are non-daemon and the module's atexit
+    hook joins them, so one abandoned worker would hold up interpreter shutdown
+    for as long as it stayed blocked -- turning a bounded node into an
+    unkillable server.
+    """
+    box: list[Any] = []
+    error: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            box.append(work())
+        except BaseException as exc:  # re-raised on the caller's thread below
+            error.append(exc)
+
+    thread = threading.Thread(target=_run, daemon=True, name="node-deadline")
+    thread.start()
+    thread.join(timeout=seconds)
+
+    if thread.is_alive():
+        return fallback
+    if error:
+        # A seat that failed outright is not a timeout; let it raise so
+        # `_SeatLLM` records the reason and the console can show it.
+        raise error[0]
+    return cast("_T", box[0])
 
 
 def _load_prompt(name: str, fallback: str) -> str:
@@ -413,15 +486,11 @@ def _parse_architect_output(content: str, reviewing: bool = False) -> dict[str, 
     return result
 
 
-def architect_node(state: AgentState) -> AgentState:
-    """Architect: set direction, then rule on whether the work is done.
+def _rule_on_state(state: AgentState, reviewing: bool) -> dict[str, str]:
+    """Ask the Architect for direction or a ruling; return the parsed output.
 
-    No tools. Runs twice per cycle -- as the entry authority before the Planner,
-    and as the approval gate after the Builder reports. A populated builder
-    report is what tells the two passes apart.
+    Reads state; never writes it, so it is safe to run under `_with_deadline`.
     """
-    reviewing = bool(state.get("builder_report"))
-
     state_injection = _get_state_injection(state)
     goal = state.get("goal", "")
     task = (
@@ -437,7 +506,36 @@ def architect_node(state: AgentState) -> AgentState:
 
     llm = get_agent_llm("architect")
     response = llm.invoke(messages)
-    parsed = _parse_architect_output(response.content, reviewing=reviewing)
+    return _parse_architect_output(response.content, reviewing=reviewing)
+
+
+def architect_node(state: AgentState) -> AgentState:
+    """Architect: set direction, then rule on whether the work is done.
+
+    No tools. Runs twice per cycle -- as the entry authority before the Planner,
+    and as the approval gate after the Builder reports. A populated builder
+    report is what tells the two passes apart.
+
+    Bounded by `NODE_DEADLINE_SECONDS`. The fallback verdict is never
+    `approved`, and that is the whole point of choosing one here: this gate is
+    what ends the run, so a seat that stalled must not be able to end one
+    successfully. `revise` on the gate pass and `plan` on the opening pass both
+    route back to the Planner, and the step counter below carries a repeatedly
+    stalling Architect to MAX_STEPS instead of letting it spin.
+    """
+    reviewing = bool(state.get("builder_report"))
+
+    parsed = _with_deadline(
+        lambda: _rule_on_state(state, reviewing), NODE_DEADLINE_SECONDS, None
+    )
+    timed_out = parsed is None
+    if parsed is None:
+        parsed = {
+            "architecture": "",
+            "verdict": (
+                Verdict.REVISE.value if state.get("plan") else Verdict.PLAN.value
+            ),
+        }
 
     # Keep the opening architecture if the gate pass did not restate it --
     # losing it mid-run would strip the constraints out of every later prompt.
@@ -476,7 +574,14 @@ def architect_node(state: AgentState) -> AgentState:
     if state.get("plan"):
         state["step_count"] = state.get("step_count", 0) + 1
 
-    if overridden:
+    if timed_out:
+        # Said plainly, because the run reads this line to know what happened:
+        # a verdict nobody actually reached is not the same as a ruling.
+        note = (
+            f" (no response within {int(NODE_DEADLINE_SECONDS)}s -- "
+            "not a ruling, and never an approval)"
+        )
+    elif overridden:
         note = f" (approval blocked: {len(blocked)} file(s) do not run)"
     elif blocked:
         note = f" ({len(blocked)} file(s) do not run)"
@@ -487,13 +592,10 @@ def architect_node(state: AgentState) -> AgentState:
     return state
 
 
-def planner_node(state: AgentState) -> AgentState:
-    """Planner: Interpret goal, create structured plan, choose next agent.
+def _make_plan(state: AgentState) -> dict[str, Any]:
+    """Ask the Planner for a plan; return the parsed output.
 
-    As specified:
-    - No tools
-    - Output strict format
-    - Routes to Researcher when knowledge needed, Builder when task is clear
+    Reads state; never writes it, so it is safe to run under `_with_deadline`.
     """
     # Build messages with state injection
     state_injection = _get_state_injection(state)
@@ -508,7 +610,55 @@ def planner_node(state: AgentState) -> AgentState:
     response = llm.invoke(messages)
 
     # Parse the structured output
-    parsed = _parse_planner_output(response.content)
+    return _parse_planner_output(response.content)
+
+
+# What a timed-out Planner leaves in `plan`. It must not be empty, and that is
+# load-bearing rather than cosmetic: the Architect increments `step_count` only
+# while a plan exists, so an empty one would send the run round the
+# Planner/Builder loop uncounted until LangGraph's recursion limit killed it by
+# exception -- discarding every message the run had produced. That is the exact
+# failure the counter was moved to the gate to prevent, and an empty fallback
+# here would reintroduce it through the back door.
+_PLANNER_TIMED_OUT = (
+    "1. The Planner did not respond within {seconds}s, so this goal was never "
+    "broken into steps.\n"
+    "2. Do not guess at the plan. Report the goal as unplanned, and set that "
+    "as a blocker so the Architect sees why nothing was implemented.\n"
+)
+
+
+def planner_node(state: AgentState) -> AgentState:
+    """Planner: Interpret goal, create structured plan, choose next agent.
+
+    As specified:
+    - No tools
+    - Output strict format
+    - Routes to Researcher when knowledge needed, Builder when task is clear
+
+    Bounded by `NODE_DEADLINE_SECONDS`; see `_PLANNER_TIMED_OUT` for why the
+    fallback plan is a real string rather than an empty one.
+    """
+    parsed = _with_deadline(
+        lambda: _make_plan(state), NODE_DEADLINE_SECONDS, None
+    )
+
+    if parsed is None:
+        # An existing plan beats the placeholder: on a revise cycle state
+        # already holds a real one, and re-running it is better information
+        # than a note saying the seat stalled.
+        state["plan"] = state.get("plan") or _PLANNER_TIMED_OUT.format(
+            seconds=int(NODE_DEADLINE_SECONDS)
+        )
+        # Builder rather than Researcher: it is the shorter path back to the
+        # Architect, which is the only node that can end the run, and a second
+        # slow seat in between is the last thing a stalling run needs.
+        state["next_agent"] = "Builder"
+        state["messages"].append(
+            f"[Planner] No response within {int(NODE_DEADLINE_SECONDS)}s; "
+            "routing to Builder"
+        )
+        return state
 
     # Update state
     state["plan"] = parsed.get("plan", "")
@@ -518,17 +668,12 @@ def planner_node(state: AgentState) -> AgentState:
     return state
 
 
-def researcher_node(state: AgentState) -> AgentState:
-    """Researcher: Query GraphRAG, summarize findings, recommend approach.
+def _gather_research(state: AgentState) -> tuple[str, str]:
+    """Retrieve for the Researcher and return `(findings, status)`.
 
-    As specified:
-    - GraphRAG tools only
-    - Output strict format with status
-    - Status guides next steps (ready_for_builder | need_replan | no_relevant_knowledge)
-
-    Calls the GraphRAG MCP tool (`search_knowledge_graph`) rather than importing
-    the knowledge base directly, preserving the documented tool boundary.
-    Falls back to the LLM if the knowledge base is empty or the MCP tool fails.
+    Reads state; never writes it. Split out of `researcher_node` so it can run
+    under `_with_deadline`, which may abandon it still running -- see that
+    function for why a worker that writes state is a bug.
     """
     # Build messages with state injection
     state_injection = _get_state_injection(state)
@@ -619,12 +764,67 @@ def researcher_node(state: AgentState) -> AgentState:
         parsed = _parse_researcher_output(response.content)
         research_status = parsed.get("status", "ready_for_builder")
 
+    return research_findings, research_status
+
+
+# What the Researcher hands the Builder when it runs out of time. The status is
+# `no_relevant_knowledge` rather than `need_replan` because a deadline says
+# nothing about the plan -- looping back to the Planner would re-run the same
+# slow retrieval and burn the run's budget on it. The Builder is told plainly
+# that it has no research, so its report cannot silently imply otherwise.
+_RESEARCH_TIMED_OUT = (
+    "## Key Findings\nNone -- retrieval did not finish.\n\n"
+    "## Relevant Context\nThe Researcher was stopped at its "
+    "{seconds}s deadline before it produced findings. Treat this as no "
+    "research rather than as an empty corpus: the knowledge base may well "
+    "hold relevant material that was not retrieved in time.\n\n"
+    "## Recommendations for Builder\nWork from the plan alone, and say in "
+    "the report that it was built without research.\n\n"
+    "## Status\nno_relevant_knowledge"
+)
+
+
+def researcher_node(state: AgentState) -> AgentState:
+    """Researcher: Query GraphRAG, summarize findings, recommend approach.
+
+    As specified:
+    - GraphRAG tools only
+    - Output strict format with status
+    - Status guides next steps (ready_for_builder | need_replan | no_relevant_knowledge)
+
+    Calls the GraphRAG MCP tool (`search_knowledge_graph`) rather than importing
+    the knowledge base directly, preserving the documented tool boundary.
+    Falls back to the LLM if the knowledge base is empty or the MCP tool fails.
+
+    Bounded by `NODE_DEADLINE_SECONDS`. Without it a stalled seat hung the whole
+    run here: `RUN_BUDGET_SECONDS` is checked between graph supersteps, and a
+    node that never returns never reaches one, so the run sat inside this
+    function indefinitely while the console still showed the Planner as current.
+    """
+    timed_out = (_RESEARCH_TIMED_OUT.format(seconds=int(NODE_DEADLINE_SECONDS)), "timed_out")
+    research_findings, research_status = _with_deadline(
+        lambda: _gather_research(state), NODE_DEADLINE_SECONDS, timed_out
+    )
+
+    deadline_hit = research_status == "timed_out"
+    if deadline_hit:
+        research_status = "no_relevant_knowledge"
+
     # Update state
     state["research"] = research_findings
     state["research_status"] = research_status
 
     # Route based on status
-    if research_status == "need_replan":
+    if deadline_hit:
+        # Worded apart from the ordinary `no_relevant_knowledge` message: a
+        # corpus with nothing to say and a seat that stopped answering both
+        # reach the Builder empty-handed, and only one of them is a problem.
+        state["next_agent"] = "Builder"
+        state["messages"].append(
+            f"[Researcher] No response within {int(NODE_DEADLINE_SECONDS)}s; "
+            "routing to Builder without research"
+        )
+    elif research_status == "need_replan":
         state["next_agent"] = "Planner"
         state["messages"].append("[Researcher] Needs replan")
     elif research_status == "no_relevant_knowledge":
@@ -737,6 +937,19 @@ BUILDER_TOOL_NAMES = {tool["function"]["name"] for tool in BUILDER_TOOLS}
 # turn is a cloud round trip, and the Architect gate gets another cycle anyway.
 MAX_BUILDER_TOOL_TURNS = 8
 
+# Wall-clock ceiling for the whole Builder turn, larger than the Researcher's
+# because this node legitimately makes many calls: up to MAX_BUILDER_TOOL_TURNS
+# round trips, each of which may run tests. The turn cap bounds how many calls
+# it makes and says nothing about how long they take -- the same gap that let a
+# stalled Researcher hang a run.
+BUILDER_DEADLINE_SECONDS = float(os.getenv("BUILDER_DEADLINE_SECONDS", "240"))
+
+# Held back from the tool loop so the verification pass always gets to run.
+# Verification is what stops the Builder claiming work it never proved, so
+# letting the loop spend the entire budget would trade the guarantee for one
+# more tool call. Whatever the loop leaves unused is added to this.
+VERIFY_RESERVE_SECONDS = float(os.getenv("VERIFY_RESERVE_SECONDS", "60"))
+
 # A tool result this long is summarised rather than pasted whole. Large reads
 # are the reason: a whole file in the transcript crowds out the plan.
 MAX_TOOL_RESULT_CHARS = 20000
@@ -747,19 +960,38 @@ def _run_builder_tools(
     messages: list[Any],
     files_changed: list[str],
     tool_log: list[str],
-) -> tuple[str, bool]:
+    deadline: _Deadline,
+) -> tuple[str, bool, bool]:
     """Let the Builder call tools until it stops asking for them.
 
-    Returns the Builder's closing message and whether it ran out of turns.
-    `files_changed` is appended to only when a write tool reports success, so
-    the list stays a record of what happened rather than what was claimed.
+    Returns the Builder's closing message, whether it ran out of turns, and
+    whether it ran out of time. `files_changed` is appended to only when a write
+    tool reports success, so the list stays a record of what happened rather
+    than what was claimed.
+
+    The deadline is enforced in two places, and only one of them may abandon
+    work. The model's own call is wrapped, because discarding a half-received
+    response costs nothing but the turn. The tool calls underneath it are not:
+    they write files, stage commits and run commands, and a worker abandoned
+    mid-`filesystem_write` would keep writing into the project after this node
+    returned. So each turn's tools always run to completion, and the budget is
+    re-checked at the top of the next turn instead.
     """
     for _ in range(MAX_BUILDER_TOOL_TURNS):
-        response = llm.invoke(messages)
+        if deadline.expired():
+            return "", False, True
+
+        # None is the sentinel for "gave up"; a real response is never None.
+        response = _with_deadline(
+            lambda: llm.invoke(messages), deadline.remaining(), None
+        )
+        if response is None:
+            return "", False, True
+
         calls = list(getattr(response, "tool_calls", None) or [])
 
         if not calls:
-            return str(response.content), False
+            return str(response.content), False, False
 
         messages.append(response)
 
@@ -805,7 +1037,7 @@ def _run_builder_tools(
                 ToolMessage(content=payload, tool_call_id=str(call.get("id", "")))
             )
 
-    return "", True
+    return "", True, False
 
 
 # Files the Builder writes that can be executed as a script. Anything else it
@@ -827,9 +1059,27 @@ PACKAGE_MODULE_SKIP_REASON = (
     "Cover it with a root-level script that imports the package."
 )
 
-# How each verification status reads in the report. "SKIPPED" is shouted like
-# "FAILED" on purpose: an unexecuted file is not a passing one.
-_VERIFY_LABELS = {"ok": "ran clean", "failed": "FAILED", "skipped": "SKIPPED"}
+# The least time worth starting a file in. Below this the remaining slice
+# rounds down to a timeout nothing can finish inside, and the file comes back
+# FAILED -- which is not merely useless but wrong: it accuses a working file of
+# not running, and sets the blocker that says so. Better to admit it was never
+# executed.
+MIN_VERIFY_SLICE_SECONDS = 1.0
+
+# Why a file was left unrun when the Builder's budget ran out.
+VERIFY_DEADLINE_SKIP_REASON = (
+    "not executed: the Builder's deadline passed before this file was reached. "
+    "It is unproven, not passing, and is re-checked on the next cycle."
+)
+
+# How each verification status reads in the report. "SKIPPED" and "NOT RUN" are
+# shouted like "FAILED" on purpose: an unexecuted file is not a passing one.
+_VERIFY_LABELS = {
+    "ok": "ran clean",
+    "failed": "FAILED",
+    "skipped": "SKIPPED",
+    "unverified": "NOT RUN",
+}
 
 
 # A Builder often answers the Blockers section with "none" and then keeps
@@ -873,7 +1123,9 @@ def _is_package_module(path: str) -> bool:
 
 
 def _verify_written_files(
-    files_changed: list[str], tool_log: list[str]
+    files_changed: list[str],
+    tool_log: list[str],
+    deadline: _Deadline | None = None,
 ) -> list[tuple[str, str, str]]:
     """Execute the runnable files the Builder wrote and report what happened.
 
@@ -888,8 +1140,14 @@ def _verify_written_files(
     pass exists to surface, and the way to cover one is a root-level script
     that imports it, which this pass does execute.
 
+    Each file is bounded by VERIFY_TIMEOUT_SECONDS, but the number of files is
+    not, so `deadline` bounds the pass as a whole. Files past it come back
+    "unverified" rather than "ok": treating an unrun file as passing is the
+    exact false clearance this pass exists to prevent, and the caller keeps
+    them in `failed_verification` so the next cycle re-runs them.
+
     Returns one (path, status, detail) per runnable file, where status is
-    "ok", "failed" or "skipped".
+    "ok", "failed", "skipped" or "unverified".
     """
     results: list[tuple[str, str, str]] = []
 
@@ -902,10 +1160,25 @@ def _verify_written_files(
             tool_log.append(f"verify({path}) -> skipped")
             continue
 
+        if deadline is not None and deadline.remaining() < MIN_VERIFY_SLICE_SECONDS:
+            results.append((path, "unverified", VERIFY_DEADLINE_SKIP_REASON))
+            tool_log.append(f"verify({path}) -> not run (deadline)")
+            continue
+
         try:
             result = _call_mcp_tool_sync(
                 "terminal_execute",
-                {"command": f"python {path}", "timeout": VERIFY_TIMEOUT_SECONDS},
+                {
+                    "command": f"python {path}",
+                    # Never let one file overrun what is left for the rest, and
+                    # never hand it a slice too small to run in -- see
+                    # MIN_VERIFY_SLICE_SECONDS.
+                    "timeout": (
+                        VERIFY_TIMEOUT_SECONDS
+                        if deadline is None
+                        else max(1, int(min(VERIFY_TIMEOUT_SECONDS, deadline.remaining())))
+                    ),
+                },
             )
         except Exception as exc:
             results.append((path, "failed", str(exc)))
@@ -948,6 +1221,14 @@ def builder_node(state: AgentState) -> AgentState:
     files_changed: list[str] = []
     tool_log: list[str] = []
     exhausted = False
+    out_of_time = False
+
+    # The loop is held to the budget minus the verification reserve; whatever it
+    # does not spend is handed on below, so a quick build still gets a long
+    # verification pass and a slow one cannot starve it entirely.
+    loop_deadline = _Deadline(
+        max(0.0, BUILDER_DEADLINE_SECONDS - VERIFY_RESERVE_SECONDS)
+    )
 
     messages: list[Any] = [
         SystemMessage(content=BUILDER_PROMPT),
@@ -966,10 +1247,14 @@ def builder_node(state: AgentState) -> AgentState:
         tool_llm = None
 
     if tool_llm is None:
-        content = str(llm.invoke(messages).content)
+        reply = _with_deadline(
+            lambda: str(llm.invoke(messages).content), loop_deadline.remaining(), None
+        )
+        out_of_time = reply is None
+        content = reply or ""
     else:
-        content, exhausted = _run_builder_tools(
-            tool_llm, messages, files_changed, tool_log
+        content, exhausted, out_of_time = _run_builder_tools(
+            tool_llm, messages, files_changed, tool_log, loop_deadline
         )
 
     # Every runnable file the Builder wrote is executed before it gets to claim
@@ -994,11 +1279,16 @@ def builder_node(state: AgentState) -> AgentState:
         for path in (state.get("failed_verification") or [])
         if path not in files_changed and Path(path).exists()
     ]
-    verification = _verify_written_files(files_changed + carried, tool_log)
+    # The reserve plus whatever the tool loop left unspent.
+    verify_deadline = _Deadline(VERIFY_RESERVE_SECONDS + loop_deadline.remaining())
+    verification = _verify_written_files(
+        files_changed + carried, tool_log, verify_deadline
+    )
     failed = [
         (path, detail) for path, status, detail in verification if status == "failed"
     ]
     skipped = [path for path, status, _ in verification if status == "skipped"]
+    unverified = [path for path, status, _ in verification if status == "unverified"]
 
     parsed = _parse_builder_output(content)
     builder_report = parsed.get("changes_made") or content or "No report produced."
@@ -1017,6 +1307,12 @@ def builder_node(state: AgentState) -> AgentState:
             f"\n\n{len(skipped)} package module(s) were not executed. A package "
             "module only proves itself through a root-level script that imports "
             "it; write one if none of the scripts above cover it."
+        )
+    if unverified:
+        builder_report += (
+            f"\n\n{len(unverified)} file(s) were not executed: the Builder ran "
+            f"out of its {int(BUILDER_DEADLINE_SECONDS)}s budget. They are "
+            "unproven rather than working, and are re-checked next cycle."
         )
 
     if tool_log:
@@ -1048,6 +1344,21 @@ def builder_node(state: AgentState) -> AgentState:
             for path, detail in failed
         )
 
+    # An unproven file blocks whatever `expect_failures` says. That opt-out is
+    # for a file the run meant to fail -- it is still executed and still
+    # reported -- not for one that was never executed at all, which is a gap in
+    # the evidence rather than an expected result.
+    if unverified:
+        note = "Not executed before the deadline: " + ", ".join(unverified)
+        blockers = f"{blockers}. {note}" if blockers else note
+
+    if out_of_time and not blockers:
+        blockers = (
+            f"Builder stopped at its {int(BUILDER_DEADLINE_SECONDS)}s deadline "
+            "without finishing. Anything it had already written is kept and "
+            "verified; narrow the plan or raise BUILDER_DEADLINE_SECONDS."
+        )
+
     if exhausted and not blockers:
         blockers = (
             f"Builder stopped after {MAX_BUILDER_TOOL_TURNS} tool turns without "
@@ -1057,8 +1368,10 @@ def builder_node(state: AgentState) -> AgentState:
     state["builder_report"] = builder_report
     state["files_changed"] = files_changed
     # Written every pass, including empty, so a file that gets fixed on a later
-    # cycle stops blocking the gate.
-    state["failed_verification"] = [path for path, _ in failed]
+    # cycle stops blocking the gate. Unverified paths ride along so the next
+    # cycle re-runs them: a file nobody executed must not clear by omission,
+    # which is the same rule that keeps a failed file on the list.
+    state["failed_verification"] = [path for path, _ in failed] + unverified
     state["blockers"] = blockers
     # The feed line has to carry the verification result too. "Implementation
     # complete" beside a file that does not run is the same false claim this
@@ -1067,6 +1380,19 @@ def builder_node(state: AgentState) -> AgentState:
         suffix = " (expected for this run)" if expected else ""
         summary = (
             f"Wrote {len(files_changed)} file(s); {len(failed)} do not run{suffix}"
+        )
+    elif unverified:
+        summary = (
+            f"Wrote {len(files_changed)} file(s); {len(unverified)} not run "
+            "(deadline)"
+        )
+    elif out_of_time:
+        # Never "Implementation complete": the node was cut off, and the feed
+        # saying otherwise is the same false claim the verification pass exists
+        # to catch.
+        summary = (
+            f"Stopped at the {int(BUILDER_DEADLINE_SECONDS)}s deadline. "
+            f"Files: {len(files_changed)}"
         )
     else:
         summary = f"Implementation complete. Files: {len(files_changed)}"

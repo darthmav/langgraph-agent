@@ -213,6 +213,64 @@ check, so it must keep working.
   than per-file because the Builder chooses the filenames, so a run with it on
   will not block on an unintended failure either — which is why the failure
   stays visible in the report instead of being dropped. Defaults off.
+- **Three nested timeouts, and none of them is redundant.**
+  `LLM_TIMEOUT_SECONDS` (config.py) bounds one provider call at the socket —
+  each provider spells it differently (`client_kwargs={"timeout":…}` for
+  Ollama, `default_request_timeout` for Anthropic, `request_timeout` for
+  OpenAI), so a missed keyword silently restores an unbounded wait on that
+  provider alone. `NODE_DEADLINE_SECONDS` (nodes.py) bounds a whole node turn,
+  and covers the Architect, Planner and Researcher — all single-call, tool-free
+  nodes that can be wrapped whole. It is what catches a model that streams
+  slowly but never stops, and a node making several calls that each finish just
+  inside their own limit. `BUILDER_DEADLINE_SECONDS` is the Builder's larger
+  equivalent — that node legitimately makes up to `MAX_BUILDER_TOOL_TURNS`
+  round trips, some of which run tests. `RUN_BUDGET_SECONDS` (serve.py) bounds
+  the run, but is checked **between
+  graph supersteps** — a node in flight never reaches a superstep boundary, so
+  it cannot end a hung node. That gap is the whole reason for the other two:
+  before them a stalled seat hung a run indefinitely while the console still
+  named the *previous* node as current, and `_SeatLLM` recorded nothing because
+  a hang raises nothing.
+- **The Builder's deadline may never abandon a tool call.** Only the model's
+  own call is wrapped in `_with_deadline` — discarding a half-received response
+  costs a turn and nothing else. The tool calls underneath it write files,
+  stage commits and run commands, so they always run to completion and the
+  budget is re-checked at the top of the next turn instead. A worker abandoned
+  mid-`filesystem_write` would go on writing into the project after the node
+  returned, which is worse than the hang the deadline exists to stop.
+- **A file the deadline stopped us running is `unverified`, not `ok`.** It
+  reads `NOT RUN` in the report, joins `failed_verification` so the next cycle
+  re-runs it, and blocks approval even under `expect_failures` — that opt-out
+  is for a file the run *meant* to fail, which is still executed and still
+  reported, not for one nobody executed. `VERIFY_RESERVE_SECONDS` is held back
+  from the tool loop (plus whatever the loop leaves unspent) so the pass
+  normally gets to run at all. `MIN_VERIFY_SLICE_SECONDS` is the floor below
+  which a file is left unrun rather than started: `min(VERIFY_TIMEOUT_SECONDS,
+  remaining)` rounded down to a zero-second timeout, and a working file came
+  back `FAILED` with "timed out after 0 seconds" — a false accusation that also
+  set the "files that do not run" blocker.
+- **A timed-out Architect can never rule `approved`.** The gate is what ends
+  the run, so that fallback is the one place a hang could become a false
+  success. It falls back to `revise` on the gate pass and `plan` on the opening
+  pass; both route to the Planner, and neither ends anything. The architecture
+  already in state is kept, since losing it would strip the constraints out of
+  every later prompt.
+- **A timed-out Planner must leave a non-empty `plan`.** This is load-bearing,
+  not cosmetic: the Architect increments `step_count` only while a plan exists,
+  so an empty fallback would send the run round Planner → Builder → Architect
+  uncounted until LangGraph's recursion limit killed it by exception,
+  discarding every message it had produced — the exact failure the counter was
+  moved to the gate to prevent. It keeps a real plan from a previous cycle when
+  there is one, and otherwise writes `_PLANNER_TIMED_OUT`.
+- Work run under `_with_deadline` **must not write to state.** The abandoned
+  worker cannot be cancelled — Python cannot interrupt a thread blocked on a
+  socket — so it may finish long after the node returned and would land its
+  result in a state the graph had moved past. Every bounded node follows the
+  same shape: `_rule_on_state`, `_make_plan` and `_gather_research` read state
+  and return parsed output, and their nodes apply it. Keep that split for any
+  node put under a deadline. The worker is a bare daemon thread on purpose:
+  `ThreadPoolExecutor`'s atexit hook joins its non-daemon threads, so one
+  abandoned worker would hold up interpreter shutdown.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.
