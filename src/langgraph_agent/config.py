@@ -1,9 +1,10 @@
 """Configuration and LLM setup.
 
 Supports per-agent LLM selection so Architect, Planner, Researcher, and Builder
-can each use a different model/provider. Inference is cloud-only: the Architect
-runs on the Anthropic API and the other three seats run on Ollama Cloud tags,
-which the local daemon proxies to ollama.com. OpenAI remains optional.
+can each use a different model/provider. Inference is cloud-only: every seat
+defaults to an Ollama Cloud tag, which the local daemon proxies to ollama.com
+using credentials it holds itself. Anthropic and OpenAI remain available per
+seat, but neither is needed to run the crew.
 
 The only thing that runs on this machine is the embedding model, which belongs
 to GraphRAG rather than to any agent seat.
@@ -49,10 +50,14 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
 }
 
 
-# The seat each agent takes when nothing overrides it. Claude is the leading
-# authority on architecture, so the Architect is the one Anthropic seat.
+# The seat each agent takes when nothing overrides it. All four are Ollama
+# Cloud tags so a fresh checkout runs with no API key of its own -- the daemon
+# already holds the ollama.com credentials. Putting the Architect on Anthropic
+# meant the entry node, and so the whole run, died without billable credit.
+# Point a seat at Anthropic or OpenAI with {ROLE}_PROVIDER / {ROLE}_MODEL, or
+# from the console dropdown.
 DEFAULT_SEATS: dict[str, dict[str, str]] = {
-    "architect": {"provider": "anthropic", "model": "claude-opus-5"},
+    "architect": {"provider": "ollama", "model": "kimi-k3:cloud"},
     "planner": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
     "researcher": {"provider": "ollama", "model": "gemma4:cloud"},
     "builder": {"provider": "ollama", "model": "kimi-k3:cloud"},
@@ -385,7 +390,7 @@ def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
     """Get the LLM configured for a specific agent role.
 
     Default seats (cloud only -- see DEFAULT_SEATS):
-        Architect  -> Anthropic claude-opus-5      (leading authority)
+        Architect  -> Ollama    kimi-k3:cloud      (leading authority)
         Planner    -> Ollama    qwen3.5:397b-cloud
         Researcher -> Ollama    gemma4:cloud
         Builder    -> Ollama    kimi-k3:cloud

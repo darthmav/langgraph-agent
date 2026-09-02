@@ -4,7 +4,7 @@ Architect, Planner, Researcher, Builder architecture with:
 - Strict system prompts
 - State injection on every turn
 - Tool binding per agent
-- Cloud-only inference (Anthropic for the Architect, Ollama Cloud for the rest)
+- Cloud-only inference (Ollama Cloud for every seat; Anthropic/OpenAI optional)
 """
 
 from langgraph_agent.graph import create_agent_graph

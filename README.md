@@ -4,10 +4,11 @@
 
 A multi-agent system for software development experiments, powered by LangGraph + GraphRAG + MCP.
 
-Inference is **cloud only**. Claude is the leading authority and takes the
-Architect seat via the Anthropic API; the other three seats run Ollama Cloud
-tags, which the local daemon proxies to ollama.com. The only thing that runs on
-this machine is the embedding model.
+Inference is **cloud only**. All four seats run Ollama Cloud tags, which the
+local daemon proxies to ollama.com using credentials it holds itself, so the
+crew runs without an API key of your own. Anthropic and OpenAI are available
+per seat if you want them. The only thing that runs on this machine is the
+embedding model.
 
 ## 🎨 Web Console
 
@@ -50,7 +51,7 @@ finished — it reports, and the authority that set the constraints rules on it.
 
 | Agent | Responsibility | Default seat | Tools |
 |---|---|---|---|
-| **Architect** | Sets direction and constraints; rules `approved` / `revise` / `need_research` | `claude-opus-5` (anthropic) | None (reasoning only) |
+| **Architect** | Sets direction and constraints; rules `approved` / `revise` / `need_research` | `kimi-k3:cloud` (ollama) | None (reasoning only) |
 | **Planner** | Turns goals into structured plans, routes next | `qwen3.5:397b-cloud` (ollama) | None (reasoning only) |
 | **Researcher** | Gathers deep, relationship-aware knowledge | `gemma4:cloud` (ollama) | GraphRAG MCP only |
 | **Builder** | Implements the plan (writes code, edits files) | `kimi-k3:cloud` (ollama) | Filesystem, Git, Terminal |
@@ -80,15 +81,18 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-The Architect seat needs an Anthropic key:
+No API key is required: the default seats are all Ollama Cloud tags, and the
+daemon holds those credentials. Sign it in once with `ollama signin`.
+
+A key is only needed if you move a seat onto Anthropic or OpenAI:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Without it that seat falls back to a canned stub. It does so **visibly** — the
-seat card shows a `NO KEY` chip and the console banners it — rather than
-pretending to run the model.
+A seat pointed at a provider whose key is missing falls back to a canned stub.
+It does so **visibly** — the seat card shows a `NO KEY` chip and the console
+banners it — rather than pretending to run the model.
 
 A key that exists but does not work (no credits, rate limited, model not on the
 account) is a different failure: the seat shows `FAILING` with the provider's own

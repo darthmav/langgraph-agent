@@ -79,13 +79,15 @@ python example_usage.py
 
   | Seat | Provider | Model |
   |---|---|---|
-  | Architect | anthropic | `claude-opus-5` |
+  | Architect | ollama | `kimi-k3:cloud` |
   | Planner | ollama | `qwen3.5:397b-cloud` |
   | Researcher | ollama | `gemma4:cloud` |
   | Builder | ollama | `kimi-k3:cloud` |
 
-  OpenAI remains an optional cloud provider. `:cloud` tags are proxied to
-  ollama.com by the local daemon, which holds the credentials.
+  Anthropic and OpenAI remain optional cloud providers; no seat uses either by
+  default, so a fresh checkout runs without an API key of its own. `:cloud`
+  tags are proxied to ollama.com by the local daemon, which holds the
+  credentials.
 - **Never send `temperature` to a modern Anthropic model.** Sampling parameters
   were removed on the Opus 5 / Sonnet 5 / 4.6+ families and are rejected with a
   400 that reads like an auth failure. `_accepts_temperature()` gates this.
@@ -183,6 +185,6 @@ check, so it must keep working.
 - **Tests are slow** — The first run loads `sentence-transformers` and Chroma. Subsequent runs use the cached singleton.
 - **Mypy errors from upstream stubs** — Prefer `# type: ignore[...]` with a comment over disabling strict mode.
 - **GraphRAG returns no results** — Run `python scripts/reindex.py` to rebuild the knowledge base.
-- **No LLM output / canned text** — The Architect seat needs `ANTHROPIC_API_KEY` in `.env`; without it that seat runs `StubLLM` and the console shows a `NO KEY` chip. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
+- **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
 - **Graph tab is empty** — Run `python scripts/reindex.py` (or press Reindex project on the Corpus tab). A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.

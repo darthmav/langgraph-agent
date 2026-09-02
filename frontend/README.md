@@ -141,8 +141,9 @@ Port: `PORT=3000 python serve.py`.
 **Graph tab is empty** — run `python scripts/reindex.py`, or press *Reindex
 project* on the Corpus tab. Check `rag_stats` reports non-zero nodes.
 
-**Every seat shows NO KEY** — `ANTHROPIC_API_KEY` is unset for the Architect;
-for the Ollama seats, the daemon is down or not signed in (`ollama signin`).
+**A seat shows NO KEY** — it is pointed at Anthropic or OpenAI and that
+provider's key is unset. The default seats are all Ollama; if those are the
+ones failing, the daemon is down or not signed in (`ollama signin`).
 
 **Server won't start** — port in use; `PORT=3001 python serve.py`.
 

@@ -382,3 +382,15 @@ def test_reselecting_the_same_seat_keeps_its_failure():
 
     config._agent_llm_overrides.pop("architect", None)
     config._seat_failures.pop("architect", None)
+
+
+def test_default_seats_need_no_api_key():
+    """A fresh checkout must run without the user holding a provider key.
+
+    The Architect used to default to Anthropic, which made the entry node --
+    and so the whole run -- depend on billable credit nobody had configured.
+    """
+    from langgraph_agent.config import AGENTS, DEFAULT_SEATS
+
+    assert set(DEFAULT_SEATS) == set(AGENTS)
+    assert all(seat["provider"] == "ollama" for seat in DEFAULT_SEATS.values())

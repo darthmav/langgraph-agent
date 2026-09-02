@@ -123,7 +123,7 @@ def main():
     print("=" * 60)
     print("4-AGENT SYSTEM - FULL AUTOMATED SETUP")
     print("=" * 60)
-    print("\nDefault backend: Anthropic claude-opus-5 for the Architect seat.")
+    print("\nDefault backend: Ollama Cloud tags for all four seats.")
     print("Set ANTHROPIC_API_KEY in .env for live agent runs.\n")
 
     # Step 1: Fix GraphRAG server

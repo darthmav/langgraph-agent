@@ -2,7 +2,7 @@
 
 ## Goal
 
-Maintain `langgraph-agent` as a cloud-only 4-Agent AI system for software development experiments. Inference is cloud-only: Anthropic is the default for the Architect seat, the remaining seats run Ollama `:cloud` tags proxied to ollama.com by the local daemon, and OpenAI remains optional. The only model that runs on this machine is the `all-MiniLM-L6-v2` embedding model, which belongs to GraphRAG rather than to a seat.
+Maintain `langgraph-agent` as a cloud-only 4-Agent AI system for software development experiments. Inference is cloud-only: every seat defaults to an Ollama `:cloud` tag proxied to ollama.com by the local daemon, which holds the credentials, so no API key of your own is required. Anthropic and OpenAI remain available per seat. The only model that runs on this machine is the `all-MiniLM-L6-v2` embedding model, which belongs to GraphRAG rather than to a seat.
 
 The implementation follows the documented architecture: Architect, Planner, Researcher, Builder, a shared `AgentState`, GraphRAG read-only tools for the Researcher, filesystem/git/terminal/test tools for the Builder, and LangGraph as the only router.
 
@@ -17,7 +17,7 @@ The implementation follows the documented architecture: Architect, Planner, Rese
 
 | Component  | Default | Notes |
 |------------|---------|-------|
-| Architect  | Anthropic `claude-opus-5` | Override with `ARCHITECT_PROVIDER` / `ARCHITECT_MODEL` |
+| Architect  | Ollama `kimi-k3:cloud` | Override with `ARCHITECT_PROVIDER` / `ARCHITECT_MODEL` |
 | Planner    | Ollama `qwen3.5:397b-cloud` | Override with `PLANNER_PROVIDER` / `PLANNER_MODEL` |
 | Researcher | Ollama `gemma4:cloud` | Override with `RESEARCHER_PROVIDER` / `RESEARCHER_MODEL` |
 | Builder    | Ollama `kimi-k3:cloud` | Override with `BUILDER_PROVIDER` / `BUILDER_MODEL` |
@@ -44,7 +44,7 @@ pip install -e ".[dev]"
 
 # Copy environment template and edit
 cp .env.example .env
-# Set ANTHROPIC_API_KEY for the Architect seat; `ollama signin` for the :cloud tags.
+# No key needed for the default seats; run `ollama signin` for the :cloud tags.
 
 # Run tests (use StubLLM, no API key needed)
 python -m pytest tests/ -v
