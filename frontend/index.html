@@ -57,6 +57,23 @@ body::before{
 .tab:hover{background:#ffffff08;color:var(--ink)}
 .tab[aria-selected="true"]{background:#ffffff10;color:var(--ink)}
 #stats{margin-left:auto;display:flex;gap:14px;font:11px var(--mono);color:var(--ink-3)}
+#exit{
+  appearance:none;background:transparent;border:0;color:var(--ink-3);cursor:pointer;
+  font:400 17px/1 var(--sans);padding:2px 7px 4px;border-radius:6px;margin-left:14px;transition:.15s;
+}
+#exit:hover{background:#f8717122;color:var(--err)}
+#exit-confirm{display:none;align-items:center;gap:7px;margin-left:14px;font:11px var(--mono);color:var(--ink-2)}
+#exit-confirm.on{display:flex}
+/* The exit overlay stands in for the whole console once the server is gone:
+   every panel behind it is showing state that no longer has a backend. */
+#gone{
+  position:fixed;inset:0;z-index:9;display:flex;align-items:center;justify-content:center;
+  background:#0b0f14ee;backdrop-filter:blur(3px);text-align:center;padding:24px;
+}
+#gone b{display:block;font:600 15px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink)}
+#gone p{margin-top:10px;font:12px var(--mono);color:var(--ink-2);max-width:44ch}
+#gone p.muted{color:var(--ink-3)}
+#gone code{color:var(--accent)}
 #stats b{color:var(--ink-2);font-weight:600}
 
 #warn{
@@ -110,6 +127,7 @@ button.go{
 button.go:hover{filter:brightness(1.12)}
 button.go.ghost{background:#ffffff12;color:var(--ink-2)}
 button.go.danger{background:#b3413a;color:#fff}
+button.go.mini{font-size:10px;padding:4px 9px}
 button.go:disabled{opacity:.5;cursor:not-allowed}
 
 /* ---- graph ---- */
@@ -199,6 +217,12 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
   <button class="tab" data-p="corpus">Corpus</button>
   <button class="tab" data-p="state">State</button>
   <div id="stats"></div>
+  <div id="exit-confirm">
+    <span>A run is still in flight.</span>
+    <button class="go mini danger" id="exit-yes">Stop &amp; exit</button>
+    <button class="go mini ghost" id="exit-no">Cancel</button>
+  </div>
+  <button id="exit" title="Shut down the console and the server">&times;</button>
 </div>
 
 <div id="warn"></div>
@@ -287,7 +311,11 @@ const ROLE_COLOR = {architect:"#f2b544", planner:"#4ea3ff", researcher:"#76d13a"
 
 /* ---------- transport ---------- */
 let online = true;
-function goOffline(){ if(!online) return; online = false; $("#pulse").classList.add("off"); banner("Backend not reachable — is <code>python serve.py</code> still running?"); }
+// Once this is set the backend is expected to go away, so every poller and
+// every offline warning stands down: they would otherwise paint "backend not
+// reachable" over the notice explaining that we asked it to leave.
+let EXITING = false;
+function goOffline(){ if(EXITING || !online) return; online = false; $("#pulse").classList.add("off"); banner("Backend not reachable — is <code>python serve.py</code> still running?"); }
 function goOnline(){ if(online) return; online = true; $("#pulse").classList.remove("off"); banner(""); }
 function banner(html){ const w = $("#warn"); w.innerHTML = html; w.style.display = html ? "block" : "none"; }
 
@@ -652,6 +680,64 @@ async function stopRun(){
   }
 }
 
+/* ---------- exit ---------- */
+function armExitConfirm(on){
+  $("#exit-confirm").classList.toggle("on", !!on);
+  $("#exit").style.visibility = on ? "hidden" : "visible";
+}
+
+function exitNotice(title, detail, muted){
+  let gone = $("#gone");
+  if(!gone){
+    gone = document.createElement("div");
+    gone.id = "gone";
+    document.body.appendChild(gone);
+  }
+  gone.innerHTML = `<div><b>${esc(title)}</b><p>${esc(detail)}</p>`
+    + (muted ? `<p class="muted">${muted}</p>` : "")
+    + `</div>`;
+}
+
+const RELAUNCH = `Run <code>./launch_console.sh</code> to start it again.`;
+
+// The server stops answering when it goes, so its silence is the confirmation
+// that the exit worked -- there is no last reply to wait for.
+async function waitForExit(){
+  for(let i = 0; i < 600; i++){
+    await new Promise(r => setTimeout(r, 500));
+    try{ await rpc("status", {}, true); }
+    catch(e){ exitNotice("Console closed", "The server has stopped.", RELAUNCH); return; }
+  }
+}
+
+async function requestExit(stopFirst){
+  let r;
+  try{
+    r = await rpc("shutdown", {stop_first: !!stopFirst}, true);
+  }catch(e){
+    // The socket can die before the reply lands, which is the exit happening.
+    exitNotice("Console closed", "The server has stopped.", RELAUNCH);
+    EXITING = true;
+    return;
+  }
+
+  if(!r.exiting){
+    // A run started between the click and the call. Ask rather than assume.
+    armExitConfirm(true);
+    return;
+  }
+
+  EXITING = true;
+  clearInterval(CURRENT.timer); CURRENT.timer = null;
+  if(r.running){
+    exitNotice("Closing…", r.detail,
+      "Nothing in flight is abandoned, so this can take up to a minute. The run's state is saved before the server goes.");
+    waitForExit();
+  }else{
+    exitNotice("Console closed", "The server has stopped.", RELAUNCH);
+  }
+}
+
 async function run(){
   if(CURRENT.inflight) return;
   const goal = $("#eng-prompt").value.trim();
@@ -843,12 +929,18 @@ async function reattach(){
 
 $("#eng-send").onclick = () => run();
 $("#eng-stop").onclick = () => stopRun();
+// A run in flight is the one case worth a question: exiting through it means
+// stopping it, and the operator should say so rather than discover it.
+$("#exit").onclick = () => CURRENT.inflight ? armExitConfirm(true) : requestExit(false);
+$("#exit-yes").onclick = () => { armExitConfirm(false); requestExit(true); };
+$("#exit-no").onclick = () => armExitConfirm(false);
 $("#eng-prompt").onkeydown = e => {
   if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); run(); }
 };
 
 /* ---------- polling ---------- */
 async function poll(quiet){
+  if(EXITING) return;
   try{
     const [st, stats] = await Promise.all([
       rpc("status", {}, true),

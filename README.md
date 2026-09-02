@@ -47,6 +47,11 @@ that snapshot in `runs/last_run.json` — so a reload, or a run that died on a
 failing seat, still has something to show. Reloading during a run reattaches to
 it, Stop included.
 
+The **×** in the top right shuts down the console and the server, the same way
+Ctrl+C does. With a run in flight it asks first, then stops the run and waits
+for it to write its snapshot before the process goes — so exiting mid-run is as
+recoverable as stopping one.
+
 The **expect failures** checkbox is unchanged by this. It excuses a file the run
 *meant* to fail, which is still executed and still reported; a file the stop
 prevented anyone from running is unproven rather than expected, so it goes on

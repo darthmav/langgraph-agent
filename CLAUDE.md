@@ -176,6 +176,12 @@ threads while it sits there. Only one run may be in flight: a second `run_goal`
 is refused rather than allowed to clobber `_run_progress`, which has always been
 a single global.
 
+`shutdown` is the console's exit button. `serve_forever` runs on its own thread
+so the main thread can wait on both ways out — Ctrl+C and `_shutdown_requested`.
+Calling `server.shutdown()` from the request thread that asked for it would
+deadlock: it blocks until the serve loop stops, and that loop is what has to
+deliver the reply.
+
 ## Important Notes
 
 - Do not let every agent call every tool; the specialization is the whole point.
@@ -251,6 +257,12 @@ a single global.
   to fail, still executed and still reported, not for a gap in the evidence. So
   ticking the box cannot make a stopped run look finished. The console says so
   explicitly in the recovery block rather than leaving it to be inferred.
+- **The exit button never kills a run by surprise.** `shutdown` without
+  `stop_first` refuses while a run is in flight and says what is running; with
+  it, the run is stopped through the ordinary emergency stop and the exit is
+  *deferred to the run's own `finally`*. That deferral is the whole point:
+  exiting the moment the stop is requested would race the snapshot, and a run
+  stopped only so the console could close is exactly the one worth keeping.
 - **Three nested timeouts, and none of them is redundant.**
   `LLM_TIMEOUT_SECONDS` (config.py) bounds one provider call at the socket —
   each provider spells it differently (`client_kwargs={"timeout":…}` for

@@ -98,7 +98,7 @@ echo "Opening browser..."
 open_browser "${URL}" || true
 
 echo ""
-echo "Press Ctrl+C to stop"
+echo "Press Ctrl+C to stop, or use the console's exit button (top right)"
 echo "============================================"
 echo ""
 

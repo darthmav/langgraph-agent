@@ -58,6 +58,10 @@ instead, Stop included.
 *expect failures* is unrelated to Stop and stays what it was: it excuses a file
 the run meant to fail, not one nobody executed.
 
+The *×* in the top right ends the session: it shuts down `serve.py` itself, not
+just the page. With a run going it asks first, then stops the run and lets it
+save its state before the server exits.
+
 **Graph** — the knowledge graph. *Sweep all* walks every document through
 `query_graph` and dedupes the edges; *Trace* centres on one node. Documents are
 green with permanent labels, entities are blue with labels on hover (they

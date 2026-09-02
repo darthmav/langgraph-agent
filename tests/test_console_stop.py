@@ -23,11 +23,15 @@ def _isolate_run_state(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(serve, "LAST_RUN_PATH", tmp_path / "runs" / "last_run.json")
     monkeypatch.setattr(serve, "_last_run_snapshot", None)
+    serve._shutdown_requested.clear()
+    serve._exit_after_run.clear()
     with serve._run_lock:
         serve._run_progress.update(
             running=False, goal="", messages=[], node="", run_id="", stopping=False
         )
     yield
+    serve._shutdown_requested.clear()
+    serve._exit_after_run.clear()
     with serve._run_lock:
         serve._run_progress.update(running=False, run_id="", stopping=False)
 
@@ -222,3 +226,71 @@ def test_expect_failures_rides_through_a_stopped_run(monkeypatch):
 
     assert result["expect_failures"] is True
     assert serve.rpc_last_run({})["snapshot"]["expect_failures"] is True
+
+
+# ---------------------------------------------------------------------------
+# The exit button
+# ---------------------------------------------------------------------------
+
+
+def test_exiting_with_nothing_running_is_immediate():
+    answer = serve.rpc_shutdown({})
+
+    assert answer["exiting"] is True
+    assert answer["running"] is False
+    assert serve._shutdown_requested.is_set()
+
+
+def test_exiting_will_not_kill_a_run_by_surprise(monkeypatch):
+    """Asked to exit mid-run, the server says what is running instead."""
+    seen = {}
+
+    def look():
+        seen["answer"] = serve.rpc_shutdown({})
+        seen["armed"] = serve._shutdown_requested.is_set()
+
+    monkeypatch.setattr(
+        serve, "graph", _FakeGraph(["architect", "planner"], during_step=look)
+    )
+    result = serve.rpc_run_goal({"goal": "a long job"})
+
+    assert seen["answer"]["exiting"] is False
+    assert seen["answer"]["goal"] == "a long job"
+    assert seen["armed"] is False
+    # The run was left alone: it finished on its own terms.
+    assert result["stopped"] is False
+
+
+def test_an_exit_through_a_run_waits_for_its_state(monkeypatch):
+    """The exit is deferred to the run's finally, which is what saves the work.
+
+    Exiting the moment the stop is requested would race the snapshot, and a run
+    stopped only so the console could close is exactly the one worth keeping.
+    """
+    seen = {}
+
+    def ask_to_exit():
+        if "answer" in seen:
+            return
+        seen["answer"] = serve.rpc_shutdown({"stop_first": True})
+        # Deferred, not immediate: the run has not handed anything back yet.
+        seen["armed_during_run"] = serve._shutdown_requested.is_set()
+
+    monkeypatch.setattr(
+        serve,
+        "graph",
+        _FakeGraph(["architect", "planner", "builder"], during_step=ask_to_exit),
+    )
+    result = serve.rpc_run_goal({"goal": "a long job"})
+
+    assert seen["answer"]["exiting"] is True
+    assert seen["answer"]["running"] is True
+    assert seen["armed_during_run"] is False
+
+    # Stopped through the ordinary emergency stop, so the state came back...
+    assert result["stopped"] is True
+    assert "[Architect] did work" in result["messages"]
+    # ...the snapshot is on disk...
+    assert serve.LAST_RUN_PATH.exists()
+    # ...and only then does the process get to go.
+    assert serve._shutdown_requested.is_set()

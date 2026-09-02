@@ -313,6 +313,66 @@ def rpc_last_run(_: dict[str, Any]) -> dict[str, Any]:
     return {"snapshot": _load_snapshot()}
 
 
+# Set when the console's exit button asks the process to end; the main thread
+# waits on it, exactly as it waits on Ctrl+C.
+_shutdown_requested = threading.Event()
+
+# Set when an exit has to wait for the run in flight to hand its state back
+# first. The run's own `finally` is what then requests the shutdown, which is
+# what guarantees the snapshot is on disk before the process goes.
+_exit_after_run = threading.Event()
+
+# A moment's grace between deciding to exit and closing the socket, so the
+# reply that asked for the exit reaches the browser rather than dying with the
+# connection. Small enough that the console never feels it.
+SHUTDOWN_GRACE_SECONDS = float(os.getenv("SHUTDOWN_GRACE_SECONDS", "0.5"))
+
+
+def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
+    """Exit the server -- what the console's X asks for.
+
+    A run in flight is not killed by surprise. Without `stop_first` this
+    refuses and says what is running, so the console can ask; with it, the run
+    is stopped through the ordinary emergency stop and the exit is deferred to
+    the run's own `finally`. That deferral is the point: it is what puts the
+    snapshot on disk before the process ends, so an exit mid-run is as
+    recoverable as a stop.
+    """
+    stop_first = bool(params.get("stop_first", False))
+
+    with _run_lock:
+        running = bool(_run_progress["running"])
+        goal = str(_run_progress["goal"])
+
+    if running and not stop_first:
+        return {
+            "exiting": False,
+            "running": True,
+            "goal": goal,
+            "detail": (
+                "A run is still in flight. Stop it first, or ask again with "
+                "stop_first to stop it and exit once its state is saved."
+            ),
+        }
+
+    if running:
+        RUN_CONTROL.stop("", "Stopped so the console could exit.")
+        with _run_lock:
+            _run_progress["stopping"] = True
+        _exit_after_run.set()
+        return {
+            "exiting": True,
+            "running": True,
+            "detail": (
+                "Stopping the run. The server exits once it has handed its "
+                "state back and written its snapshot."
+            ),
+        }
+
+    _shutdown_requested.set()
+    return {"exiting": True, "running": False, "detail": "The server is exiting."}
+
+
 def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     """Run a goal through the four-agent loop and return the final state."""
     run_id = uuid.uuid4().hex
@@ -463,6 +523,10 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             _run_progress["running"] = False
             _run_progress["stopping"] = False
             _run_progress["run_id"] = ""
+        # An exit that was waiting on this run happens now, after the snapshot
+        # above -- which is the whole reason it waited.
+        if _exit_after_run.is_set():
+            _shutdown_requested.set()
 
 
 RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -479,6 +543,7 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "run_progress": rpc_run_progress,
     "stop_run": rpc_stop_run,
     "last_run": rpc_last_run,
+    "shutdown": rpc_shutdown,
 }
 
 # Methods the console polls on a timer. Logging these buries everything else.
@@ -583,7 +648,8 @@ class Handler(SimpleHTTPRequestHandler):
         print(f"[API] {request_line}")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Serve until Ctrl+C or the console asks to exit."""
     # launch_console.sh redirects this process to a log file and tails it, and
     # a redirected stdout is block-buffered -- so the progress and timing lines
     # sat in an 8KB buffer instead of appearing as they happened, which is the
@@ -595,15 +661,37 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "8080"))
     print(f"Serving at http://localhost:{port}")
-    print("Press Ctrl+C to stop")
-    server = None
+    print("Press Ctrl+C to stop, or use the console's exit button")
+
+    # Threaded: a run takes as long as four cloud models take, and a
+    # single-threaded server would stall every status poll behind it.
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    # `serve_forever` moves off the main thread so the main thread is free to
+    # wait on both ways out: Ctrl+C, and the console asking to exit. Calling
+    # `shutdown()` from the request thread that asked for it would deadlock --
+    # it blocks until the serve loop stops, and that loop is what has to
+    # deliver the reply.
+    threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
+
+    asked_from_console = False
     try:
-        # Threaded: a run takes as long as four cloud models take, and a
-        # single-threaded server would stall every status poll behind it.
-        server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-        server.serve_forever()
+        # Waited in slices rather than indefinitely: an untimed wait swallows
+        # the KeyboardInterrupt this loop exists to catch.
+        while not _shutdown_requested.wait(0.5):
+            pass
+        asked_from_console = True
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        pass
+
+    print("\nShutting down (from the console)..." if asked_from_console else "\nShutting down...")
+    if asked_from_console:
+        # Let the reply that asked for this reach the browser.
+        time.sleep(SHUTDOWN_GRACE_SECONDS)
+    try:
+        server.shutdown()
     finally:
-        if server:
-            server.shutdown()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
