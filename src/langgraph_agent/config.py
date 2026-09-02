@@ -87,6 +87,20 @@ AGENT_LLM_OPTIONS: list[dict[str, str]] = [
 ]
 
 
+# How long one call to a seat may take before the client gives up. Every
+# provider client defaults to no deadline at all, so a stalled cloud call
+# blocked `llm.invoke` forever -- and RUN_BUDGET_SECONDS could not end it,
+# because that is checked between graph supersteps and a node in flight never
+# reaches a superstep boundary. A run could therefore hang indefinitely inside
+# a single node with the console still naming the previous one.
+#
+# This bounds the socket, not the call: for Ollama it becomes an httpx timeout
+# on a streamed response, so it fires on a connection that goes quiet, not on a
+# model that trickles tokens forever. The node-level deadline in nodes.py
+# covers that second case; the two are not redundant.
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+
+
 def _ollama_base_url() -> str:
     """Where the local Ollama daemon listens.
 
@@ -149,6 +163,11 @@ def _failure_reason(exc: Exception) -> str:
         return "API key rejected"
     if "rate limit" in lowered:
         return "Rate limited"
+    # httpx raises ReadTimeout with an empty message, so the class name is the
+    # only thing that identifies it -- without this a timed-out seat showed a
+    # blank chip, which reads as "fine" rather than "gave up after 120s".
+    if "timeout" in lowered or "timed out" in lowered or "Timeout" in type(exc).__name__:
+        return f"No response within {int(LLM_TIMEOUT_SECONDS)}s"
     if "not found" in lowered and "model" in lowered:
         return "Model not available on this account"
     if "connect" in lowered or "connection" in lowered:
@@ -243,6 +262,7 @@ def get_llm(
     temperature: float = 0.1,
     base_url: str | None = None,
     api_key: str | None = None,
+    timeout: float | None = None,
 ) -> Any:
     """Get an LLM instance.
 
@@ -253,6 +273,9 @@ def get_llm(
         temperature: Sampling temperature, where the model accepts one.
         base_url: Optional API base URL override.
         api_key: Optional API key override.
+        timeout: Seconds one call may take; `LLM_TIMEOUT_SECONDS` if omitted.
+                 Each provider spells this differently, hence the three
+                 separate keyword names below.
 
     Returns:
         Chat model instance, or `StubLLM` when the provider needs a key and
@@ -265,16 +288,20 @@ def get_llm(
         OPENAI_API_KEY, OPENAI_MODEL  (optional)
     """
     provider = provider or _detect_provider(model)
+    timeout = LLM_TIMEOUT_SECONDS if timeout is None else timeout
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
         # No key: the daemon holds the ollama.com credentials for `:cloud`
         # tags, so there is nothing for this process to authenticate with.
+        # `client_kwargs` reaches the httpx client the ollama SDK builds; there
+        # is no `timeout` field on ChatOllama itself.
         return ChatOllama(
             model=str(model or os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud")),
             temperature=temperature,
             base_url=base_url or _ollama_base_url(),
+            client_kwargs={"timeout": timeout},
         )
 
     if provider == "anthropic":
@@ -287,6 +314,7 @@ def get_llm(
         kwargs: dict[str, Any] = {
             "model": model_name,
             "api_key": SecretStr(key),
+            "default_request_timeout": timeout,
         }
         if _accepts_temperature("anthropic", model_name):
             kwargs["temperature"] = temperature
@@ -305,6 +333,7 @@ def get_llm(
         "model": str(model_name),
         "temperature": temperature,
         "api_key": SecretStr(key),
+        "request_timeout": timeout,
     }
     if base_url:
         kwargs["base_url"] = base_url

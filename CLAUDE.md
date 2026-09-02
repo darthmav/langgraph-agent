@@ -213,6 +213,49 @@ check, so it must keep working.
   than per-file because the Builder chooses the filenames, so a run with it on
   will not block on an unintended failure either — which is why the failure
   stays visible in the report instead of being dropped. Defaults off.
+- **Three nested timeouts, and none of them is redundant.**
+  `LLM_TIMEOUT_SECONDS` (config.py) bounds one provider call at the socket —
+  each provider spells it differently (`client_kwargs={"timeout":…}` for
+  Ollama, `default_request_timeout` for Anthropic, `request_timeout` for
+  OpenAI), so a missed keyword silently restores an unbounded wait on that
+  provider alone. `NODE_DEADLINE_SECONDS` (nodes.py) bounds the Researcher's
+  whole turn; it is what catches a model that streams slowly but never stops,
+  and a node making several calls that each finish just inside their own limit.
+  `BUILDER_DEADLINE_SECONDS` is the Builder's larger equivalent — that node
+  legitimately makes up to `MAX_BUILDER_TOOL_TURNS` round trips, some of which
+  run tests.
+  `RUN_BUDGET_SECONDS` (serve.py) bounds the run, but is checked **between
+  graph supersteps** — a node in flight never reaches a superstep boundary, so
+  it cannot end a hung node. That gap is the whole reason for the other two:
+  before them a stalled seat hung a run indefinitely while the console still
+  named the *previous* node as current, and `_SeatLLM` recorded nothing because
+  a hang raises nothing.
+- **The Builder's deadline may never abandon a tool call.** Only the model's
+  own call is wrapped in `_with_deadline` — discarding a half-received response
+  costs a turn and nothing else. The tool calls underneath it write files,
+  stage commits and run commands, so they always run to completion and the
+  budget is re-checked at the top of the next turn instead. A worker abandoned
+  mid-`filesystem_write` would go on writing into the project after the node
+  returned, which is worse than the hang the deadline exists to stop.
+- **A file the deadline stopped us running is `unverified`, not `ok`.** It
+  reads `NOT RUN` in the report, joins `failed_verification` so the next cycle
+  re-runs it, and blocks approval even under `expect_failures` — that opt-out
+  is for a file the run *meant* to fail, which is still executed and still
+  reported, not for one nobody executed. `VERIFY_RESERVE_SECONDS` is held back
+  from the tool loop (plus whatever the loop leaves unspent) so the pass
+  normally gets to run at all. `MIN_VERIFY_SLICE_SECONDS` is the floor below
+  which a file is left unrun rather than started: `min(VERIFY_TIMEOUT_SECONDS,
+  remaining)` rounded down to a zero-second timeout, and a working file came
+  back `FAILED` with "timed out after 0 seconds" — a false accusation that also
+  set the "files that do not run" blocker.
+- Work run under `_with_deadline` **must not write to state.** The abandoned
+  worker cannot be cancelled — Python cannot interrupt a thread blocked on a
+  socket — so it may finish long after the node returned and would land its
+  result in a state the graph had moved past. `_gather_research` returns
+  `(findings, status)` and `researcher_node` applies it; keep that shape for
+  any node put under a deadline. The worker is a bare daemon thread on purpose:
+  `ThreadPoolExecutor`'s atexit hook joins its non-daemon threads, so one
+  abandoned worker would hold up interpreter shutdown.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.

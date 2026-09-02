@@ -807,3 +807,303 @@ def test_a_real_blocker_starting_with_none_survives(text):
     from langgraph_agent.nodes import _clean_blockers
 
     assert _clean_blockers(text) == text
+
+
+# --- Timeouts -------------------------------------------------------------
+#
+# A stalled seat used to hang a run outright. RUN_BUDGET_SECONDS is checked
+# between graph supersteps, so a node that never returns never reaches the
+# check, and no provider client carried a request timeout of its own.
+
+
+def test_a_hung_researcher_gives_up_and_routes_to_builder(monkeypatch):
+    """The node returns on its deadline instead of blocking the run forever."""
+    import threading
+
+    from langgraph_agent import nodes
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _hang(state):
+        entered.set()
+        release.wait(30)  # released in the finally below, never on its own
+        return "should never be used", "ready_for_builder"
+
+    monkeypatch.setattr(nodes, "_gather_research", _hang)
+    monkeypatch.setattr(nodes, "NODE_DEADLINE_SECONDS", 0.5)
+
+    state = initial_state("Research something the seat will not answer")
+    state["plan"] = "1. Look it up"
+
+    try:
+        result = nodes.researcher_node(state)
+    finally:
+        release.set()
+
+    assert entered.is_set()                                   # it really ran
+    assert result["research_status"] == "no_relevant_knowledge"
+    assert result["next_agent"] == "Builder"                  # run continues
+    assert "did not finish" in result["research"]
+    assert any("No response within" in m for m in result["messages"])
+
+
+def test_a_late_researcher_cannot_write_into_state(monkeypatch):
+    """The abandoned worker must not land its result after the node returned.
+
+    It cannot be cancelled -- Python cannot interrupt a thread blocked on a
+    socket -- so the only protection is that `_gather_research` returns its
+    findings rather than writing them, and the timed-out caller drops them.
+    """
+    import threading
+
+    from langgraph_agent import nodes
+
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow(state):
+        release.wait(30)
+        finished.set()
+        return "LATE FINDINGS", "ready_for_builder"
+
+    monkeypatch.setattr(nodes, "_gather_research", _slow)
+    monkeypatch.setattr(nodes, "NODE_DEADLINE_SECONDS", 0.3)
+
+    state = initial_state("Research something slow")
+    result = nodes.researcher_node(state)
+
+    release.set()
+    assert finished.wait(10)          # the worker did complete, just too late
+    assert "LATE FINDINGS" not in result["research"]
+    assert "LATE FINDINGS" not in state["research"]
+
+
+def test_a_failing_researcher_still_raises(monkeypatch):
+    """A seat that errors is not a timeout and must not be swallowed.
+
+    `_SeatLLM` records the reason from the exception; converting it into a
+    quiet "no research" would take the failing seat off the console.
+    """
+    from langgraph_agent import nodes
+
+    def _boom(state):
+        raise RuntimeError("credit balance too low")
+
+    monkeypatch.setattr(nodes, "_gather_research", _boom)
+
+    with pytest.raises(RuntimeError, match="credit balance"):
+        nodes.researcher_node(initial_state("Research something"))
+
+
+def test_every_provider_client_carries_a_request_timeout(monkeypatch):
+    """No seat may be built without a deadline, whatever the provider.
+
+    Each spells it differently, so a single missed keyword silently restores
+    the unbounded wait for that one provider only.
+    """
+    from langgraph_agent import config
+
+    monkeypatch.setattr(config, "LLM_TIMEOUT_SECONDS", 42.0)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    ollama = config.get_llm(provider="ollama", model="kimi-k3:cloud")
+    assert ollama._client._client.timeout.read == 42.0
+
+    anthropic = config.get_llm(provider="anthropic", model="claude-sonnet-5")
+    assert anthropic.default_request_timeout == 42.0
+
+    openai = config.get_llm(provider="openai", model="gpt-4o-mini")
+    assert openai.request_timeout == 42.0
+
+
+def test_a_timed_out_seat_reads_as_a_failure_not_a_blank(monkeypatch):
+    """httpx raises ReadTimeout with an empty message.
+
+    Left alone that produced an empty chip, which reads as a healthy seat.
+    """
+    import httpx
+
+    from langgraph_agent.config import _failure_reason
+
+    assert "No response within" in _failure_reason(httpx.ReadTimeout(""))
+
+
+# --- The Builder's deadline -----------------------------------------------
+#
+# Unlike the Researcher, this node has side effects: abandoning a worker
+# mid-write would keep writing into the project after the node returned. So the
+# model's call is bounded, the tool calls underneath it always finish, and the
+# budget is re-checked between turns.
+
+
+class _SlowToolCallingLLM(_ToolCallingLLM):
+    """A Builder seat whose *model* call hangs on the turn after its write."""
+
+    def __init__(self, path, release):
+        super().__init__(path)
+        self._release = release
+
+    def invoke(self, messages):
+        if self.calls >= 1:
+            self._release.wait(30)
+        return super().invoke(messages)
+
+
+def test_a_hung_builder_keeps_the_files_it_already_wrote(monkeypatch, tmp_path):
+    """The deadline ends the turn; it does not discard completed work."""
+    import threading
+
+    from langgraph_agent import nodes
+
+    target = tmp_path / "written.py"
+    release = threading.Event()
+    llm = _SlowToolCallingLLM(target, release)
+    monkeypatch.setattr(nodes, "get_agent_llm", lambda agent, temperature=0.1: llm)
+    monkeypatch.setattr(nodes, "BUILDER_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(nodes, "VERIFY_RESERVE_SECONDS", 0.5)
+
+    state = initial_state("Write a file")
+    state["plan"] = "1. Write it"
+
+    try:
+        result = nodes.builder_node(state)
+    finally:
+        release.set()
+
+    # The write completed before the hang, so it counts.
+    assert str(target) in result["files_changed"]
+    assert target.exists()
+    assert "deadline" in result["blockers"]
+    assert not any("Implementation complete" in m for m in result["messages"])
+
+
+def test_a_tool_call_is_never_abandoned_midway(monkeypatch, tmp_path):
+    """A slow tool runs to completion even past the deadline.
+
+    Only the model's own call may be abandoned. A worker cut off inside
+    `filesystem_write` would go on writing into the project after the node had
+    returned, which is worse than the hang the deadline exists to stop.
+    """
+    import time
+
+    from langgraph_agent import nodes
+
+    target = tmp_path / "slow.py"
+    started = []
+    finished = []
+
+    real_call = nodes._call_mcp_tool_sync
+
+    def _slow_call(name, args):
+        if name == "filesystem_write":
+            started.append(name)
+            time.sleep(1.2)          # outlives the deadline set below
+            result = real_call(name, args)
+            finished.append(name)
+            return result
+        return real_call(name, args)
+
+    monkeypatch.setattr(nodes, "_call_mcp_tool_sync", _slow_call)
+    monkeypatch.setattr(
+        nodes, "get_agent_llm", lambda agent, temperature=0.1: _ToolCallingLLM(target)
+    )
+    monkeypatch.setattr(nodes, "BUILDER_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(nodes, "VERIFY_RESERVE_SECONDS", 0.5)
+
+    state = initial_state("Write a file slowly")
+    result = nodes.builder_node(state)
+
+    assert started and finished          # it ran all the way through
+    assert str(target) in result["files_changed"]
+
+
+def test_an_unverified_file_does_not_count_as_passing(tmp_path):
+    """A file the deadline stopped us running is unproven, not working."""
+    from langgraph_agent import nodes
+
+    good = tmp_path / "fine.py"
+    good.write_text("print('fine')\n")
+
+    log = []
+    spent = nodes._Deadline(0.0)         # already expired
+    results = nodes._verify_written_files([str(good)], log, spent)
+
+    assert results == [
+        (str(good), "unverified", nodes.VERIFY_DEADLINE_SKIP_REASON)
+    ]
+    assert "not run (deadline)" in log[0]
+
+
+def test_a_sliver_of_time_left_does_not_fail_a_working_file(tmp_path):
+    """A slice too small to run in must read as unrun, not as broken.
+
+    `min(60, remaining)` rounded down to a zero-second timeout, so a perfectly
+    good file came back FAILED with "timed out after 0 seconds" and set the
+    blocker that says the file does not run.
+    """
+    from langgraph_agent import nodes
+
+    good = tmp_path / "fine.py"
+    good.write_text("print('fine')\n")
+
+    log = []
+    sliver = nodes._Deadline(nodes.MIN_VERIFY_SLICE_SECONDS / 2)
+    statuses = [status for _, status, _ in nodes._verify_written_files(
+        [str(good)], log, sliver
+    )]
+
+    assert statuses == ["unverified"]
+
+
+def _builder_with_unverified_file(monkeypatch, tmp_path, **state_overrides):
+    """Run builder_node with the verification pass reporting one unrun file.
+
+    The result is forced rather than produced by racing the real clock: making
+    the tool loop finish while leaving verification under its floor takes
+    timings this suite cannot hold steady. What is under test here is the
+    wiring around that result, not the clock, which
+    `test_an_unverified_file_does_not_count_as_passing` covers directly.
+    """
+    from langgraph_agent import nodes
+
+    target = tmp_path / "written.py"
+    monkeypatch.setattr(
+        nodes, "get_agent_llm", lambda agent, temperature=0.1: _ToolCallingLLM(target)
+    )
+    monkeypatch.setattr(
+        nodes,
+        "_verify_written_files",
+        lambda paths, log, deadline=None: [
+            (str(target), "unverified", nodes.VERIFY_DEADLINE_SKIP_REASON)
+        ],
+    )
+
+    state = initial_state("Write a file")
+    state.update(state_overrides)
+    return str(target), nodes.builder_node(state)
+
+
+def test_an_unverified_file_blocks_and_is_carried(monkeypatch, tmp_path):
+    """It reaches failed_verification so the next cycle re-runs it.
+
+    Clearing by omission is the failure the verification pass exists to
+    prevent, and a file nobody executed is the purest case of it.
+    """
+    target, result = _builder_with_unverified_file(monkeypatch, tmp_path)
+
+    assert result["failed_verification"] == [target]
+    assert "Not executed before the deadline" in result["blockers"]
+    assert "NOT RUN" in result["builder_report"]
+    assert not any("Implementation complete" in m for m in result["messages"])
+
+
+def test_expect_failures_does_not_excuse_an_unverified_file(monkeypatch, tmp_path):
+    """The opt-out covers a file meant to fail, not one never executed."""
+    target, result = _builder_with_unverified_file(
+        monkeypatch, tmp_path, expect_failures=True
+    )
+
+    assert result["failed_verification"] == [target]
+    assert "Not executed before the deadline" in result["blockers"]
