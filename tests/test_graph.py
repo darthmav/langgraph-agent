@@ -42,6 +42,7 @@ def initial_state(goal: str) -> AgentState:
         "blockers": "",
         "files_changed": [],
         "failed_verification": [],
+        "expect_failures": False,
         "step_count": 0,
     }
 
@@ -619,3 +620,53 @@ def test_a_fixed_file_clears_its_failure(monkeypatch, tmp_path):
 
     assert result["failed_verification"] == []
     assert result["blockers"] == ""
+
+
+def test_expect_failures_lets_the_gate_approve(monkeypatch):
+    """With the opt-out set, a failing file no longer overrules the Architect."""
+    from langgraph_agent.nodes import architect_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _ApprovingLLM(),
+    )
+
+    state = initial_state("Write a deliberate fixture")
+    state["plan"] = "1. Write it"
+    state["builder_report"] = "wrote it"
+    state["failed_verification"] = ["fixture.py"]
+    state["expect_failures"] = True
+
+    result = architect_node(state)
+
+    assert result["verdict"] == Verdict.APPROVED.value
+    assert "blocked" not in result["messages"][-1]
+    # The failure is not hidden -- it stays in state for the report.
+    assert result["failed_verification"] == ["fixture.py"]
+
+
+def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
+    """The opt-out suppresses the block, not the check."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "fixture.py"
+    llm = _WritesFileLLM(target, "assert False, 'by design'\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    state = initial_state("Write a deliberate fixture")
+    state["expect_failures"] = True
+    result = builder_node(state)
+
+    # Executed and reported...
+    assert "FAILED" in result["builder_report"]
+    assert result["failed_verification"] == [str(target)]
+    assert "expected for this run" in result["messages"][-1]
+    # ...but not treated as a blocker.
+    assert result["blockers"] == ""
+
+
+def test_expect_failures_defaults_off():
+    """The strict behaviour is what you get without asking for otherwise."""
+    assert initial_state("anything")["expect_failures"] is False

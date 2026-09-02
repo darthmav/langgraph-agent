@@ -42,6 +42,7 @@ def run_example(goal: str, max_steps: int = 8):
         "blockers": "",
         "files_changed": [],
         "failed_verification": [],
+        "expect_failures": False,
         "step_count": 0,
     }
 

@@ -50,7 +50,13 @@ class AgentState(TypedDict):
         files_changed: List of file paths modified by Builder
         failed_verification: Files the Builder wrote that did not run. Set by
             the Builder every pass, so it clears once a file is fixed. A
-            non-empty list blocks the Architect from approving.
+            non-empty list blocks the Architect from approving, unless
+            expect_failures is set.
+        expect_failures: Per-run opt-out, set by the caller and never by an
+            agent. A file that does not run is still executed, still reported
+            and still listed in failed_verification -- it just stops blocking
+            approval and sets no blocker. For goals whose product is a failing
+            file: a deliberate fixture, an expected-to-fail test.
         step_count: Number of steps taken (for loop limit)
     """
 
@@ -66,4 +72,5 @@ class AgentState(TypedDict):
     blockers: str
     files_changed: list[str]
     failed_verification: list[str]
+    expect_failures: bool
     step_count: int

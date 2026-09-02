@@ -453,6 +453,11 @@ def architect_node(state: AgentState) -> AgentState:
     # Note the cost: a goal that legitimately calls for a failing file can no
     # longer be approved, and will run to MAX_STEPS before the ceiling ends it.
     blocked = list(state.get("failed_verification") or [])
+    if state.get("expect_failures"):
+        # The caller asked for a failing file, so a failure is the product.
+        # The list stays in state and the report still shows it; it just does
+        # not overrule the gate.
+        blocked = []
     overridden = bool(blocked) and state["verdict"] == Verdict.APPROVED.value
     if overridden:
         state["verdict"] = Verdict.REVISE.value
@@ -956,8 +961,11 @@ def builder_node(state: AgentState) -> AgentState:
         blockers = parsed_blockers
 
     # A failed verification outranks whatever the model concluded: it wrote a
-    # file that does not run, and the Architect must see that as unfinished.
-    if failed:
+    # file that does not run, and the Architect must see that as unfinished --
+    # unless the run was asked for one, in which case it is the product, not a
+    # defect. It is still executed and still reported either way.
+    expected = bool(state.get("expect_failures"))
+    if failed and not expected:
         blockers = "Files that do not run: " + "; ".join(
             f"{path} ({detail.splitlines()[-1] if detail else 'no output'})"
             for path, detail in failed
@@ -979,8 +987,9 @@ def builder_node(state: AgentState) -> AgentState:
     # complete" beside a file that does not run is the same false claim this
     # pass exists to catch, and it is what the Architect reads in state.
     if failed:
+        suffix = " (expected for this run)" if expected else ""
         summary = (
-            f"Wrote {len(files_changed)} file(s); {len(failed)} do not run"
+            f"Wrote {len(files_changed)} file(s); {len(failed)} do not run{suffix}"
         )
     else:
         summary = f"Implementation complete. Files: {len(files_changed)}"

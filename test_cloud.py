@@ -33,6 +33,7 @@ state: AgentState = {
     "blockers": "",
     "files_changed": [],
     "failed_verification": [],
+    "expect_failures": False,
     "step_count": 0,
 }
 

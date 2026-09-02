@@ -115,6 +115,7 @@ Every node reads/writes `AgentState`:
     "blockers": str,
     "files_changed": list[str],
     "failed_verification": list[str],
+    "expect_failures": bool,
     "step_count": int,
 }
 ```
@@ -188,7 +189,15 @@ check, so it must keep working.
   ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot hang
   it. The cost is real: a goal that legitimately wants a failing file (a
   deliberate fixture, an expected-to-fail test) can no longer be approved and
-  will run to one of those limits.
+  will run to one of those limits — unless the run opts out.
+- **`expect_failures` is the per-run opt-out**, set by the caller (the console
+  checkbox, or `run_goal({goal, expect_failures: true})`) and never by an
+  agent. It suppresses the block, not the check: the file is still executed,
+  still reported as `FAILED`, and still listed in `failed_verification`. It
+  just stops overruling the gate and sets no blocker. It is per-run rather
+  than per-file because the Builder chooses the filenames, so a run with it on
+  will not block on an unintended failure either — which is why the failure
+  stays visible in the report instead of being dropped. Defaults off.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.
