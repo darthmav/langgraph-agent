@@ -245,6 +245,20 @@ def rpc_bottleneck(params: dict[str, Any]) -> dict[str, Any]:
     return kb_or_none.bottleneck(limit=limit)
 
 
+def rpc_topics(params: dict[str, Any]) -> dict[str, Any]:
+    """Topic communities over the corpus: the whole-corpus map.
+
+    Read-only and off the poll, for the same reasons as `bottleneck`. `k` is
+    optional; omitted, the eigengap chooses it and the answer may come back
+    `no_clear_structure` rather than a map of a corpus that has no topics.
+    """
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        raise ValueError(f"There is no corpus to cluster. {NO_CORPUS_NOTE}")
+    raw_k = params.get("k")
+    return kb_or_none.topics(k=int(raw_k) if raw_k not in (None, "") else None)
+
+
 def rpc_export_corpus(_: dict[str, Any]) -> dict[str, Any]:
     """The whole corpus as one JSON document, for the console to save.
 
@@ -733,6 +747,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
 RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "rag_stats": rpc_rag_stats,
     "bottleneck": rpc_bottleneck,
+    "topics": rpc_topics,
     "list_documents": rpc_list_documents,
     "query_graph": rpc_query_graph,
     "search_documents": rpc_search_documents,

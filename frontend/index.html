@@ -331,11 +331,14 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
               title="Download the whole corpus as one JSON file — the graph plus every chunk and its metadata. Embeddings are left out; a reindex regenerates them locally.">Export</button>
       <button class="go ghost" id="bnbtn"
               title="Find the narrowest cut in the knowledge graph and name the entities that bridge it — the terms a search should expand on when a query straddles two topic areas. Read-only; allowed while a run is in flight.">Find bridges</button>
+      <button class="go ghost" id="tpbtn"
+              title="Group the corpus into topic communities — documents together with the entities that define them. The number of topics is chosen from the eigengap, and the answer is 'no clear structure' rather than a made-up map when the corpus has none.">Topics</button>
       <button class="go danger" id="clrbtn"
               title="Empty the corpus. The files under knowledge/ stay, holding an empty store — the same shape a reindex leaves. Refused while a run is in flight.">Clear corpus</button>
       <span class="muted" id="restat"></span>
     </div>
     <div id="bridges"></div>
+    <div id="topics"></div>
     <h2>Documents</h2>
     <div class="scroll" id="docs"><div class="muted">nothing indexed</div></div>
   </section>
@@ -762,6 +765,51 @@ const BRIDGE_VERDICTS = {
     + "can miss. Not the same as 'there is none'."],
   no_graph: ["muted", "Nothing to cut."],
   unavailable: ["warn", "Could not measure — which is not the same as finding nothing."],
+};
+
+// A2 topic clustering. `no_clear_structure` is a first-class answer, not an
+// error: the eigengap always proposes some k, so a corpus with no topics still
+// gets a suggestion, and rendering that as a map would be the fabricated
+// finding this whole path exists to avoid. Per-cluster conductance is shown on
+// every row because it is the independent check -- it exposes a bad k even when
+// the caller asked for one.
+const TOPIC_VERDICTS = {
+  clustered: ["ok", "Topic communities. Each groups documents with the entities that define them."],
+  no_clear_structure: ["muted",
+    "No clear topic structure. The eigengap proposes a number of clusters for "
+    + "any corpus, including one that has none — here it did not propose it "
+    + "decisively enough to believe. Ask for a specific k to cluster anyway."],
+  no_graph: ["muted", "Nothing to cluster."],
+  unavailable: ["warn", "Could not measure — which is not the same as finding no topics."],
+};
+
+$("#tpbtn").onclick = async () => {
+  const b = $("#tpbtn"); b.disabled = true; b.textContent = "Clustering…";
+  $("#restat").textContent = ""; $("#topics").innerHTML = "";
+  try{
+    const r = await rpc("topics", {});
+    const [cls, blurb] = TOPIC_VERDICTS[r.verdict] || ["muted", r.verdict];
+    const rows = (r.clusters || []).map(c =>
+      `<tr><td>${c.documents} docs</td><td class="muted">${c.entities} ents</td>`
+      + `<td>${c.conductance === null ? "—" : c.conductance.toFixed(4)}</td>`
+      + `<td>${esc(c.top_entities.join(", "))}</td></tr>`).join("");
+    $("#topics").innerHTML =
+      `<h2>Topics</h2><div class="verdict ${cls}">${blurb}</div>`
+      + (r.verdict === "clustered"
+          ? `<div class="muted">k = <b>${r.k}</b> (${esc(r.k_source)}) `
+            + `· eigengap ${r.decisiveness === null ? "—" : r.decisiveness.toFixed(1)}x `
+            + `more decisive than the runner-up, threshold ${r.threshold}x `
+            + `· ${r.component_size} nodes</div>`
+            + (r.k_source === "requested" && r.decisiveness < r.threshold
+                ? `<div class="verdict warn">The corpus did not suggest this k. Read the `
+                  + `conductances below: a high one means that cluster is not a community.</div>`
+                : "")
+            + `<table class="bridges"><tr><th>documents</th><th>entities</th>`
+            + `<th>conductance</th><th>defined by</th></tr>${rows}</table>`
+          : `<div class="muted">${esc(r.note || "")}</div>`);
+    $("#restat").textContent = `topics: ${r.verdict}`;
+  }catch(e){ $("#restat").textContent = "topic clustering failed: " + e.message; }
+  finally{ b.disabled = false; b.textContent = "Topics"; }
 };
 
 $("#bnbtn").onclick = async () => {

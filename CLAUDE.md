@@ -542,6 +542,37 @@ deliver the reply.
   eigenvector plus a sweep over every edge is not something to put on a
   five-second poll, and it takes no run guard, for the reason `export_corpus`
   takes none.
+- **`topics()` chooses `k` from the eigengap, but only when the eigengap is
+  decisive.** The A2 application from `reports/spectral_applicability.md`:
+  Ng-Jordan-Weiss clustering over the normalized Laplacian, which on a
+  bipartite document/entity graph groups documents with the entities that
+  define them -- so a cluster reads as a topic and `top_entities` names it.
+  This is the whole-corpus map `neighborhood()` cannot give.
+  The proposal's weak point was `k`, and it is not wired straight through.
+  `reports/spectral_architecture_benchmark.md` measured the eigengap heuristic
+  wrong on 3 of 8 architectures, k = 10 for a barbell whose answer is 2, and it
+  always returns *some* k -- so on a corpus with no topics it invents one, and
+  clusters shown without that caveat are a fabricated map. What rescues it is
+  that the failures are **undecided**, not merely wrong: the winning gap barely
+  beats the runner-up. Measured across 18 corpora with a planted topic count the
+  eigengap was correct every time at a decisiveness of 5.1-23.4, while a grid, a
+  small-world ring, an expander and one dense topic all landed at 1.0-1.8 --
+  nothing observed between 1.8 and 4.5, so `EIGENGAP_DECISIVENESS = 3.0` sits in
+  open space rather than on a boundary. Under it the verdict is
+  `no_clear_structure` and **no clusters are returned**, because a map of a
+  corpus with no topics is worse than no map. An explicit `k` skips the gate --
+  the caller has decided -- but the decisiveness is still reported.
+  **Per-cluster conductance is the second, independent check** and is why
+  clusters are never returned bare: it exposes a `k` that split a real
+  community even when the eigengap looked decisive, and it is what makes a
+  forced `k` visibly wrong (0.36-0.45 on a corpus with one topic, against
+  0.009-0.018 when the topics are real). A bad `k` from the caller raises
+  `ValueError` rather than returning `unavailable`: that verdict means the
+  measurement could not be taken, and filing a malformed request under it would
+  blame the solver for the caller. Runs on the largest component, like
+  `connectivity()` and `bottleneck()` -- components are already clusters, so on
+  a disconnected graph the eigenvectors would spend themselves rediscovering
+  the orphans `connectivity()` has already counted.
 - **The embedding model loads on first use, not on construction.**
   `GraphRAGKnowledgeBase.embedder` is a lazy property and
   `sentence_transformers` is imported inside it. Only `add_document` and
