@@ -279,8 +279,13 @@ def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple:
     vec = spectral_embedding(G, dim=1, normalized=normalized, use_fiedler=True)[:, 0]
 
     nodes = list(G.nodes())
+    # Degrees from A's row sums, not G.degree(), for the same reason
+    # `conductance` takes them that way: G.degree() counts a self-loop twice
+    # against the single w that A carries on the diagonal, and the vol_S loop
+    # below counts it once. Mixing the two conventions made the numerator and
+    # the denominator of this ratio disagree.
+    degrees = _degree_vector(G)
     if normalized:
-        degrees = np.array([d for _, d in G.degree(weight="weight")], dtype=np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
             scale = 1.0 / np.sqrt(degrees)
         scale[~np.isfinite(scale)] = 0.0
@@ -288,7 +293,7 @@ def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple:
 
     order = np.argsort(vec)
 
-    total_vol = sum(w for _, w in G.degree(weight="weight"))
+    total_vol = float(degrees.sum())
     in_S: set = set()
     boundary = 0.0
     vol_S = 0.0
@@ -301,6 +306,12 @@ def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple:
         for v, data in G[u].items():
             w = data.get("weight", 1.0)
             vol_S += w
+            if v == u:
+                # A self-loop has both ends on the same side, so it is never
+                # part of the boundary. `v in in_S` does not catch it: u is
+                # added to in_S only after this loop, so at this point its own
+                # loop reads as an edge leaving S and was charged to the cut.
+                continue
             # An edge to a node already inside stops crossing the cut.
             boundary += -w if v in in_S else w
         in_S.add(u)

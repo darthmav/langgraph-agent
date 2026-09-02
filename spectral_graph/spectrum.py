@@ -9,9 +9,81 @@ import networkx as nx
 import numpy as np
 from scipy import sparse
 from scipy.linalg import eigh
-from scipy.sparse.linalg import eigsh
+from scipy.sparse.linalg import ArpackError, eigsh
 
 from spectral_graph.laplacian import laplacian_matrix, normalized_laplacian_matrix
+
+
+def smallest_eigsh(
+    L: sparse.spmatrix,
+    k: int,
+    return_eigenvectors: bool = True,
+):
+    """The k smallest eigenpairs of a Laplacian, via shift-invert.
+
+    `eigsh(L, k, which="SM")` -- what every sparse branch here used to call --
+    asks ARPACK to converge the bottom of the spectrum while iterating on `L`
+    itself. Krylov convergence there is governed by the *relative* separation
+    of the eigenvalues being chased, and on a graph with a bottleneck that
+    separation is precisely what is tiny: `lambda_2` sits a few parts per
+    million above `lambda_1 = 0`. So the mode is slowest on exactly the graphs
+    a spectral analysis is for. Measured by `scripts/spectral_benchmark.py` on
+    this machine, against the shift-invert call below on the same matrix
+    (times vary a little run to run; the order of magnitude does not):
+
+        path_1200        lambda_2 = 6.9e-06    ~6.3s  vs  0.002s   (~3000x)
+        cycle_1200       lambda_2 = 2.7e-05    ~2.8s  vs  0.002s   (~1400x)
+        barbell_1000     lambda_2 = 2.3e-05    ~8.4s  vs  0.017s   (~500x)
+
+    And it does not reliably finish. ARPACK draws a random starting residual
+    unless given one, so the slow case is also an intermittent one: on
+    `path_1200`, `which="SM"` exhausts its iteration budget and raises
+    `ArpackNoConvergence` in roughly 1 run in 6, after ~6s of work. That is
+    the part that makes this a correctness problem and not only a cost one --
+    a caller sees an exception from a graph that worked the last five times.
+    Shift-invert failed 0 times in the same trial, and is the more accurate of
+    the two where both converge (4.4e-09 vs 2.8e-08 relative against a `tol=0`
+    reference on the barbell).
+
+    Shift-invert factorizes `L - sigma*I` once and iterates on its inverse,
+    which maps the crowded bottom of the spectrum to the well-separated top,
+    so the bottleneck stops being the hard case.
+
+    The trade is real but bounded the right way: on an expander, where
+    `lambda_2 = O(1)` and `SM` already converges in a few iterations, the
+    factorization is pure overhead and this is ~15x *slower* (9ms vs 135ms on
+    a 1200-node 6-regular graph). Losing a hundred milliseconds on the easy
+    case to win six seconds on the hard one is the trade worth making, because
+    the hard case is the one that scales into a hang.
+
+    `sigma` is a hair below zero rather than zero: 0 is an eigenvalue of every
+    Laplacian, so `sigma=0` asks SuperLU to factorize a singular matrix and
+    raises `RuntimeError: Factor is exactly singular`. It is scaled by the
+    largest diagonal entry so the shift stays small relative to a weighted
+    graph's own units.
+
+    Falls back to the old `which="SM"` call if the factorization fails. That
+    is a fall back to the less reliable path by design: it is a last resort
+    for a matrix shift-invert cannot factorize at all, and leaves such a
+    matrix no worse off than it was before this function existed.
+    """
+    scale = float(np.abs(L.diagonal()).max()) or 1.0
+    try:
+        result = eigsh(
+            L,
+            k=k,
+            sigma=-1e-6 * scale,
+            which="LM",
+            return_eigenvectors=return_eigenvectors,
+        )
+    except (RuntimeError, MemoryError, ArpackError):
+        result = eigsh(L, k=k, which="SM", return_eigenvectors=return_eigenvectors)
+
+    if not return_eigenvectors:
+        return np.sort(result)
+    eigenvalues, eigenvectors = result
+    idx = np.argsort(eigenvalues)
+    return eigenvalues[idx], eigenvectors[:, idx]
 
 
 def compute_spectrum(
@@ -70,8 +142,13 @@ def compute_spectrum(
         # Dense solver - compute all eigenvalues
         L_dense = L.toarray() if sparse.issparse(L) else L
         eigenvalues = np.linalg.eigvalsh(L_dense)
+    elif which == "SM":
+        # Shift-invert; see `smallest_eigsh` for why the default path does not
+        # hand "SM" to ARPACK directly.
+        eigenvalues = smallest_eigsh(L, k=k, return_eigenvectors=False)
     else:
-        # Sparse solver - compute k eigenvalues
+        # A caller that asked for the other end of the spectrum gets what it
+        # asked for: shift-invert is a bottom-of-the-spectrum technique.
         eigenvalues = eigsh(L, k=k, which=which, return_eigenvectors=False)
         eigenvalues = np.sort(eigenvalues)
 
@@ -138,6 +215,8 @@ def compute_eigenpairs(
         # Take first k
         eigenvalues = eigenvalues[:k]
         eigenvectors = eigenvectors[:, :k]
+    elif which == "SM":
+        eigenvalues, eigenvectors = smallest_eigsh(L, k=k)
     else:
         # Sparse solver
         eigenvalues, eigenvectors = eigsh(L, k=k, which=which)

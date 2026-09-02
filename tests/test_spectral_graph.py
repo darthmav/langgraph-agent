@@ -42,6 +42,7 @@ from spectral_graph import (  # noqa: E402
     spectral_embedding,
     sweep_cut,
 )
+from spectral_graph.spectrum import smallest_eigsh  # noqa: E402
 
 TOL = 1e-9
 
@@ -467,3 +468,90 @@ def test_conductance_uses_one_volume_convention_on_both_sides() -> None:
     total_vol = float(adjacency_matrix(G).toarray().sum())
     vol_S = float(adjacency_matrix(G).toarray()[[0, 1], :].sum())
     assert phi == pytest.approx(1.0 / min(vol_S, total_vol - vol_S), abs=1e-12)
+
+
+def test_sweep_cut_and_conductance_agree_on_the_set_sweep_cut_returns() -> None:
+    """The two were computing different phi for the same cut on a self-loop.
+
+    `sweep_cut` reports the conductance of the prefix it chose, so it is the
+    same quantity `conductance` computes for that node set -- and on a graph
+    with a self-loop they disagreed by 91%. Two compounding causes, both the
+    self-loop bug the Laplacian already had: the loop was charged to the
+    boundary (`v in in_S` is False for v == u, because u joins in_S only after
+    the loop over its neighbours), and the total volume came from `G.degree()`,
+    which counts a self-loop twice against the single w in A's row sum that
+    the running vol_S accumulates.
+
+    It matters beyond the arithmetic: sweep_cut *minimises* the number it
+    reports, so a wrong objective can select a different prefix, and the phi
+    it returns is what gets checked against the Cheeger bound.
+    """
+    G = nx.barbell_graph(5, 0)
+    G.add_edge(0, 0)
+
+    S, phi = sweep_cut(G)
+    assert phi == pytest.approx(conductance(G, S), abs=1e-12)
+
+    # The self-loop is invisible to the cut: it changes no edge's endpoints.
+    clean = nx.barbell_graph(5, 0)
+    _, phi_clean = sweep_cut(clean)
+    assert phi == pytest.approx(phi_clean, abs=1e-12)
+
+
+def test_sweep_cut_agrees_with_conductance_on_a_weighted_self_loop() -> None:
+    """The unweighted case can pass by accident when every w is 1."""
+    G = nx.Graph()
+    G.add_weighted_edges_from([(0, 1, 2.0), (1, 2, 3.0), (2, 3, 0.5), (3, 0, 1.0)])
+    G.add_edge(0, 0, weight=4.0)
+    S, phi = sweep_cut(G)
+    assert phi == pytest.approx(conductance(G, S), abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    "G",
+    [
+        nx.path_graph(60),
+        nx.barbell_graph(30, 10),
+        nx.convert_node_labels_to_integers(nx.grid_2d_graph(8, 8)),
+        nx.random_regular_graph(4, 60, seed=1),
+    ],
+    ids=["path_60", "barbell_70", "grid_64", "regular_60"],
+)
+def test_sparse_path_matches_the_dense_answer(G: nx.Graph) -> None:
+    """Every graph here is over the n < 50 threshold, so it takes eigsh.
+
+    The suite was entirely under that threshold, which left the sparse branch
+    -- a different solver, reached by graph size alone -- untested. It is also
+    the branch that changed when `which="SM"` was replaced by shift-invert, so
+    it is the one that needs pinning to the dense answer rather than to
+    whatever it produced last.
+    """
+    dense = np.sort(np.linalg.eigvalsh(nx.laplacian_matrix(G).toarray().astype(float)))
+    assert algebraic_connectivity(G) == pytest.approx(dense[1], rel=1e-8)
+
+    evals, evecs = compute_eigenpairs(G, k=3)
+    assert np.allclose(evals, dense[:3], atol=1e-8)
+    assert evecs.shape == (G.number_of_nodes(), 3)
+
+    # The Fiedler vector is an eigenvector of L for lambda_2, whichever solver
+    # produced it. Sign and scale are free, so check the residual, not entries.
+    v = fiedler_vector(G)
+    L = laplacian_matrix(G)
+    assert np.linalg.norm(L @ v - dense[1] * v) < 1e-6
+
+
+def test_shift_invert_survives_the_singular_shift() -> None:
+    """0 is an eigenvalue of every Laplacian, so sigma must miss it.
+
+    `sigma=0` asks SuperLU to factorize a singular matrix and raises
+    `RuntimeError: Factor is exactly singular`. The helper offsets sigma by a
+    fraction of the largest diagonal entry; this pins that it holds on a
+    weighted graph, where "a small shift" is not an absolute quantity.
+    """
+    G = nx.barbell_graph(30, 10)
+    for u, v in G.edges():
+        G[u][v]["weight"] = 1000.0
+
+    evals = smallest_eigsh(laplacian_matrix(G), k=2, return_eigenvectors=False)
+    dense = np.sort(np.linalg.eigvalsh(laplacian_matrix(G).toarray()))
+    assert np.allclose(evals, dense[:2], rtol=1e-8, atol=1e-9)

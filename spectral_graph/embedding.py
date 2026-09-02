@@ -10,9 +10,9 @@ import networkx as nx
 import numpy as np
 from scipy import sparse
 from scipy.linalg import eigh
-from scipy.sparse.linalg import eigsh
 
 from spectral_graph.laplacian import laplacian_matrix, normalized_laplacian_matrix
+from spectral_graph.spectrum import smallest_eigsh
 
 
 def spectral_embedding(
@@ -83,11 +83,8 @@ def spectral_embedding(
         idx = np.argsort(eigenvalues)[:k]
         eigenvectors = eigenvectors[:, idx]
     else:
-        # Sparse solver
-        eigenvalues, eigenvectors = eigsh(L, k=k, which="SM")
-        # Sort by eigenvalue
-        idx = np.argsort(eigenvalues)
-        eigenvectors = eigenvectors[:, idx]
+        # Sparse solver, shift-inverted; see `smallest_eigsh`.
+        eigenvalues, eigenvectors = smallest_eigsh(L, k=k)
 
     # Skip the first eigenvector if use_fiedler (it's the constant vector)
     if use_fiedler:
