@@ -1192,6 +1192,16 @@ def show_catalogue() -> None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
+    # A sweep is something you watch, and `--verbose` exists to print each node
+    # visit as it happens -- but redirected stdout is block-buffered, so piping
+    # the run to a log left everything after the first flushed line sitting in
+    # an 8KB buffer. A hung warm then looked identical to a slow one: the last
+    # thing on screen was the half-line printed before it. `serve.py` does the
+    # same thing for the same reason.
+    # (typed as TextIO, which does not declare reconfigure; it is a
+    # TextIOWrapper at runtime whenever stdout is a real stream.)
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+
     if args.list:
         show_catalogue()
         return 0
