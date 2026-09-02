@@ -511,9 +511,23 @@ def run_probe(candidate: Candidate, role: str, mods: dict[str, Any]) -> ProbeRes
                 s for s in ("key_findings", "relevant_context", "recommendations")
                 if str(sections.get(s, "")).strip()
             ]
-            # `_said_nothing` is the guard the run itself applies, so the probe
-            # grades by exactly the same rule rather than a second opinion.
-            if nodes._said_nothing(findings, sections):
+            # The status is the authoritative signal, and it has to be read
+            # before the text is. When the seat says nothing, `_gather_research`
+            # does not return nothing -- it returns `_RESEARCH_EMPTY`, a
+            # fully-formed three-section fallback explaining that the seat said
+            # nothing. Grading the text alone therefore scored the framework's
+            # own apology as the seat's answer: `_said_nothing` was False, all
+            # three sections were filled, and a silent Researcher came back
+            # `ok`. That is the precise failure this probe exists to catch,
+            # reported as its opposite.
+            if rstatus == nodes._SEAT_EMPTY:
+                result.status = "empty"
+                result.detail = ("Answered with nothing usable -- this seat "
+                                 "would loop the run (text shown is the "
+                                 "framework's fallback, not the model's)")
+            # Kept as a second net: if the node ever hands back the seat's own
+            # empty answer instead of the fallback, this still catches it.
+            elif nodes._said_nothing(findings, sections):
                 result.status = "empty"
                 result.detail = ("Answered with nothing usable -- this seat "
                                  "would loop the run")

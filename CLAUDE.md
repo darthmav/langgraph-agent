@@ -57,7 +57,8 @@ python example_usage.py
 │   ├── researcher.txt
 │   └── builder.txt
 ├── tests/
-│   └── test_graph.py          # Pytest suite
+│   ├── test_graph.py          # Pytest suite
+│   └── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
 ├── scripts/
 │   ├── reindex.py             # Re-index files into GraphRAG
 │   ├── index_knowledge.py     # First-time indexing
