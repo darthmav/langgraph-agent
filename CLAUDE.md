@@ -166,7 +166,10 @@ plus a router in `graph.py`, entries in `AGENTS` / `DEFAULT_SEATS` /
 ### The console API
 The console drives a single `POST /rpc` taking `{method, params}` and returning
 `{result, elapsed_ms}` or `{error: {message}, elapsed_ms}`. Methods live in
-`RPC_METHODS` in `serve.py`. The `/api/*` routes are compatibility wrappers over
+`RPC_METHODS` in `serve.py`. `export_corpus` and `clear_corpus` go through it
+like everything else rather than getting a file-download route: a failure then
+lands on the console's telemetry path instead of replacing the page with a JSON
+error, and the browser builds the file at the other end. The `/api/*` routes are compatibility wrappers over
 the same functions — `launch_console.sh` polls `/api/status` as its readiness
 check, so it must keep working.
 
@@ -323,6 +326,34 @@ deliver the reply.
   abandoned worker would hold up interpreter shutdown.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
+- **A corpus clear empties in place and must reach disk.** `clear()` deletes
+  every Chroma id, *then* clears the graph — never the other way round, and it
+  raises rather than report a half-wipe as success, because the two halves
+  answer different questions and a corpus that disagrees with itself is worse
+  than one that is merely stale. The files under `knowledge/` are kept, holding
+  an empty store: Chroma has that directory open, and pulling it out from under
+  a live client is the worse failure. The trailing `_save_graph()` is
+  load-bearing — `index_project_files` has exactly that hole today, where
+  `graph.clear()` is persisted only as a side effect of indexing something
+  afterwards, so a reindex matching zero files leaves the old graph on disk.
+- **Changing the corpus is refused while a run is in flight.** Both writers —
+  `clear_corpus` and `reindex` — go through
+  `_refuse_while_a_run_is_in_flight()`. Not for consistency: because the
+  failure would be silent. An emptied corpus does not break the Researcher's
+  search, it returns no hits; a corpus midway through a rebuild returns
+  whatever fraction of itself has been re-added. Either reads as
+  `no_relevant_knowledge` and routes the run as though the knowledge base had
+  simply had nothing useful to say. Nothing raises and nothing is logged, so
+  the seat can never find out it was cut off and the operator is told instead.
+  The refusal names the goal, the way `rpc_shutdown` does. `export_corpus` has
+  no such guard: reading the corpus takes nothing away from the run using it.
+- **The export omits embeddings, and says so in the file.** They are most of
+  the bytes and the least portable part — a reader without the same model
+  cannot use them — and the embedder runs locally, so a reindex regenerates
+  them. The `note` field carries that so the omission is not left to be
+  discovered. The graph half is `node_link_data`, the same format
+  `_save_graph` writes, so it compares directly against
+  `knowledge/knowledge_graph.json`.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.
 - A seat with no credentials silently becomes `StubLLM`. `get_agent_status()` is the only thing that reports the difference — keep the chip and banner wired to it.
 - **Key presence is not liveness.** A key can authenticate and the seat still be unusable (no credits, rate limit, model not on the account). `_SeatLLM` records the real outcome of each call in `_seat_failures`, and `get_agent_status()` reports that over any static check. Never re-add a presence-only check as the sole signal.

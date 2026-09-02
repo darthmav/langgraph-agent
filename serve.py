@@ -122,9 +122,70 @@ def rpc_search_documents(params: dict[str, Any]) -> dict[str, Any]:
     return {"results": results, "source": "local_graphrag"}
 
 
+def _refuse_while_a_run_is_in_flight(action: str) -> None:
+    """Guard the corpus against being changed underneath a run.
+
+    Shared by the two methods that write to it, because the hazard is the same
+    for both and it is not the obvious one. Changing the corpus mid-run does
+    not break the Researcher's search -- that is the problem. A cleared corpus
+    returns no hits, and a corpus in the middle of a rebuild returns whatever
+    fraction of itself has been re-added so far; either reads as
+    `no_relevant_knowledge` and routes the run as though the knowledge base had
+    simply had nothing useful to say. Nothing raises, nothing is logged, and
+    the run goes on to plan around an absence that was manufactured out from
+    under it. The seat cannot find out, so the operator is told instead.
+
+    Reads the flag under `_run_lock` and names the goal, the way `rpc_shutdown`
+    refuses: a refusal that does not say what is running leaves the operator to
+    guess whether they still care about it.
+
+    Args:
+        action: Past participle of what was refused -- "cleared", "rebuilt".
+
+    Raises:
+        ValueError: if a run is in flight. The console's `rpc()` helper turns
+            this into a telemetry line and the tab's status text.
+    """
+    with _run_lock:
+        if not _run_progress["running"]:
+            return
+        goal = str(_run_progress["goal"])
+
+    detail = f" Running: {goal}" if goal else ""
+    raise ValueError(
+        f"A run is in flight and the Researcher is searching this corpus, so "
+        f"it cannot be {action} right now. Stop the run first.{detail}"
+    )
+
+
 def rpc_reindex(_: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild the knowledge base from the project files."""
+    """Rebuild the knowledge base from the project files.
+
+    Refused mid-run: a rebuild clears the graph up front and re-adds documents
+    one at a time, so a Researcher searching while it runs would be answered
+    from a corpus that is neither the old one nor the new one.
+    """
+    _refuse_while_a_run_is_in_flight("rebuilt")
     return index_project_files(_kb())
+
+
+def rpc_export_corpus(_: dict[str, Any]) -> dict[str, Any]:
+    """The whole corpus as one JSON document, for the console to save.
+
+    Served over `/rpc` like everything else rather than as a file download, so
+    a failure lands on the console's telemetry path instead of replacing the
+    page with a JSON error. The browser makes the file at the other end.
+    """
+    return _kb().export_corpus()
+
+
+def rpc_clear_corpus(_: dict[str, Any]) -> dict[str, Any]:
+    """Empty the knowledge base in place.
+
+    Refused mid-run for the reason `_refuse_while_a_run_is_in_flight` sets out.
+    """
+    _refuse_while_a_run_is_in_flight("cleared")
+    return _kb().clear()
 
 
 def rpc_list_seats(_: dict[str, Any]) -> dict[str, Any]:
@@ -535,6 +596,8 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "query_graph": rpc_query_graph,
     "search_documents": rpc_search_documents,
     "reindex": rpc_reindex,
+    "export_corpus": rpc_export_corpus,
+    "clear_corpus": rpc_clear_corpus,
     "list_seats": rpc_list_seats,
     "set_seat": rpc_set_seat,
     "llm_options": rpc_llm_options,

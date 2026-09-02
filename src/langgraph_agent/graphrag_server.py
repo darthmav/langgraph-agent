@@ -12,6 +12,7 @@ Or with stdio transport for MCP:
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,12 @@ from mcp.server import MCPServer
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 from sentence_transformers import SentenceTransformer  # noqa: E402
 
+# The one model that runs on this machine. Named once because three places
+# have to agree on it: the embedder the store is built with, the status check
+# that reports it without loading it, and the export that records which model
+# produced the corpus it is dumping.
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
 
 class GraphRAGKnowledgeBase:
     """Simple GraphRAG: NetworkX graph + Chroma vector store."""
@@ -32,7 +39,7 @@ class GraphRAGKnowledgeBase:
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize embedding model (local, no API key needed)
-        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        self.embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
         # Initialize Chroma vector store
         self.chroma_client = chromadb.PersistentClient(str(self.persist_dir / "chroma"))
@@ -339,6 +346,88 @@ class GraphRAGKnowledgeBase:
             "total_edges": self.graph.number_of_edges(),
         }
 
+    def clear(self) -> dict[str, Any]:
+        """Empty the knowledge base, keeping the files that hold it.
+
+        The store is emptied in place rather than deleted: Chroma has this
+        directory open, and pulling it out from under a live client is a worse
+        failure than an empty collection. What is left behind is the same shape
+        a reindex leaves -- a real store with nothing in it.
+
+        Chroma goes first, and the graph is only cleared once it has. The two
+        halves answer different questions (search, and structure), so a run that
+        wiped one and failed on the other would leave the corpus disagreeing
+        with itself while reporting success. On failure this raises with both
+        intact.
+
+        Returns:
+            What was removed, plus the (now zeroed) stats.
+        """
+        removed_nodes = self.graph.number_of_nodes()
+        removed_edges = self.graph.number_of_edges()
+
+        existing = self.collection.get(include=[]).get("ids", [])
+        if existing:
+            self.collection.delete(ids=existing)
+
+        self.graph.clear()
+        # Without this the clear lives only in memory: the next process start
+        # reloads the old graph off disk and the corpus comes back.
+        self._save_graph()
+
+        return {
+            "removed_chunks": len(existing),
+            "removed_nodes": removed_nodes,
+            "removed_edges": removed_edges,
+            **self.stats(),
+        }
+
+    def export_corpus(self) -> dict[str, Any]:
+        """The whole corpus as one JSON-serialisable document.
+
+        Embeddings are left out. They are the bulk of the store by a wide
+        margin and the least useful part of a dump: the embedder is local, so
+        anything reading this file back can regenerate them, and a reader
+        without the same model could not use them anyway. The file says so
+        itself rather than leaving the omission to be discovered.
+
+        The graph half is `node_link_data`, which is exactly the on-disk format
+        `_save_graph` writes, so it can be compared against
+        `knowledge/knowledge_graph.json` directly.
+        """
+        errors: list[str] = []
+        chunks: list[dict[str, Any]] = []
+        try:
+            stored = self.collection.get(include=["documents", "metadatas"])
+            ids = stored.get("ids") or []
+            documents = stored.get("documents") or []
+            metadatas = stored.get("metadatas") or []
+            chunks = [
+                {
+                    "id": doc_id,
+                    "content": documents[i] if i < len(documents) else "",
+                    "metadata": metadatas[i] if i < len(metadatas) else {},
+                }
+                for i, doc_id in enumerate(ids)
+            ]
+        except Exception as exc:
+            # Same posture as `stats()`: a Chroma failure must not cost us the
+            # graph half of the export as well.
+            errors.append(f"reading chunks: {exc}")
+
+        return {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "note": (
+                "Embeddings are omitted; re-indexing regenerates them locally "
+                f"with {EMBEDDING_MODEL_NAME}."
+            ),
+            "embedding_model": EMBEDDING_MODEL_NAME,
+            "stats": self.stats(),
+            "graph": nx.readwrite.json_graph.node_link_data(self.graph),
+            "chunks": chunks,
+            "errors": errors,
+        }
+
 
 # Files worth indexing, and the directories that only add noise. Shared by
 # `scripts/reindex.py` and the console's reindex button so the two cannot drift
@@ -453,7 +542,7 @@ def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, s
     persist_path = Path(persist_dir)
     chroma_dir = persist_path / "chroma"
     if not chroma_dir.exists():
-        return False, "all-MiniLM-L6-v2"
+        return False, EMBEDDING_MODEL_NAME
 
     try:
         client = chromadb.PersistentClient(str(chroma_dir))
@@ -461,9 +550,9 @@ def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, s
             name="knowledge",
             metadata={"hnsw:space": "cosine"},
         )
-        return collection.count() > 0, "all-MiniLM-L6-v2"
+        return collection.count() > 0, EMBEDDING_MODEL_NAME
     except Exception:
-        return False, "all-MiniLM-L6-v2"
+        return False, EMBEDDING_MODEL_NAME
 
 
 # Create MCP server

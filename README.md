@@ -27,7 +27,24 @@ python serve.py
 Five tabs: **Engineer** (give the Architect a goal, watch the stages),
 **Graph** (the knowledge graph as a force-directed map — press *Sweep all*),
 **Retrieval** (semantic search plus an RPC telemetry log), **Corpus**
-(documents and a reindex button), and **State** (the raw `AgentState`).
+(the indexed documents, and buttons to reindex, export or clear them), and
+**State** (the raw `AgentState`).
+
+*Export* downloads the whole corpus as one JSON file — the knowledge graph plus
+every chunk with its text and metadata. Embeddings are left out: they are most
+of the bytes and the least portable part, and the embedder is local, so a
+reindex regenerates them.
+
+*Clear corpus* empties the store in place. The files under `knowledge/` stay,
+holding an empty index — the same shape a reindex leaves behind. It arms on the
+first click and disarms itself after a few seconds.
+
+Both *Clear corpus* and *Reindex project* are refused while a run is in flight,
+and the refusal says which run. The Researcher searches this corpus, and
+changing it underneath a run does not fail its search — an emptied corpus
+answers "nothing found", and one midway through a rebuild answers from the part
+of itself that exists so far. The run would plan around an absence that was
+manufactured out from under it, without anything raising.
 
 The left rail is the crew: one card per seat, each with its model, where the
 prompt goes (`REMOTE` / `LOCAL`), and a status chip when the seat cannot
