@@ -1135,6 +1135,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--node-deadline", type=float, default=60.0)
     p.add_argument("--builder-deadline", type=float, default=150.0)
     p.add_argument("--tool-turns", type=int, default=5)
+    p.add_argument("--warm-deadline", type=float, default=120.0,
+                   help="Seconds to wait for the corpus to load (default: 120)")
     p.add_argument("--out", default="",
                    help="Report directory (default: reports/diagnostics/<ts>)")
     p.add_argument("--verbose", action="store_true",
@@ -1279,12 +1281,34 @@ def main(argv: list[str]) -> int:
         print(dim("  warming the corpus (loads the embedding model)..."), end=" ",
               flush=True)
         warm_started = time.monotonic()
-        try:
+
+        def _warm() -> int:
             from langgraph_agent.graphrag_server import get_knowledge_base
-            kb = get_knowledge_base()
-            corpus_documents = kb.collection.count()
-            print(dim(f"{corpus_documents} documents, "
-                      f"{time.monotonic() - warm_started:.1f}s"))
+            return int(get_knowledge_base().collection.count())
+
+        try:
+            # Bounded for the same reason every node is. Loading the embedder
+            # makes an online metadata call to huggingface.co, which has no
+            # timeout of its own: one hung sweep sat here for ten minutes
+            # having printed half a line, with nothing to say what it was
+            # waiting for. A warm that never returns must not cost the whole
+            # sweep. If it does time out the singleton may still be coming up
+            # behind us, and the node deadlines are the backstop for that --
+            # the run is told the corpus is unknown rather than told it is
+            # empty, because those are different things.
+            corpus_documents = nodes._with_deadline(_warm, args.warm_deadline, None)
+            if corpus_documents is None:
+                print(yellow(f"timed out after {args.warm_deadline:.0f}s"))
+                print(wrap(yellow(
+                    "The corpus never came up, so retrieval is unknown rather "
+                    "than known-empty. Team runs continue and the node "
+                    "deadlines still bound them, but do not read a thin "
+                    "Researcher in this sweep as a bad seat. Try "
+                    "HF_HUB_OFFLINE=1 if the embedding model is already "
+                    "cached."), indent="  "))
+            else:
+                print(dim(f"{corpus_documents} documents, "
+                          f"{time.monotonic() - warm_started:.1f}s"))
         except Exception as exc:  # noqa: BLE001
             print(yellow(f"failed: {excerpt(exc, 120)}"))
             print(wrap(yellow(
