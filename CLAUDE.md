@@ -182,7 +182,12 @@ check, so it must keep working.
   `files_changed` is: the Builder's account of its own work is not evidence.
   A file clears only by running clean: files that failed on an earlier pass are
   re-verified even when the current pass did not touch them, because otherwise
-  the Builder retires a failure by doing nothing.
+  the Builder retires a failure by doing nothing. The one exception is a
+  carried path that no longer exists on disk — deleting the file is a real fix,
+  and re-running a missing path fails forever, which pinned
+  `failed_verification` open and made the gate rewrite every `approved` to
+  `revise` until the step ceiling. The exception applies only to carried paths;
+  a path in `files_changed` was just written by a tool that reported success.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step

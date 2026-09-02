@@ -600,6 +600,34 @@ def test_a_pass_that_writes_nothing_cannot_clear_a_failure(monkeypatch, tmp_path
     assert "do not run" in result["blockers"]
 
 
+def test_a_deleted_file_clears_its_failure(monkeypatch, tmp_path):
+    """Deleting the broken file is a fix, not a permanent failure.
+
+    A carried path that no longer exists used to be re-run anyway, and
+    `python <missing path>` fails forever: failed_verification never emptied,
+    the gate rewrote every `approved` to `revise`, and the run could only end
+    at the step ceiling.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "_tmp_scratch.py"  # never created
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+
+    state = initial_state("Drop the scratch script")
+    state["plan"] = "1. Remove it"
+    state["failed_verification"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert result["failed_verification"] == []
+    assert result["blockers"] == ""
+    assert str(gone) not in result["builder_report"]
+
+
 def test_a_fixed_file_clears_its_failure(monkeypatch, tmp_path):
     """Once the file actually runs, the failure is retired."""
     from langgraph_agent.nodes import builder_node

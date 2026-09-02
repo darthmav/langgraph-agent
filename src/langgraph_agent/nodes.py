@@ -10,6 +10,7 @@ Implements the 4-Agent System with strict prompts and tool binding:
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -943,10 +944,17 @@ def builder_node(state: AgentState) -> AgentState:
     # clear a failure by doing nothing: the broken file stayed on disk, the
     # next pass wrote nothing, the failure list came back empty and the gate
     # approved. A file clears only by running clean.
+    # A carried file that is gone from disk drops out instead of failing.
+    # Deleting it is a real fix -- a file that does not exist cannot raise --
+    # but `python <missing path>` exits non-zero forever, so re-running it
+    # pinned failed_verification open and the gate rewrote every `approved` to
+    # `revise` until the step ceiling ended the run. Only carried paths get
+    # this; a path in files_changed was just written by a tool that reported
+    # success, and its absence would be the write lying.
     carried = [
         path
         for path in (state.get("failed_verification") or [])
-        if path not in files_changed
+        if path not in files_changed and Path(path).exists()
     ]
     verification = _verify_written_files(files_changed + carried, tool_log)
     failed = [(path, detail) for path, ok, detail in verification if not ok]
