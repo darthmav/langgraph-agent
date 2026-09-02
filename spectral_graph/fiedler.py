@@ -10,13 +10,13 @@ import networkx as nx
 import numpy as np
 from scipy import sparse
 from scipy.linalg import eigh
-from scipy.sparse.linalg import eigsh
 
 from spectral_graph.laplacian import (
     _require_undirected,
     laplacian_matrix,
     normalized_laplacian_matrix,
 )
+from spectral_graph.spectrum import smallest_eigsh
 
 
 def fiedler_vector(G: nx.Graph, normalized: bool = False) -> np.ndarray:
@@ -84,11 +84,10 @@ def fiedler_vector(G: nx.Graph, normalized: bool = False) -> np.ndarray:
         eigenvalues, eigenvectors = eigh(L_dense)
         fiedler = eigenvectors[:, 1]  # Second eigenvector (index 1)
     else:
-        # Sparse solver for k=2 smallest eigenvalues
-        eigenvalues, eigenvectors = eigsh(L, k=2, which="SM")
-        # Sort by eigenvalue
-        idx = np.argsort(eigenvalues)
-        fiedler = eigenvectors[:, idx[1]]
+        # Sparse solver for k=2 smallest eigenvalues; see `smallest_eigsh` for
+        # why this is shift-inverted rather than `which="SM"`.
+        eigenvalues, eigenvectors = smallest_eigsh(L, k=2)
+        fiedler = eigenvectors[:, 1]
 
     return fiedler
 
