@@ -1476,12 +1476,32 @@ def builder_node(state: AgentState) -> AgentState:
     if tool_log:
         builder_report += "\n\nTool calls:\n" + "\n".join(f"- {c}" for c in tool_log)
 
+    # `files_changed` above is what *this* pass wrote, and the verification
+    # logic needs it to stay that way: `carried` leans on it to tell a path
+    # this pass rewrote from one only an earlier pass touched. The state field
+    # answers a different question -- what the whole run produced -- so it
+    # accumulates. Overwriting it per pass meant a run that wrote a file on one
+    # cycle and nothing on the next ended reporting it had changed nothing
+    # while the file sat on disk, and the Architect ruled on that empty record:
+    # a build with a file to its name was approved as having produced none.
+    # That is the same false account as a Builder claiming a file it never
+    # wrote, pointing the other way.
+    previously_changed = list(state.get("files_changed") or [])
+    all_files_changed = previously_changed + [
+        path for path in files_changed if path not in previously_changed
+    ]
+
     # files_changed is deliberately NOT taken from the model's prose. A file
     # counts as changed only when a write tool reported success for it; a model
     # that describes writing a module it never wrote would otherwise have the
     # console report "changed this machine" for work that never touched disk.
+    # Checked against the run's whole record rather than this pass: a file an
+    # earlier pass wrote did come from a successful write call, so naming it
+    # again is not a claim about work that never happened.
     claimed = [
-        path for path in parsed.get("files_modified", []) if path not in files_changed
+        path
+        for path in parsed.get("files_modified", [])
+        if path not in all_files_changed
     ]
     if claimed:
         builder_report += (
@@ -1532,7 +1552,7 @@ def builder_node(state: AgentState) -> AgentState:
         )
 
     state["builder_report"] = builder_report
-    state["files_changed"] = files_changed
+    state["files_changed"] = all_files_changed
     # Written every pass, including empty, so a file that gets fixed on a later
     # cycle stops blocking the gate. Unverified paths ride along so the next
     # cycle re-runs them: a file nobody executed must not clear by omission,
@@ -1568,6 +1588,12 @@ def builder_node(state: AgentState) -> AgentState:
         )
     else:
         summary = f"Implementation complete. Files: {len(files_changed)}"
+    # Every count above is this pass, which is what just happened and so what
+    # the feed should say. But a pass that wrote nothing, on a run that has
+    # already produced files, would read as though the run had lost them -- so
+    # the run total is named whenever it differs from the pass.
+    if len(all_files_changed) > len(files_changed):
+        summary += f" ({len(all_files_changed)} changed so far this run)"
     state["messages"].append(f"[Builder] {summary}")
 
     # step_count is incremented by the Architect gate, not here: every cycle

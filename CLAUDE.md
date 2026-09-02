@@ -199,6 +199,20 @@ deliver the reply.
   `MAX_BUILDER_TOOL_TURNS`; `files_changed` is appended only when a write
   tool reports success, never from the model's prose. A seat whose model
   cannot call tools (`StubLLM`) still reports but changes nothing.
+- **`state["files_changed"]` accumulates across passes; the local list does
+  not.** Inside `builder_node` the local `files_changed` is what *this* pass
+  wrote, and the verification logic depends on that: `carried` uses it to tell
+  a path this pass rewrote from one only an earlier pass touched, and the
+  "deleted file clears its failure" exemption applies to carried paths alone.
+  The state field answers a different question — what the whole run produced —
+  so `all_files_changed` merges the previous record in before it is written
+  back. Overwriting it per pass meant a run that wrote a file on one cycle and
+  nothing on the next ended reporting it had changed nothing while the file sat
+  on disk, and the Architect ruled on that empty record: a build with a file to
+  its name was approved as having produced none. That is the same false account
+  as claiming a file that was never written, pointing the other way. The feed
+  line still counts this pass, and names the running total only when the two
+  differ, so a quiet pass never reads as though the run lost its work.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line

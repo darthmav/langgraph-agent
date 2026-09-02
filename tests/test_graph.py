@@ -602,6 +602,80 @@ def test_a_pass_that_writes_nothing_cannot_clear_a_failure(monkeypatch, tmp_path
     assert "do not run" in result["blockers"]
 
 
+def test_a_later_pass_keeps_what_an_earlier_one_wrote(monkeypatch, tmp_path):
+    """The run's record of what it produced spans passes, not just the last one.
+
+    `files_changed` was rewritten from scratch on every Builder pass, so a run
+    that wrote a file on one cycle and nothing on the next ended reporting it
+    had changed nothing -- while the file sat on disk. The Architect rules on
+    that record, so a build with a file to its name was approved as having
+    produced none: the same false account as claiming a file that was never
+    written, pointing the other way.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    earlier = tmp_path / "earlier.py"
+    earlier.write_text("print('fine')\n")
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+
+    state = initial_state("Carry on")
+    state["plan"] = "1. Nothing left to do"
+    state["files_changed"] = [str(earlier)]
+
+    result = builder_node(state)
+
+    assert result["files_changed"] == [str(earlier)]
+    # The feed line still describes this pass, which wrote nothing, so it has
+    # to name the running total or it reads as though the run lost the file.
+    assert "changed so far this run" in result["messages"][-1]
+
+
+def test_a_new_file_adds_to_the_record_rather_than_replacing_it(monkeypatch, tmp_path):
+    """Two passes that each write a file end with both on the record."""
+    from langgraph_agent.nodes import builder_node
+
+    earlier = tmp_path / "earlier.py"
+    earlier.write_text("print('fine')\n")
+    target = tmp_path / "later.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesFileLLM(target, "print('ok')\n"),
+    )
+
+    state = initial_state("Add one more")
+    state["plan"] = "1. Write the second file"
+    state["files_changed"] = [str(earlier)]
+
+    result = builder_node(state)
+
+    assert result["files_changed"] == [str(earlier), str(target)]
+
+
+def test_a_rewritten_file_is_recorded_once(monkeypatch, tmp_path):
+    """A path an earlier pass wrote and this one rewrote is not listed twice."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "again.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesFileLLM(target, "print('ok')\n"),
+    )
+
+    state = initial_state("Rewrite it")
+    state["plan"] = "1. Write it again"
+    state["files_changed"] = [str(target)]
+
+    result = builder_node(state)
+
+    assert result["files_changed"] == [str(target)]
+
+
 def test_a_deleted_file_clears_its_failure(monkeypatch, tmp_path):
     """Deleting the broken file is a fix, not a permanent failure.
 
