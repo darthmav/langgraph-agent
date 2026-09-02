@@ -41,6 +41,7 @@ def run_example(goal: str, max_steps: int = 8):
         "research_status": "",
         "blockers": "",
         "files_changed": [],
+        "failed_verification": [],
         "step_count": 0,
     }
 

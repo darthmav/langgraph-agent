@@ -219,6 +219,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         "research_status": "",
         "blockers": "",
         "files_changed": [],
+        "failed_verification": [],
         "step_count": 0,
     }
     # Streamed rather than invoked so the last state survives the ceiling.

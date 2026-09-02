@@ -444,6 +444,19 @@ def architect_node(state: AgentState) -> AgentState:
         state["architecture"] = parsed["architecture"]
     state["verdict"] = parsed["verdict"]
 
+    # A file that does not run cannot be approved work, whatever the Architect
+    # concluded. This is the one place the gate's ruling is overridden, and it
+    # is deliberate: the Architect reads the failure in `blockers` and had
+    # approved past it. The verdict is rewritten rather than the routing
+    # patched, so the state says what actually happened.
+    #
+    # Note the cost: a goal that legitimately calls for a failing file can no
+    # longer be approved, and will run to MAX_STEPS before the ceiling ends it.
+    blocked = list(state.get("failed_verification") or [])
+    overridden = bool(blocked) and state["verdict"] == Verdict.APPROVED.value
+    if overridden:
+        state["verdict"] = Verdict.REVISE.value
+
     # The gate is the one point every cycle passes through, so it is where the
     # loop counter belongs. The Builder used to own it, which let a
     # Planner/Researcher loop run without ever counting a step.
@@ -457,7 +470,13 @@ def architect_node(state: AgentState) -> AgentState:
     if state.get("plan"):
         state["step_count"] = state.get("step_count", 0) + 1
 
-    state["messages"].append(f"[Architect] Verdict: {state['verdict']}")
+    if overridden:
+        note = f" (approval blocked: {len(blocked)} file(s) do not run)"
+    elif blocked:
+        note = f" ({len(blocked)} file(s) do not run)"
+    else:
+        note = ""
+    state["messages"].append(f"[Architect] Verdict: {state['verdict']}{note}")
 
     return state
 
@@ -890,7 +909,18 @@ def builder_node(state: AgentState) -> AgentState:
     # the work is done. This is in code rather than left to the prompt for the
     # same reason files_changed is: the Builder's own account of its work is
     # not evidence.
-    verification = _verify_written_files(files_changed, tool_log)
+    #
+    # Files that failed on an earlier pass are re-checked even when this pass
+    # did not touch them. Verifying only what was just written let the Builder
+    # clear a failure by doing nothing: the broken file stayed on disk, the
+    # next pass wrote nothing, the failure list came back empty and the gate
+    # approved. A file clears only by running clean.
+    carried = [
+        path
+        for path in (state.get("failed_verification") or [])
+        if path not in files_changed
+    ]
+    verification = _verify_written_files(files_changed + carried, tool_log)
     failed = [(path, detail) for path, ok, detail in verification if not ok]
 
     parsed = _parse_builder_output(content)
@@ -898,6 +928,7 @@ def builder_node(state: AgentState) -> AgentState:
 
     if verification:
         builder_report += "\n\nVerification (each runnable file was executed):\n"
+        # fall through to the per-file lines below
         builder_report += "\n".join(
             f"- {path}: {'ran clean' if ok else 'FAILED'}"
             + (f"\n{detail}" if detail else "")
@@ -927,7 +958,7 @@ def builder_node(state: AgentState) -> AgentState:
     # A failed verification outranks whatever the model concluded: it wrote a
     # file that does not run, and the Architect must see that as unfinished.
     if failed:
-        blockers = "Wrote files that do not run: " + "; ".join(
+        blockers = "Files that do not run: " + "; ".join(
             f"{path} ({detail.splitlines()[-1] if detail else 'no output'})"
             for path, detail in failed
         )
@@ -940,12 +971,17 @@ def builder_node(state: AgentState) -> AgentState:
 
     state["builder_report"] = builder_report
     state["files_changed"] = files_changed
+    # Written every pass, including empty, so a file that gets fixed on a later
+    # cycle stops blocking the gate.
+    state["failed_verification"] = [path for path, _ in failed]
     state["blockers"] = blockers
     # The feed line has to carry the verification result too. "Implementation
     # complete" beside a file that does not run is the same false claim this
     # pass exists to catch, and it is what the Architect reads in state.
     if failed:
-        summary = f"Wrote {len(files_changed)} file(s); {len(failed)} did not run"
+        summary = (
+            f"Wrote {len(files_changed)} file(s); {len(failed)} do not run"
+        )
     else:
         summary = f"Implementation complete. Files: {len(files_changed)}"
     state["messages"].append(f"[Builder] {summary}")

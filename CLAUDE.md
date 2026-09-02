@@ -114,6 +114,7 @@ Every node reads/writes `AgentState`:
     "research_status": "ready_for_builder" | "need_replan" | "no_relevant_knowledge",
     "blockers": str,
     "files_changed": list[str],
+    "failed_verification": list[str],
     "step_count": int,
 }
 ```
@@ -178,8 +179,16 @@ check, so it must keep working.
   in the report — the feed says "N did not run" rather than "Implementation
   complete". Enforced in code, not left to the prompt, for the same reason
   `files_changed` is: the Builder's account of its own work is not evidence.
-  The Architect still rules on the result; a failed verification informs that
-  verdict rather than overriding it.
+  A file clears only by running clean: files that failed on an earlier pass are
+  re-verified even when the current pass did not touch them, because otherwise
+  the Builder retires a failure by doing nothing.
+- **A failed verification blocks approval.** `failed_verification` carries the
+  paths, and the Architect rewrites its own `approved` to `revise` while that
+  list is non-empty — the one place the gate's ruling is overridden. The step
+  ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot hang
+  it. The cost is real: a goal that legitimately wants a failing file (a
+  deliberate fixture, an expected-to-fail test) can no longer be approved and
+  will run to one of those limits.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.

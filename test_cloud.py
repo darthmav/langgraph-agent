@@ -32,6 +32,7 @@ state: AgentState = {
     "research_status": "",
     "blockers": "",
     "files_changed": [],
+    "failed_verification": [],
     "step_count": 0,
 }
 
