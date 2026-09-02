@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 import networkx as nx
+import numpy as np
 import pytest
 
 import serve
@@ -482,3 +483,174 @@ def test_stats_does_not_load_the_embedder_for_the_health_check(kb):
     kb._connectivity_cache = None
     kb.stats()
     assert kb._embedder is None
+
+
+# ---------------------------------------------------------------------------
+# bottleneck (the A3 bridge detection)
+# ---------------------------------------------------------------------------
+
+
+def _topic_corpus(topics: int = 2, docs: int = 30, ents: int = 40,
+                  bridges: int = 2, seed: int = 0) -> nx.DiGraph:
+    """Topic areas joined only through a handful of shared entities.
+
+    The shape A3 exists to analyse: within a topic, documents and entities are
+    densely interlinked; between topics the only path runs through `BRIDGE*`.
+    """
+    rng = np.random.default_rng(seed)
+    G = nx.DiGraph()
+    for i in range(bridges):
+        G.add_node(f"BRIDGE{i}", type="entity")
+    for t in range(topics):
+        for d in range(docs):
+            G.add_node(f"d{t}_{d}", type="document")
+            for e in rng.choice(ents, size=6, replace=False):
+                G.add_node(f"e{t}_{e}", type="entity")
+                G.add_edge(f"d{t}_{d}", f"e{t}_{e}", relation="mentions")
+        for d in rng.choice(docs, size=2, replace=False):
+            for i in range(bridges):
+                G.add_edge(f"d{t}_{int(d)}", f"BRIDGE{i}", relation="mentions")
+    return G
+
+
+def test_bottleneck_finds_the_planted_bridge_entities(kb):
+    """The whole claim of A3: it names the nodes the topics connect through.
+
+    Degree cannot do this. A bridge entity mentioned by two documents has
+    degree 2, which is unremarkable -- what marks it is that its edges are the
+    ones crossing the cut.
+    """
+    kb.graph = _topic_corpus(topics=2)
+
+    result = kb.bottleneck()
+
+    assert result["verdict"] == "found"
+    assert result["conductance"] <= result["threshold"]
+    named = {node["id"] for node in result["bridge_nodes"]}
+    assert {"BRIDGE0", "BRIDGE1"} <= named
+
+
+def test_a_well_knit_corpus_is_certified_to_have_no_bottleneck(kb):
+    """A minimisation always returns something; the verdict must not.
+
+    Asking for the narrowest cut in a corpus with no waist yields a cut anyway,
+    and reporting it as a bridge would be a fabricated finding. Cheeger's lower
+    bound is what refuses it -- and it refuses on a proof about the whole
+    graph, not on the cut that happened to be found.
+    """
+    kb.graph = _topic_corpus(topics=1, docs=90, ents=45, bridges=0)
+
+    result = kb.bottleneck()
+
+    assert result["verdict"] == "certified_none"
+    assert result["cheeger_lower"] > result["threshold"]
+    # The crossing nodes still exist. The verdict is what declines to call them
+    # bridges, so a caller reading `verdict` cannot be misled by the list.
+    assert result["total_bridge_nodes"] > 0
+
+
+def test_tied_cuts_are_reported_when_there_are_more_than_two_areas(kb):
+    """mu_2 ~= mu_3 means several equally-narrow cuts, picked between arbitrarily.
+
+    Without this flag the same corpus returns a different split on different
+    runs and the diagnostic reads as broken. It is also a finding: a tie says
+    there are three or more topic areas, not two.
+    """
+    two = object.__new__(GraphRAGKnowledgeBase)
+    two.collection = kb.collection
+    two.graph = _topic_corpus(topics=2)
+    assert two.bottleneck()["tied_cuts"] is False
+
+    kb.graph = _topic_corpus(topics=3)
+    assert kb.bottleneck()["tied_cuts"] is True
+
+
+def test_bottleneck_is_stable_in_what_it_actually_reports(kb):
+    """The sides may swap between tied cuts; the findings may not.
+
+    ARPACK starts from a random residual, so on a tied spectrum the component
+    it isolates varies. What a caller acts on -- how narrow the waist is, and
+    which entities carry it -- has to be the same every time or the diagnostic
+    is not usable.
+    """
+    kb.graph = _topic_corpus(topics=3)
+
+    runs = [kb.bottleneck() for _ in range(5)]
+
+    assert len({round(r["conductance"], 9) for r in runs}) == 1
+    entities = {
+        tuple(sorted(n["id"] for n in r["bridge_nodes"] if n["type"] == "entity"))
+        for r in runs
+    }
+    assert len(entities) == 1
+
+
+def test_bottleneck_runs_on_the_largest_component_not_the_whole_graph(kb):
+    """An orphan is a conductance-0 cut, and would win every time.
+
+    "Your corpus has an orphan" is what `connectivity()` reports. If the sweep
+    ran on the whole graph the orphan would crowd out the real bridge on every
+    disconnected corpus -- which is every real one.
+    """
+    kb.graph = _topic_corpus(topics=2)
+    kb.graph.add_node("orphan", type="document")
+
+    result = kb.bottleneck()
+
+    assert result["verdict"] == "found"
+    assert "orphan" not in {node["id"] for node in result["bridge_nodes"]}
+    assert result["component_size"] == kb.graph.number_of_nodes() - 1
+
+
+def test_bottleneck_on_a_graph_with_nothing_to_cut(kb):
+    """No verdict is better than a cut invented for a graph that has none."""
+    kb.graph = nx.DiGraph()
+    assert kb.bottleneck()["verdict"] == "no_graph"
+
+    kb.graph = nx.DiGraph()
+    kb.graph.add_node("solo", type="document")
+    single = kb.bottleneck()
+    assert single["verdict"] == "no_graph"
+    assert single["bridge_nodes"] == []
+    assert single["conductance"] is None
+
+
+def test_bottleneck_names_its_own_failure_rather_than_reporting_no_bridge(kb):
+    """"Could not measure" must never read as "there is no bottleneck"."""
+    import spectral_graph
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("solver unavailable")
+
+    kb.graph = _topic_corpus(topics=2)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(spectral_graph, "sweep_cut", _explode)
+        result = kb.bottleneck()
+
+    assert result["verdict"] == "unavailable"
+    assert "solver unavailable" in result["note"]
+    assert result["bridge_nodes"] == []
+
+
+def test_rpc_bottleneck_is_read_only_and_needs_a_corpus(monkeypatch):
+    """Registered, serialisable, and unguarded against a run -- like export."""
+    assert serve.RPC_METHODS["bottleneck"] is serve.rpc_bottleneck
+    # Not in the five-second poll: it is an eigenvector plus a sweep over every
+    # edge, and it answers a question the operator asks.
+    assert "bottleneck" not in serve.QUIET_METHODS
+
+    monkeypatch.setattr(serve, "kb", None)
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="no corpus"):
+        serve.rpc_bottleneck({})
+
+
+def test_rpc_bottleneck_honours_limit_and_serialises(kb, monkeypatch):
+    kb.graph = _topic_corpus(topics=2)
+    monkeypatch.setattr(serve, "kb", None)
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: kb)
+
+    result = serve.rpc_bottleneck({"limit": 2})
+
+    assert len(result["bridge_nodes"]) == 2
+    json.dumps(result)  # the console has to be able to render it

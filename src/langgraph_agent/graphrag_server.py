@@ -44,6 +44,13 @@ NO_CORPUS_NOTE = (
     "project on the console's Corpus tab."
 )
 
+# Below this conductance a cut counts as a genuine narrow waist: leaving the
+# set, roughly one edge in ten crosses. A convention, not a theorem, and it is
+# named here because two things read it -- the verdict below and the console.
+# The raw conductance and both Cheeger bounds are always returned alongside it,
+# so a caller who wants a different line can draw one.
+BOTTLENECK_CONDUCTANCE = 0.1
+
 
 class GraphRAGKnowledgeBase:
     """Simple GraphRAG: NetworkX graph + Chroma vector store.
@@ -372,6 +379,152 @@ class GraphRAGKnowledgeBase:
             "edges": edges,
             "total_nodes": len(related),
             "total_edges": len(edges),
+        }
+
+    def bottleneck(self, limit: int = 12) -> dict[str, Any]:
+        """The narrowest cut in the corpus, and the nodes that bridge it.
+
+        The A3 application from `reports/spectral_applicability.md`. Sweeps the
+        normalized Fiedler vector for the prefix of lowest conductance, then
+        names the nodes whose edges actually cross it -- the few entities or
+        documents through which two otherwise separate topic areas connect.
+        Those are the terms a search should expand on when a query straddles
+        both, and the nodes whose removal would fragment the corpus. Degree
+        alone does not find them: a bridge entity mentioned by two documents
+        has degree 2, which is unremarkable everywhere else in the graph.
+
+        **The verdict has three states, not two, and the middle one is the
+        reason this is worth building.** A minimisation always returns
+        *something*: ask for the narrowest cut in a perfectly well-knit corpus
+        and you get one anyway, and reporting it as a bridge would be a
+        fabricated finding of exactly the kind `search` was fixed for. What
+        separates them is Cheeger's lower bound, `mu_2 / 2`, which is a proof
+        that no cut anywhere in the graph beats it:
+
+        - `certified_none` -- the lower bound is itself above
+          `BOTTLENECK_CONDUCTANCE`, so no narrow waist exists *anywhere*. This
+          is a theorem about the whole graph, not a statement about the cut
+          that was found, and no amount of searching would turn one up.
+        - `found` -- the sweep cut came in at or below the line. The bridge
+          nodes below are real.
+        - `inconclusive` -- the bound permits a bottleneck and the sweep cut did
+          not find one. Cheeger brackets the true conductance between
+          `mu_2 / 2` and `sqrt(2 * mu_2)`, and that bracket is wide (measured
+          from 4x to 546x across graph shapes in
+          `reports/spectral_architecture_benchmark.md`), so the sweep cut
+          genuinely can miss. Saying so is the honest answer; collapsing it
+          into "no bottleneck" would report a gap in the evidence as a finding.
+
+        Runs on the largest connected component, for the same reason
+        `connectivity()` measures `lambda_2` there: on a disconnected graph the
+        Fiedler vector is a component indicator, so the sweep cut returns one
+        component against the rest at conductance 0. That is a true answer to a
+        question nobody asked -- "your corpus has an orphan" is what
+        `connectivity()` is for, and it would crowd out the real bridge every
+        time.
+        """
+        # Same modelling note as `connectivity()`: every edge runs
+        # document -> entity, so reversing one reads "entity is mentioned by
+        # document" -- the same relation, not a different claim.
+        undirected = self.graph.to_undirected(as_view=True)
+
+        if undirected.number_of_nodes() == 0:
+            return {"verdict": "no_graph", "note": "The graph is empty.",
+                    "conductance": None, "bridge_nodes": []}
+
+        largest = max(nx.connected_components(undirected), key=len)
+        if len(largest) < 2:
+            return {
+                "verdict": "no_graph",
+                "note": "The largest component has a single node; there is nothing to cut.",
+                "conductance": None,
+                "bridge_nodes": [],
+            }
+
+        component = undirected.subgraph(largest)
+
+        try:
+            from spectral_graph import cheeger_bounds, compute_spectrum, sweep_cut
+
+            side, phi = sweep_cut(component, normalized=True)
+            lower, upper = cheeger_bounds(component)
+            # mu_3 as well as mu_2, to detect a tie -- see `tied_cuts` below.
+            spectrum = compute_spectrum(component, k=3, normalized=True, which="SM")
+        except ImportError:
+            return {
+                "verdict": "unavailable",
+                "note": "spectral_graph is not on sys.path.",
+                "conductance": None,
+                "bridge_nodes": [],
+            }
+        except Exception as exc:  # pragma: no cover - solver-dependent
+            return {
+                "verdict": "unavailable",
+                "note": f"{type(exc).__name__}: {exc}",
+                "conductance": None,
+                "bridge_nodes": [],
+            }
+
+        if lower > BOTTLENECK_CONDUCTANCE:
+            verdict = "certified_none"
+        elif phi <= BOTTLENECK_CONDUCTANCE:
+            verdict = "found"
+        else:
+            verdict = "inconclusive"
+
+        # `mu_2 ~= mu_3` means the graph has more than two topic areas, and the
+        # Fiedler vector picks one of several equally-narrow cuts arbitrarily.
+        # Worth reporting rather than hiding: running this twice on such a
+        # corpus returns different *sides* -- measured 99/198 and 97/200 on
+        # alternating runs of the same three-topic graph -- while the
+        # conductance (0.008264, all 12 runs) and the bridge entities
+        # (BRIDGE0/BRIDGE1, all 12 runs) stay put. An operator who sees the
+        # split move and has not been told why will read a working diagnostic
+        # as a broken one. It is also a real finding in its own right: a tie
+        # says there are three or more areas here, not two.
+        mu_2, mu_3 = float(spectrum[1]), float(spectrum[2])
+        tied_cuts = bool(mu_3 - mu_2 <= 0.1 * mu_3) if mu_3 > 1e-12 else False
+
+        # The nodes carrying the cut, ranked by how much of it they carry. A
+        # node's crossing count is what makes it a bridge; its total degree is
+        # reported beside it because the two coming apart is the whole point --
+        # a bridge is a node whose few edges happen to be the load-bearing ones.
+        crossing: dict[str, int] = {}
+        crossing_edges = 0
+        for source, target in component.edges():
+            if (source in side) != (target in side):
+                crossing_edges += 1
+                crossing[source] = crossing.get(source, 0) + 1
+                crossing[target] = crossing.get(target, 0) + 1
+
+        bridge_nodes = [
+            {
+                "id": node,
+                "type": self.graph.nodes[node].get("type", "unknown"),
+                "crossing_edges": count,
+                "degree": component.degree(node),
+                "side": "a" if node in side else "b",
+            }
+            for node, count in sorted(
+                crossing.items(), key=lambda item: (-item[1], str(item[0]))
+            )[:limit]
+        ]
+
+        return {
+            "verdict": verdict,
+            "conductance": float(phi),
+            "cheeger_lower": float(lower),
+            "cheeger_upper": float(upper),
+            "threshold": BOTTLENECK_CONDUCTANCE,
+            "component_size": component.number_of_nodes(),
+            "side_a": len(side),
+            "side_b": component.number_of_nodes() - len(side),
+            "crossing_edges": crossing_edges,
+            "bridge_nodes": bridge_nodes,
+            "total_bridge_nodes": len(crossing),
+            "tied_cuts": tied_cuts,
+            "mu_2": mu_2,
+            "mu_3": mu_3,
         }
 
     def connectivity(self) -> dict[str, Any]:

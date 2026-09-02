@@ -229,6 +229,22 @@ def rpc_reindex(_: dict[str, Any]) -> dict[str, Any]:
     return index_project_files(_kb_for_indexing())
 
 
+def rpc_bottleneck(params: dict[str, Any]) -> dict[str, Any]:
+    """The narrowest cut in the knowledge graph, and the nodes bridging it.
+
+    Read-only, and deliberately not part of the five-second poll: it is an
+    eigenvector plus a sweep over every edge, and it answers a question the
+    operator asks rather than one the header needs. Like `export_corpus` it
+    takes no run guard -- reading the corpus takes nothing away from the run
+    using it.
+    """
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        raise ValueError(f"There is no corpus to analyse. {NO_CORPUS_NOTE}")
+    limit = int(params.get("limit", 12))
+    return kb_or_none.bottleneck(limit=limit)
+
+
 def rpc_export_corpus(_: dict[str, Any]) -> dict[str, Any]:
     """The whole corpus as one JSON document, for the console to save.
 
@@ -716,6 +732,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
 
 RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "rag_stats": rpc_rag_stats,
+    "bottleneck": rpc_bottleneck,
     "list_documents": rpc_list_documents,
     "query_graph": rpc_query_graph,
     "search_documents": rpc_search_documents,

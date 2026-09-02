@@ -511,6 +511,37 @@ deliver the reply.
   the eigendecomposition is ~44ms on a 920-node graph; that key is sound
   because every mutation path here only adds (`add_document`) or zeroes
   (`clear`), and a re-add that moves neither count moves no structure either.
+- **`bottleneck()` has three verdicts, and the middle one is why it is worth
+  having.** The A3 application from `reports/spectral_applicability.md`: sweep
+  the normalized Fiedler vector for the narrowest cut, then name the nodes
+  whose edges cross it -- the entities two topic areas connect through, which
+  are the terms a search should expand on for a query straddling both. Degree
+  does not find them: a bridge entity mentioned by two documents has degree 2.
+  The trap is that **a minimisation always returns something**. Ask for the
+  narrowest cut in a well-knit corpus and you get one, and calling it a bridge
+  is a fabricated finding of the kind `search` was fixed for. Cheeger's *lower*
+  bound is what refuses it, because `mu_2 / 2` is a proof that no cut anywhere
+  in the graph is narrower: `certified_none` when that bound is itself above
+  `BOTTLENECK_CONDUCTANCE` (a theorem about the whole graph, not a failed
+  search), `found` when the sweep cut came in under the line, and
+  `inconclusive` when the bound permits a bottleneck the sweep did not find.
+  That third state is real, not hedging -- the Cheeger bracket runs from 4x to
+  546x wide across the shapes in
+  `reports/spectral_architecture_benchmark.md`, so the sweep genuinely can
+  miss, and collapsing it into "no bottleneck" reports a gap in the evidence as
+  a finding. Like `connectivity()` it runs on the largest component, because on
+  a disconnected graph the Fiedler vector is a component indicator and an
+  orphan is a conductance-0 cut that would win every time -- "your corpus has
+  an orphan" is what `connectivity()` already says. `tied_cuts` reports
+  `mu_2 ~= mu_3`, meaning several equally narrow cuts and an arbitrary choice
+  between them: measured on a three-topic corpus, the *split* alternates
+  between runs (99/198 and 97/200) while the conductance and the bridge
+  entities are identical across all 12. Without the flag a working diagnostic
+  reads as a broken one, and the tie is itself a finding -- three or more topic
+  areas, not two. It is a separate RPC rather than part of `stats()`: an
+  eigenvector plus a sweep over every edge is not something to put on a
+  five-second poll, and it takes no run guard, for the reason `export_corpus`
+  takes none.
 - **The embedding model loads on first use, not on construction.**
   `GraphRAGKnowledgeBase.embedder` is a lazy property and
   `sentence_transformers` is imported inside it. Only `add_document` and
