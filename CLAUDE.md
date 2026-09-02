@@ -352,6 +352,28 @@ deliver the reply.
   *deferred to the run's own `finally`*. That deferral is the whole point:
   exiting the moment the stop is requested would race the snapshot, and a run
   stopped only so the console could close is exactly the one worth keeping.
+- **The deferred exit is a handshake, and both halves decide under
+  `_run_lock`.** `rpc_shutdown` reads `running` and sets `_exit_after_run` in
+  one hold of the lock, *before* `RUN_CONTROL.stop()`; `_finish_run` (the run's
+  `finally`) clears `running` and reads `_exit_after_run` in one hold of the
+  same lock. So whoever holds it either sees a live run and hands it the exit,
+  or sees none and takes the exit itself — exactly one, never neither. Claiming
+  the exit after the stop lost it outright: the stop is what sends the run to
+  its teardown, a run at a superstep boundary gets there in microseconds, it
+  read the flag unset and declined to request the shutdown — correctly, on what
+  it could see — and by the time the flag was set there was no run left to
+  honour it. Nothing set `_shutdown_requested` at all, so the X did not shut
+  the server down. `rpc_stop_run` has the same shape and now guards the same
+  way, or it pins `stopping` True on a run that has already ended.
+- **The console confirms the exit by the server's silence, never by the
+  reply.** The reply to `shutdown` says the exit was *asked for*, and an exit
+  can be lost after it is asked for, so `waitForExit` polls until the socket
+  is dead — on both branches, including the one with nothing in flight, which
+  used to print "The server has stopped" the instant the reply landed and read
+  identically whether the process went or stayed. The probe is a bare `fetch`
+  rather than `rpc()`, since only the fetch failing is evidence; `rpc()` throws
+  on an ordinary error reply too. When the wait runs out it says the server is
+  still running instead of leaving "Closing…" over a live process.
 - **Three nested timeouts, and none of them is redundant.**
   `LLM_TIMEOUT_SECONDS` (config.py) bounds one provider call at the socket —
   each provider spells it differently (`client_kwargs={"timeout":…}` for

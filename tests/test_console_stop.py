@@ -294,3 +294,53 @@ def test_an_exit_through_a_run_waits_for_its_state(monkeypatch):
     assert serve.LAST_RUN_PATH.exists()
     # ...and only then does the process get to go.
     assert serve._shutdown_requested.is_set()
+
+
+def test_a_run_that_ends_the_instant_it_is_stopped_still_lets_the_exit_through(
+    monkeypatch,
+):
+    """The exit must survive the run winning the race the stop itself starts.
+
+    `RUN_CONTROL.stop()` is what makes the run head for its `finally`, and a
+    run sitting at a superstep boundary gets there in microseconds -- before
+    `rpc_shutdown` had claimed the exit. The run read `_exit_after_run` unset
+    and declined to request the shutdown, correctly on what it could see; the
+    flag was then set with no run left to honour it, and nothing ever set
+    `_shutdown_requested`. The process stayed up and the console sat on
+    "Closing...".
+
+    The interleaving is forced here rather than raced: the run reaches its
+    teardown inside `RUN_CONTROL.stop()`, which is the worst case and the one
+    that failed.
+    """
+    with serve._run_lock:
+        serve._run_progress.update(running=True, goal="a long job", run_id="r1")
+    RUN_CONTROL.arm("r1")
+
+    def stop_and_finish_immediately(run_id="", reason=""):
+        RUN_CONTROL.__class__.stop(RUN_CONTROL, run_id, reason)
+        # The run hands its state back before rpc_shutdown gets any further.
+        serve._finish_run()
+        return True
+
+    monkeypatch.setattr(serve.RUN_CONTROL, "stop", stop_and_finish_immediately)
+    answer = serve.rpc_shutdown({"stop_first": True})
+
+    assert answer["exiting"] is True
+    # The process actually goes -- the whole point of the button.
+    assert serve._shutdown_requested.is_set()
+    # And the finished run is not left looking like it is still stopping.
+    with serve._run_lock:
+        assert serve._run_progress["stopping"] is False
+        assert serve._run_progress["running"] is False
+
+
+def test_an_exit_claimed_after_the_run_ended_is_taken_directly(monkeypatch):
+    """The other side of the handshake: no run left, so nobody defers."""
+    serve._finish_run()  # the run ended before the click landed
+
+    answer = serve.rpc_shutdown({"stop_first": True})
+
+    assert answer["exiting"] is True
+    assert answer["running"] is False
+    assert serve._shutdown_requested.is_set()

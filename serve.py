@@ -357,7 +357,11 @@ def rpc_stop_run(params: dict[str, Any]) -> dict[str, Any]:
         return {"stopping": False, "run_id": armed, "detail": detail}
 
     with _run_lock:
-        _run_progress["stopping"] = True
+        # The stop above is what sends the run to its teardown, and that
+        # teardown clears this flag under this same lock. Setting it blind
+        # pinned "STOPPING" on a run that had already ended.
+        if _run_progress["running"]:
+            _run_progress["stopping"] = True
 
     return {
         "stopping": True,
@@ -389,6 +393,25 @@ _exit_after_run = threading.Event()
 SHUTDOWN_GRACE_SECONDS = float(os.getenv("SHUTDOWN_GRACE_SECONDS", "0.5"))
 
 
+def _finish_run() -> None:
+    """Release the run and let a deferred exit through. The run's `finally`.
+
+    The `_exit_after_run` read happens under `_run_lock`, and `rpc_shutdown`
+    decides under that same lock, because the two are one handshake: whoever
+    holds the lock either sees a run still in flight and hands it the exit, or
+    sees it finished and takes the exit itself. Exactly one of those happens.
+    """
+    RUN_CONTROL.disarm()
+    with _run_lock:
+        _run_progress["running"] = False
+        _run_progress["stopping"] = False
+        _run_progress["run_id"] = ""
+        # An exit that was waiting on this run happens now, after the snapshot
+        # the caller has already written -- which is the whole reason it waited.
+        if _exit_after_run.is_set():
+            _shutdown_requested.set()
+
+
 def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     """Exit the server -- what the console's X asks for.
 
@@ -401,9 +424,23 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     """
     stop_first = bool(params.get("stop_first", False))
 
+    # Read the run's state and claim the exit in one hold of `_run_lock`.
+    # Claiming it afterwards lost the exit outright: `RUN_CONTROL.stop()` below
+    # is what makes the run race for its own `finally`, and a run sitting at a
+    # superstep boundary gets there in microseconds. It would read
+    # `_exit_after_run` unset, decline to request the shutdown -- correctly, on
+    # what it could see -- and by the time this function set the flag there was
+    # no longer a run left to honour it. Nothing then set `_shutdown_requested`
+    # at all: the process stayed up, the console sat on "Closing..." until its
+    # own patience ran out, and `stopping` stayed pinned True on a run that had
+    # already finished. Set inside the lock and *before* the stop, so the flag
+    # is always in place before the run it defers to can look at it.
     with _run_lock:
         running = bool(_run_progress["running"])
         goal = str(_run_progress["goal"])
+        if running and stop_first:
+            _exit_after_run.set()
+            _run_progress["stopping"] = True
 
     if running and not stop_first:
         return {
@@ -417,10 +454,12 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     if running:
+        # The run may already have finished between the lock above and here.
+        # That is safe now and needs no branch: `_exit_after_run` was set while
+        # the run was still live, so its `finally` saw the flag and requested
+        # the shutdown itself. This stop then lands on a disarmed control and
+        # is refused, which is exactly right.
         RUN_CONTROL.stop("", "Stopped so the console could exit.")
-        with _run_lock:
-            _run_progress["stopping"] = True
-        _exit_after_run.set()
         return {
             "exiting": True,
             "running": True,
@@ -579,15 +618,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         _save_snapshot(payload)
         raise
     finally:
-        RUN_CONTROL.disarm()
-        with _run_lock:
-            _run_progress["running"] = False
-            _run_progress["stopping"] = False
-            _run_progress["run_id"] = ""
-        # An exit that was waiting on this run happens now, after the snapshot
-        # above -- which is the whole reason it waited.
-        if _exit_after_run.is_set():
-            _shutdown_requested.set()
+        _finish_run()
 
 
 RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {

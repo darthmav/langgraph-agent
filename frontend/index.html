@@ -790,14 +790,41 @@ function exitNotice(title, detail, muted){
 
 const RELAUNCH = `Run <code>./launch_console.sh</code> to start it again.`;
 
-// The server stops answering when it goes, so its silence is the confirmation
-// that the exit worked -- there is no last reply to wait for.
-async function waitForExit(){
-  for(let i = 0; i < 600; i++){
-    await new Promise(r => setTimeout(r, 500));
-    try{ await rpc("status", {}, true); }
-    catch(e){ exitNotice("Console closed", "The server has stopped.", RELAUNCH); return; }
+// The server stops answering when it goes, so its silence is the only
+// confirmation the exit worked. The reply to `shutdown` is not that: it says
+// the exit was *asked for*, and an exit can still be lost after it is asked
+// for. So both branches below wait for the silence, including the one with
+// nothing in flight -- announcing "the server has stopped" on the strength of
+// that reply alone was a claim the console never checked, and it read exactly
+// the same whether the process went or stayed.
+const EXIT_POLL_MS = 500;
+const EXIT_WAIT_TRIES = 600;  // five minutes: nothing in flight is abandoned
+
+// A dead socket, not an RPC error: only the fetch itself failing is evidence
+// that the server has gone. `rpc` throws on both and would read an ordinary
+// error reply as an exit.
+async function serverIsGone(){
+  try{
+    await fetch("/rpc", {method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({method:"status", params:{}})});
+    return false;
+  }catch(e){ return true; }
+}
+
+async function waitForExit(detail){
+  for(let i = 0; i < EXIT_WAIT_TRIES; i++){
+    await new Promise(r => setTimeout(r, EXIT_POLL_MS));
+    if(await serverIsGone()){
+      exitNotice("Console closed", "The server has stopped.", RELAUNCH);
+      return;
+    }
   }
+  // An exit that did not happen has to say so. Leaving "Closing…" standing
+  // over a server that is still up walks the operator away from a live
+  // process believing it is gone.
+  exitNotice("Still running",
+    "The server did not exit. " + (detail || ""),
+    `Stop it from the terminal with Ctrl+C, or check <code>/tmp/ambiguity-console.log</code>.`);
 }
 
 async function requestExit(stopFirst){
@@ -822,9 +849,10 @@ async function requestExit(stopFirst){
   if(r.running){
     exitNotice("Closing…", r.detail,
       "Nothing in flight is abandoned, so this can take up to a minute. The run's state is saved before the server goes.");
-    waitForExit();
+    waitForExit("Its run may still be handing state back.");
   }else{
-    exitNotice("Console closed", "The server has stopped.", RELAUNCH);
+    exitNotice("Closing…", r.detail || "The server is exiting.", "");
+    waitForExit("");
   }
 }
 
