@@ -62,6 +62,12 @@ class GraphRAGKnowledgeBase:
     # raising on the attribute.
     _embedder: "SentenceTransformer | None" = None
 
+    # Same reasoning, and the same construction path: (nodes, edges) -> the
+    # connectivity result computed at that shape. A cache must not depend on
+    # which door built the object, so it defaults on the class rather than in
+    # `__init__`.
+    _connectivity_cache: "tuple[tuple[int, int], dict[str, Any]] | None" = None
+
     def __init__(self, persist_dir: str = "./knowledge"):
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
@@ -368,8 +374,105 @@ class GraphRAGKnowledgeBase:
             "total_edges": len(edges),
         }
 
+    def connectivity(self) -> dict[str, Any]:
+        """Structural health of the knowledge graph: components, and lambda_2.
+
+        A reindex that silently drops edges -- an entity-extraction regression
+        in `add_document`, say -- does not change the document count and does
+        not raise. It shows up here first, as a rising component count or a
+        collapsing `lambda_2`, long before it shows up as worse search.
+
+        **Components come from networkx, not from the spectrum.** The textbook
+        identity is that the multiplicity of eigenvalue 0 equals the number of
+        connected components, and `reports/spectral_applicability.md` proposes
+        counting near-zero eigenvalues for exactly that reason. Two measured
+        objections, both on this project's own graph shape (920 nodes):
+
+        1. It is 42x the cost of the linear-time answer -- 32ms of
+           eigendecomposition against 0.76ms of `number_connected_components`
+           -- for a number networkx already computes exactly.
+        2. On the *normalized* Laplacian it is simply wrong. The identity holds
+           for `L = D - A`; for `I - D^-1/2 A D^-1/2` an isolated node has
+           `D^-1/2 = 0`, so the `I` term leaves a bare 1 on its diagonal and it
+           contributes eigenvalue **1, not 0**. This graph has 29 isolated
+           nodes out of 30 components, so the spectral count returns 1 where
+           the truth is 30.
+
+        **lambda_2 is measured on the largest component, and normalized.** Two
+        deliberate choices:
+
+        - On the whole graph lambda_2 is identically 0 whenever the corpus is
+          disconnected, and it is -- 30 components in the shape measured here.
+          A health signal that reads 0.0 every time is not a signal. The
+          largest component's lambda_2 is the number that actually moves when
+          the body of the corpus knits together or comes apart.
+        - Normalized, so it lands in [0, 2] and does not scale with degree.
+          The unnormalized lambda_2 grows as documents mention more entities,
+          which makes this reindex's value incomparable with last week's --
+          and comparing across reindexes is the entire purpose.
+
+        Returns `lambda_2: None` rather than a number when the largest
+        component has fewer than two nodes: lambda_2 is undefined there, and 0.0
+        would read as "totally disconnected" rather than "nothing to measure".
+        """
+        # Every edge runs document -> entity, so reversing one reads "entity is
+        # mentioned by document" -- the same relation, not a different claim.
+        # That is what makes to_undirected() safe to apply on the caller's
+        # behalf here, and it is applied explicitly because `spectral_graph`
+        # refuses a DiGraph rather than guessing (see `_require_undirected`).
+        undirected = self.graph.to_undirected(as_view=True)
+        n = undirected.number_of_nodes()
+
+        if n == 0:
+            return {"components": 0, "largest_component": 0, "isolated_nodes": 0,
+                    "lambda_2": None}
+
+        components = nx.number_connected_components(undirected)
+        largest = max(nx.connected_components(undirected), key=len)
+        isolated = sum(1 for _, degree in undirected.degree() if degree == 0)
+
+        lambda_2: float | None = None
+        unavailable: str | None = None
+        if len(largest) < 2:
+            unavailable = "largest component has fewer than 2 nodes"
+        else:
+            try:
+                # Imported here, not at module scope. `spectral_graph` lives at
+                # the project root and is not part of the installed
+                # `langgraph_agent` distribution, so it is importable only when
+                # the root is on sys.path -- true for the console and the test
+                # suite, false for an MCP server launched from anywhere else. A
+                # top-level import would turn a missing diagnostic into a module
+                # that will not load at all.
+                from spectral_graph import compute_spectrum
+
+                spectrum = compute_spectrum(
+                    undirected.subgraph(largest), k=2, normalized=True, which="SM"
+                )
+                # Clamp solver noise: lambda_1 is 0 and lambda_2 >= 0, so a
+                # small negative here is arithmetic, not a finding.
+                lambda_2 = max(float(spectrum[1]), 0.0)
+            except ImportError:
+                unavailable = "spectral_graph is not on sys.path"
+            except Exception as exc:  # pragma: no cover - solver-dependent
+                # Same posture as the chunk count in `stats()`: this is a
+                # diagnostic, and losing it must not cost the console the
+                # counters it renders the header from. Named rather than
+                # dropped, so "could not measure" never reads as "measured 0".
+                unavailable = f"{type(exc).__name__}: {exc}"
+
+        result: dict[str, Any] = {
+            "components": components,
+            "largest_component": len(largest),
+            "isolated_nodes": isolated,
+            "lambda_2": lambda_2,
+        }
+        if unavailable is not None:
+            result["lambda_2_unavailable"] = unavailable
+        return result
+
     def stats(self) -> dict[str, Any]:
-        """Counters for the console header."""
+        """Counters for the console header, plus the connectivity health check."""
         documents = sum(
             1 for _, attrs in self.graph.nodes(data=True) if attrs.get("type") == "document"
         )
@@ -380,11 +483,28 @@ class GraphRAGKnowledgeBase:
             # not take out the node/edge counts that come from memory.
             chunks = 0
 
+        nodes = self.graph.number_of_nodes()
+        edges = self.graph.number_of_edges()
+
+        # The console polls this every five seconds and the eigendecomposition
+        # is ~44ms on a 920-node graph, growing with the corpus. It is cached
+        # against (nodes, edges) because those are what every mutation path in
+        # this class moves: `add_document` only ever adds, and `clear` zeroes
+        # both. Re-adding an identical document changes neither count -- and
+        # changes no structure either, so the cached answer is still the right
+        # one. Nothing here removes an edge without removing a node.
+        if self._connectivity_cache is not None and self._connectivity_cache[0] == (nodes, edges):
+            connectivity = self._connectivity_cache[1]
+        else:
+            connectivity = self.connectivity()
+            self._connectivity_cache = ((nodes, edges), connectivity)
+
         return {
             "total_documents": documents,
             "total_chunks": chunks,
-            "total_nodes": self.graph.number_of_nodes(),
-            "total_edges": self.graph.number_of_edges(),
+            "total_nodes": nodes,
+            "total_edges": edges,
+            **connectivity,
         }
 
     def clear(self) -> dict[str, Any]:

@@ -11,6 +11,9 @@ rather than imported, so the package depends on nothing beyond numpy, scipy,
 and networkx.
 """
 
+from collections.abc import Iterable
+from typing import Any
+
 import networkx as nx
 import numpy as np
 
@@ -173,7 +176,7 @@ def spectral_clustering(
     return _kmeans(X, k, n_init=n_init, random_state=random_state)
 
 
-def conductance(G: nx.Graph, S) -> float:
+def conductance(G: nx.Graph, S: Iterable[Any]) -> float:
     """
     Compute the conductance of a node set S.
 
@@ -234,7 +237,7 @@ def conductance(G: nx.Graph, S) -> float:
     return boundary / denom
 
 
-def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple:
+def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple[set[Any], float]:
     """
     Find the best sweep cut along the Fiedler vector.
 
@@ -294,10 +297,10 @@ def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple:
     order = np.argsort(vec)
 
     total_vol = float(degrees.sum())
-    in_S: set = set()
+    in_S: set[Any] = set()
     boundary = 0.0
     vol_S = 0.0
-    best_set: set = set()
+    best_set: set[Any] = set()
     best_phi = float("inf")
 
     # Every prefix but the last; the whole graph is not a cut.
@@ -327,7 +330,7 @@ def sweep_cut(G: nx.Graph, normalized: bool = True) -> tuple:
     return best_set, best_phi
 
 
-def cheeger_bounds(G: nx.Graph) -> tuple:
+def cheeger_bounds(G: nx.Graph) -> tuple[float, float]:
     """
     Compute the Cheeger bounds on the conductance of a graph.
 

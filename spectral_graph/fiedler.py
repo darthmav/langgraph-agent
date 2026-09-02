@@ -6,6 +6,8 @@ to the second smallest eigenvalue of the Laplacian) and use it for graph
 bipartitioning.
 """
 
+from typing import Any
+
 import networkx as nx
 import numpy as np
 from scipy import sparse
@@ -89,10 +91,10 @@ def fiedler_vector(G: nx.Graph, normalized: bool = False) -> np.ndarray:
         eigenvalues, eigenvectors = smallest_eigsh(L, k=2)
         fiedler = eigenvectors[:, 1]
 
-    return fiedler
+    return np.asarray(fiedler)
 
 
-def fiedler_partition(G: nx.Graph, normalized: bool = False) -> tuple:
+def fiedler_partition(G: nx.Graph, normalized: bool = False) -> tuple[set[Any], set[Any]]:
     """
     Partition a graph using the Fiedler vector.
 
@@ -135,7 +137,7 @@ def fiedler_partition(G: nx.Graph, normalized: bool = False) -> tuple:
     return set1, set2
 
 
-def spectral_bipartition(G: nx.Graph, normalized: bool = False) -> dict:
+def spectral_bipartition(G: nx.Graph, normalized: bool = False) -> dict[str, Any]:
     """
     Perform spectral bipartitioning on a graph.
 

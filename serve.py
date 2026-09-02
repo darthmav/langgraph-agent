@@ -117,6 +117,14 @@ def rpc_rag_stats(_: dict[str, Any]) -> dict[str, Any]:
             "total_chunks": 0,
             "total_nodes": 0,
             "total_edges": 0,
+            # Same keys as the indexed branch, so the console renders one shape
+            # rather than branching on which fields happen to exist. `lambda_2`
+            # is None, not 0.0: there is no graph to measure, and 0.0 is a real
+            # reading that means "totally disconnected".
+            "components": 0,
+            "largest_component": 0,
+            "isolated_nodes": 0,
+            "lambda_2": None,
         }
 
     stats = kb_or_none.stats()
