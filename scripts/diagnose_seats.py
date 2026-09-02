@@ -101,11 +101,11 @@ class Candidate:
 # default nobody runs twice.
 CANDIDATES: tuple[Candidate, ...] = (
     Candidate("kimi-k3", "ollama", "kimi-k3:cloud",
-              "General; currently holds Architect and Builder"),
+              "General; held Architect and Builder before the uniform move"),
     Candidate("kimi-code", "ollama", "kimi-k2.7-code:cloud",
               "Code-specialised sibling of kimi-k3"),
     Candidate("qwen", "ollama", "qwen3.5:397b-cloud",
-              "Large general; holds Planner and, since the probes, Researcher"),
+              "Large general; currently holds all four seats"),
     Candidate("nemotron", "ollama", "nemotron-3-ultra:cloud",
               "Large reasoner; held Researcher until it probed empty"),
     Candidate("gemma", "ollama", "gemma4:cloud",
@@ -142,11 +142,12 @@ class TeamConfig:
 TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "baseline",
-        {"architect": "kimi-k3", "planner": "qwen",
-         "researcher": "qwen", "builder": "kimi-k3"},
-        "Shipped defaults. Everything else is measured against this. Keep it "
-        "equal to DEFAULT_SEATS -- a control that has drifted from what the "
-        "project ships is measuring nothing anyone runs.",
+        {"architect": "qwen", "planner": "qwen",
+         "researcher": "qwen", "builder": "qwen"},
+        "Shipped defaults: one model in all four seats. Everything else is "
+        "measured against this. Keep it equal to DEFAULT_SEATS -- a control "
+        "that has drifted from what the project ships is measuring nothing "
+        "anyone runs.",
     ),
     TeamConfig(
         "legacy",
@@ -154,24 +155,30 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
          "researcher": "nemotron", "builder": "kimi-k3"},
         "Control: the seating that shipped before the probes were run, whose "
         "Researcher answers with nothing -- as did gemma4:cloud before it. "
-        "Kept so the difference can be shown rather than asserted.",
+        "Kept so the difference can be shown rather than asserted. It differs "
+        "from baseline in three seats now, so read it against `mixed` to "
+        "isolate the Researcher.",
     ),
     TeamConfig(
         "kimi-solo",
         {"architect": "kimi-k3", "planner": "kimi-k3",
          "researcher": "kimi-k3", "builder": "kimi-k3"},
-        "One model, four seats. Tests whether heterogeneity earns its keep.",
+        "The other uniform seating. With baseline now all-qwen, this is "
+        "what separates 'one model in four seats is fine' from 'qwen "
+        "is fine' -- a distinction baseline alone cannot make.",
     ),
     TeamConfig(
-        "qwen-solo",
-        {"architect": "qwen", "planner": "qwen",
-         "researcher": "qwen", "builder": "qwen"},
-        "Same question, different single model -- separates 'uniform is fine' "
-        "from 'kimi is fine'.",
+        "mixed",
+        {"architect": "kimi-k3", "planner": "qwen",
+         "researcher": "qwen", "builder": "kimi-k3"},
+        "The heterogeneous seating that shipped before all four went to qwen: "
+        "kimi-k3 on the gate and the Builder. Baseline is now the uniform "
+        "one, so this is what asks whether mixing models earns its keep -- "
+        "the same question `qwen-solo` used to ask from the other side.",
     ),
     TeamConfig(
         "code-builder",
-        {"architect": "kimi-k3", "planner": "qwen",
+        {"architect": "qwen", "planner": "qwen",
          "researcher": "qwen", "builder": "kimi-code"},
         "Baseline with a code-specialised Builder. The Builder is the only "
         "seat that calls tools, so it is where specialisation should pay.",
@@ -179,7 +186,7 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "heavy-gate",
         {"architect": "nemotron", "planner": "qwen",
-         "researcher": "qwen", "builder": "kimi-code"},
+         "researcher": "qwen", "builder": "qwen"},
         "Big reasoner on the gate. The Architect ends the run, so a weak gate "
         "shows up as loops rather than as bad text.",
     ),
@@ -193,7 +200,7 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "spend-on-the-gate",
         {"architect": "opus", "planner": "qwen",
-         "researcher": "qwen", "builder": "kimi-k3"},
+         "researcher": "qwen", "builder": "qwen"},
         "Buys only the seat that decides when to stop. The cheapest way to "
         "find out whether the gate is what is failing.",
     ),

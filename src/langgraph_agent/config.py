@@ -39,10 +39,10 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
     ("anthropic", "planner"): "claude-opus-5",
     ("anthropic", "researcher"): "claude-sonnet-5",
     ("anthropic", "builder"): "claude-sonnet-5",
-    ("ollama", "architect"): "kimi-k3:cloud",
+    ("ollama", "architect"): "qwen3.5:397b-cloud",
     ("ollama", "planner"): "qwen3.5:397b-cloud",
     ("ollama", "researcher"): "qwen3.5:397b-cloud",
-    ("ollama", "builder"): "kimi-k3:cloud",
+    ("ollama", "builder"): "qwen3.5:397b-cloud",
     ("openai", "architect"): "gpt-4o",
     ("openai", "planner"): "gpt-4o",
     ("openai", "researcher"): "gpt-4o-mini",
@@ -57,10 +57,10 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
 # Point a seat at Anthropic or OpenAI with {ROLE}_PROVIDER / {ROLE}_MODEL, or
 # from the console dropdown.
 DEFAULT_SEATS: dict[str, dict[str, str]] = {
-    "architect": {"provider": "ollama", "model": "kimi-k3:cloud"},
+    "architect": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
     "planner": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
     "researcher": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
-    "builder": {"provider": "ollama", "model": "kimi-k3:cloud"},
+    "builder": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
 }
 
 
@@ -423,10 +423,10 @@ def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
     """Get the LLM configured for a specific agent role.
 
     Default seats (cloud only -- see DEFAULT_SEATS):
-        Architect  -> Ollama    kimi-k3:cloud      (leading authority)
+        Architect  -> Ollama    qwen3.5:397b-cloud (leading authority)
         Planner    -> Ollama    qwen3.5:397b-cloud
         Researcher -> Ollama    qwen3.5:397b-cloud
-        Builder    -> Ollama    kimi-k3:cloud
+        Builder    -> Ollama    qwen3.5:397b-cloud
     """
     seat = _resolve_seat(agent)
     return _SeatLLM(

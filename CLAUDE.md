@@ -86,10 +86,10 @@ python example_usage.py
 
   | Seat | Provider | Model |
   |---|---|---|
-  | Architect | ollama | `kimi-k3:cloud` |
+  | Architect | ollama | `qwen3.5:397b-cloud` |
   | Planner | ollama | `qwen3.5:397b-cloud` |
   | Researcher | ollama | `qwen3.5:397b-cloud` |
-  | Builder | ollama | `kimi-k3:cloud` |
+  | Builder | ollama | `qwen3.5:397b-cloud` |
 
   Anthropic and OpenAI remain optional cloud providers; no seat uses either by
   default, so a fresh checkout runs without an API key of its own. `:cloud`

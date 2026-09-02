@@ -92,10 +92,10 @@ finished — it reports, and the authority that set the constraints rules on it.
 
 | Agent | Responsibility | Default seat | Tools |
 |---|---|---|---|
-| **Architect** | Sets direction and constraints; rules `approved` / `revise` / `need_research` | `kimi-k3:cloud` (ollama) | None (reasoning only) |
+| **Architect** | Sets direction and constraints; rules `approved` / `revise` / `need_research` | `qwen3.5:397b-cloud` (ollama) | None (reasoning only) |
 | **Planner** | Turns goals into structured plans, routes next | `qwen3.5:397b-cloud` (ollama) | None (reasoning only) |
 | **Researcher** | Gathers deep, relationship-aware knowledge | `qwen3.5:397b-cloud` (ollama) | GraphRAG MCP only |
-| **Builder** | Implements the plan (writes code, edits files) | `kimi-k3:cloud` (ollama) | Filesystem, Git, Terminal |
+| **Builder** | Implements the plan (writes code, edits files) | `qwen3.5:397b-cloud` (ollama) | Filesystem, Git, Terminal |
 
 Every seat is reassignable live from its dropdown in the console; selections last
 for the life of the process.
@@ -145,7 +145,7 @@ ollama.com credentials for `:cloud` tags:
 
 ```bash
 ollama signin
-ollama pull kimi-k3:cloud       # and qwen3.5:397b-cloud, nemotron-3-ultra:cloud
+ollama pull qwen3.5:397b-cloud   # every seat; others optional from the console
 ```
 
 ### Optional OpenAI provider
