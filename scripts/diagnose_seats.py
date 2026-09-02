@@ -235,8 +235,25 @@ EXERCISES: dict[str, Exercise] = {
         "run is finished, and what overrules its `approved` verdict. Report "
         "the answer only -- create no files and change nothing.",
         expect_files=False,
-        what_it_tests="The Researcher against the real corpus, and whether "
-                      "the gate can end a run with no files to point at.",
+        what_it_tests="Retrieval against the real corpus, and whether the "
+                      "gate can end a run with no files to point at. Note it "
+                      "does NOT test the Researcher's model: a hit over 0.3 "
+                      "is formatted straight into the findings without the "
+                      "seat being called, so two Researchers score alike "
+                      "here. Use `offcorpus` for the model.",
+    ),
+    "offcorpus": Exercise(
+        "offcorpus",
+        "Explain how PostgreSQL's MVCC vacuum decides which tuples are safe to "
+        "freeze, and what the wraparound risk is if it falls behind. Report "
+        "the answer only -- create no files and change nothing.",
+        expect_files=False,
+        what_it_tests="The Researcher's *model*, which the `research` exercise "
+                      "cannot reach. `_gather_research` formats retrieval "
+                      "straight into the output whenever the top hit scores "
+                      "over 0.3 and only calls the seat below that, so a "
+                      "question this corpus cannot answer is the only team "
+                      "exercise where the Researcher's model is the variable.",
     ),
     "plan": Exercise(
         "plan",

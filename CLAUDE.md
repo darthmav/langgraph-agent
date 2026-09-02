@@ -257,6 +257,18 @@ deliver the reply.
   all answer with nothing, while `qwen3.5:397b-cloud` and `kimi-k3:cloud`
   answer in full. Re-run it before changing the seat rather than trusting that
   list, which is one machine on one day.
+- **The Researcher's model is only consulted when retrieval is thin.**
+  `_gather_research` calls GraphRAG first and, whenever the top hit scores
+  above `0.3`, formats those chunks straight into the findings and returns
+  without invoking the seat at all. So on a question the corpus answers well,
+  the Researcher's model is not a variable: two different models produce
+  byte-identical `research`, in ~0.0s. This is worth knowing before blaming or
+  crediting a Researcher seat for a run's quality, and it is why the seat's
+  model matters most in precisely the case that is hardest to notice -- a
+  question the corpus cannot answer, which is also when a silent seat sends the
+  run round the loop. `scripts/diagnose_seats.py` keeps the two apart: the
+  `research` exercise measures retrieval, `offcorpus` is the one that reaches
+  the model, and the phase 1 probes stub retrieval out entirely.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step
