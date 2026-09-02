@@ -8,6 +8,41 @@ snippet. **Every snippet in this report was executed successfully in this enviro
 > `scipy.sparse.linalg.eigsh` is reserved for large sparse matrices with `k < N-1`
 > and an explicit `which=` parameter.
 
+## 0. Interpretation of "Spectral Graph Logic"
+
+The phrase "spectral graph logic" is ambiguous between two established senses.
+This report adopts **both**, with different weights:
+
+1. **Spectral graph theory** (primary sense, sections 1-6): the study of graph
+   structure through the eigenvalues and eigenvectors of matrices associated
+   with the graph -- the adjacency matrix `A`, the Laplacian `L = D - A`, and
+   the normalized Laplacian `L_norm = D^{-1/2} L D^{-1/2}`. This is the sense
+   in which "spectral" is standard usage (Fiedler value, Cheeger's inequality,
+   spectral clustering), and it is the sense that yields directly executable
+   numpy/scipy/networkx discoveries, so it carries the body of this report.
+
+2. **Finite model theory / descriptive complexity** (secondary sense): the use
+   of *spectral conditions* as a logical language for defining graph properties.
+   The central result is that first-order logic cannot express connectivity,
+   while spectral properties can: two graphs are **cospectral** (same adjacency
+   or Laplacian spectrum) exactly when they agree on all sentences of
+   **two-variable first-order logic with counting quantifiers** (`C^2`), because
+   cospectrality is equivalent to indistinguishability in the `C^2` game
+   (Dawar--Holm; see also the connection to the 1-dimensional
+   Weisfeiler--Lehman colour refinement, whose stable colouring is a `C^2`
+   invariant). In this sense "spectral graph logic" names the fragment of
+   graph logic whose expressive power is calibrated by the spectrum: a graph
+   property is "spectrally definable" if it is invariant under cospectrality,
+   hence definable in `C^2`. This sense is covered here in statement only --
+   it informs the applicability report (`reports/spectral_applicability.md`)
+   as a *limitative* result: no spectral method can distinguish two cospectral
+   graphs, so any retrieval or clustering feature built on the spectrum alone
+   inherits that blind spot.
+
+Both senses share the same object -- the spectrum of a graph matrix -- and
+differ only in whether it is used as a computational tool (sense 1) or as a
+yardstick of logical expressive power (sense 2).
+
 ## 1. Laplacian Eigenstructure
 
 **Math.** For an undirected graph, the Laplacian `L = D - A` is symmetric positive
