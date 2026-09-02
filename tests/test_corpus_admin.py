@@ -654,3 +654,157 @@ def test_rpc_bottleneck_honours_limit_and_serialises(kb, monkeypatch):
 
     assert len(result["bridge_nodes"]) == 2
     json.dumps(result)  # the console has to be able to render it
+
+
+# ---------------------------------------------------------------------------
+# topics (the A2 spectral clustering)
+# ---------------------------------------------------------------------------
+
+
+def test_topics_recovers_the_planted_topic_areas(kb):
+    """Documents land with the entities that define them, one cluster per topic.
+
+    The bipartite shape is what makes the cluster readable: it mixes documents
+    with their entities, so `top_entities` names the topic rather than listing
+    ids.
+    """
+    kb.graph = _topic_corpus(topics=3, docs=30)
+
+    result = kb.topics()
+
+    assert result["verdict"] == "clustered"
+    assert result["k"] == 3
+    assert result["k_source"] == "eigengap"
+    assert len(result["clusters"]) == 3
+    for cluster in result["clusters"]:
+        assert cluster["documents"] > 0 and cluster["entities"] > 0
+        # A real community: leaving it, few edges cross.
+        assert cluster["conductance"] < 0.1
+        assert cluster["top_entities"]
+
+    # Each planted topic ends up in its own cluster: the entity prefixes do not
+    # mix. BRIDGE* is shared by construction and is allowed to land anywhere.
+    for cluster in result["clusters"]:
+        prefixes = {
+            e.split("_")[0] for e in cluster["top_entities"] if not e.startswith("BRIDGE")
+        }
+        assert len(prefixes) <= 1
+
+
+def test_a_corpus_with_no_topics_gets_no_map(kb):
+    """The eigengap always returns some k; below decisiveness it is not believed.
+
+    A map of a corpus that has no topics is worse than no map. The heuristic's
+    failures are undecided rather than merely wrong -- the winning gap barely
+    beats the runner-up -- and that is what the gate reads.
+    """
+    kb.graph = _topic_corpus(topics=1, docs=90, ents=45, bridges=0)
+
+    result = kb.topics()
+
+    assert result["verdict"] == "no_clear_structure"
+    assert result["clusters"] == []
+    assert result["decisiveness"] < result["threshold"]
+    # The rejected suggestion is still reported, so the caller can see what was
+    # turned down rather than only that something was.
+    assert result["suggested_k"] >= 2
+
+
+def test_an_explicit_k_overrides_the_gate_but_not_the_evidence(kb):
+    """A caller asking for k has made the decision; the numbers still tell them.
+
+    Conductance is the second, independent signal: it exposes a bad k even when
+    the caller insisted, and it is why the clusters are never returned bare.
+    """
+    kb.graph = _topic_corpus(topics=1, docs=90, ents=45, bridges=0)
+
+    result = kb.topics(k=3)
+
+    assert result["verdict"] == "clustered"
+    assert result["k_source"] == "requested"
+    assert result["decisiveness"] < result["threshold"]
+    # These are not communities, and the per-cluster conductance says so.
+    assert max(c["conductance"] for c in result["clusters"]) > 0.2
+
+
+def test_topics_is_stable_across_runs(kb):
+    """ARPACK starts from a random residual; the partition must not follow it."""
+    kb.graph = _topic_corpus(topics=3, docs=30)
+
+    partitions = set()
+    for _ in range(4):
+        result = kb.topics(k=3)
+        partitions.add(
+            frozenset(
+                frozenset(c["top_entities"]) for c in result["clusters"]
+            )
+        )
+    assert len(partitions) == 1
+
+
+def test_topics_runs_on_the_largest_component(kb):
+    """Components are already clusters; rediscovering them wastes every eigenvector."""
+    kb.graph = _topic_corpus(topics=3, docs=30)
+    kb.graph.add_node("orphan", type="document")
+
+    result = kb.topics()
+
+    assert result["component_size"] == kb.graph.number_of_nodes() - 1
+    assert result["k"] == 3
+    clustered = {node for c in result["clusters"] for node in c["sample_documents"]}
+    assert "orphan" not in clustered
+
+
+def test_topics_rejects_an_impossible_k_as_an_error_not_a_verdict(kb):
+    """`unavailable` means the measurement failed, not that the request was bad."""
+    kb.graph = _topic_corpus(topics=2, docs=30)
+
+    with pytest.raises(ValueError, match="k must be between"):
+        kb.topics(k=1)
+    with pytest.raises(ValueError, match="k must be between"):
+        kb.topics(k=10**6)
+
+
+def test_topics_on_a_graph_too_small_to_divide(kb):
+    kb.graph = nx.DiGraph()
+    assert kb.topics()["verdict"] == "no_graph"
+
+    kb.graph = nx.DiGraph()
+    kb.graph.add_edge("a", "b")
+    assert kb.topics()["verdict"] == "no_graph"
+
+
+def test_topics_names_its_own_failure(kb):
+    import spectral_graph
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("solver unavailable")
+
+    kb.graph = _topic_corpus(topics=2, docs=30)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(spectral_graph, "spectral_clustering", _explode)
+        result = kb.topics(k=2)
+
+    assert result["verdict"] == "unavailable"
+    assert "solver unavailable" in result["note"]
+    assert result["clusters"] == []
+
+
+def test_rpc_topics_is_registered_read_only_and_serialisable(kb, monkeypatch):
+    assert serve.RPC_METHODS["topics"] is serve.rpc_topics
+    assert "topics" not in serve.QUIET_METHODS
+
+    kb.graph = _topic_corpus(topics=3, docs=30)
+    monkeypatch.setattr(serve, "kb", None)
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: kb)
+
+    json.dumps(serve.rpc_topics({}))
+    assert serve.rpc_topics({"k": 2})["k"] == 2
+    # An omitted or blank k means "choose one", not "k = 0".
+    assert serve.rpc_topics({"k": None})["k_source"] == "eigengap"
+    assert serve.rpc_topics({"k": ""})["k_source"] == "eigengap"
+
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "kb", None)
+    with pytest.raises(ValueError, match="no corpus"):
+        serve.rpc_topics({})

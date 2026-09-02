@@ -51,6 +51,22 @@ NO_CORPUS_NOTE = (
 # so a caller who wants a different line can draw one.
 BOTTLENECK_CONDUCTANCE = 0.1
 
+# How many times larger the winning eigengap must be than the runner-up before
+# the number of clusters it implies is worth believing. Not a guess: measured
+# in `scripts/spectral_benchmark.py` and again on this graph shape. Across 18
+# corpora with a planted topic count the eigengap picked k correctly every
+# time, at a decisiveness of 5.1 to 23.4; on graphs with no community structure
+# at all -- a grid, a small-world ring, an expander, one dense topic -- it still
+# returned some k, at 1.0 to 1.8. Nothing observed lands between 1.8 and 4.5,
+# so 3.0 sits in open space rather than on a boundary.
+EIGENGAP_DECISIVENESS = 3.0
+
+# The largest k the eigengap is allowed to propose. A whole-corpus map with
+# more parts than this is not a map anyone reads, and the heuristic's failures
+# in the benchmark were all at the top of its range (k = 10 for a barbell whose
+# answer is 2), so the ceiling is also where the bad answers live.
+MAX_AUTO_CLUSTERS = 12
+
 
 class GraphRAGKnowledgeBase:
     """Simple GraphRAG: NetworkX graph + Chroma vector store.
@@ -379,6 +395,175 @@ class GraphRAGKnowledgeBase:
             "edges": edges,
             "total_nodes": len(related),
             "total_edges": len(edges),
+        }
+
+    def topics(
+        self, k: int | None = None, max_entities: int = 6, max_documents: int = 4
+    ) -> dict[str, Any]:
+        """Group the corpus into topic communities, or say there are none.
+
+        The A2 application from `reports/spectral_applicability.md`:
+        Ng-Jordan-Weiss spectral clustering over the normalized Laplacian,
+        which on a bipartite document/entity graph puts documents together with
+        the entities that define them -- so each cluster reads as a topic
+        rather than as a list of ids. `neighborhood()` shows one node's
+        surroundings; this is the whole-corpus map that degree-filtered sweeps
+        cannot produce.
+
+        **The number of clusters is where this application was weakest, and it
+        is not wired straight to the eigengap.** The report proposes choosing
+        `k` from the eigengap; `reports/spectral_architecture_benchmark.md`
+        measured that heuristic getting `k` wrong on 3 of 8 architectures,
+        including k = 10 for a barbell whose answer is 2. The heuristic always
+        returns *some* k, so on a corpus with no topic structure it invents
+        one, and clusters presented without that caveat are a fabricated map.
+
+        What makes it usable is that the failures are not merely wrong, they
+        are *undecided*: the winning gap barely beats the runner-up. Measured
+        across 18 corpora with a planted topic count the eigengap was correct
+        every time at a decisiveness of 5.1-23.4, while a grid, a small-world
+        ring, an expander and a single dense topic all landed at 1.0-1.8. Below
+        `EIGENGAP_DECISIVENESS` the verdict is `no_clear_structure` and no
+        clusters are returned, because a map of a corpus that has no topics is
+        worse than no map.
+
+        An explicit `k` skips that gate -- a caller asking for six clusters has
+        made the decision -- but the decisiveness is still reported, so the
+        answer never hides how much the corpus agreed with it.
+
+        Every cluster carries its own conductance, which is the second and
+        independent check: a cluster that is genuinely a community has a low
+        one, and a `k` that split a real community in half shows up as several
+        clusters with high conductance even when the eigengap looked decisive.
+        The two signals catch different failures and neither replaces the other.
+
+        Runs on the largest connected component, for the reason
+        `connectivity()` and `bottleneck()` do: components are already clusters,
+        so on a disconnected graph the eigenvectors would spend themselves
+        rediscovering the orphans `connectivity()` already counted.
+        """
+        undirected = self.graph.to_undirected(as_view=True)
+        if undirected.number_of_nodes() == 0:
+            return {"verdict": "no_graph", "note": "The graph is empty.", "clusters": []}
+
+        largest = max(nx.connected_components(undirected), key=len)
+        if len(largest) < 4:
+            return {
+                "verdict": "no_graph",
+                "note": "The largest component is too small to divide into topics.",
+                "clusters": [],
+            }
+        component = undirected.subgraph(largest)
+        n = component.number_of_nodes()
+
+        # A caller's bad k is an error, not a verdict. `unavailable` means the
+        # measurement could not be taken; answering a malformed request with it
+        # would file the caller's mistake under the solver's failures.
+        if k is not None and not 2 <= k <= n:
+            raise ValueError(
+                f"k must be between 2 and {n} (the largest component), got {k}"
+            )
+
+        try:
+            # numpy alongside spectral_graph rather than at module scope: it is
+            # used only here, and this module is imported by the MCP server and
+            # by every test that touches the corpus.
+            import numpy as np
+
+            from spectral_graph import compute_spectrum, conductance, spectral_clustering
+
+            # One eigenvalue past the largest k worth proposing, so the gap that
+            # would select that k is itself inside the window.
+            probe = min(MAX_AUTO_CLUSTERS + 1, n - 1)
+            spectrum = np.sort(
+                np.maximum(compute_spectrum(component, k=probe, normalized=True, which="SM"), 0.0)
+            )
+            # Skip the gap out of the trivial eigenvalue: k = 1 is not a finding.
+            gaps = np.diff(spectrum)[1:]
+            order = np.argsort(gaps)[::-1]
+            best = float(gaps[order[0]])
+            runner_up = float(gaps[order[1]]) if len(order) > 1 else 0.0
+            decisiveness = best / runner_up if runner_up > 1e-12 else float("inf")
+            suggested = int(order[0]) + 2
+
+            if k is None:
+                if decisiveness < EIGENGAP_DECISIVENESS:
+                    return {
+                        "verdict": "no_clear_structure",
+                        "note": (
+                            f"The eigengap suggests {suggested} clusters but only "
+                            f"{decisiveness:.1f}x more strongly than the next candidate, "
+                            f"under the {EIGENGAP_DECISIVENESS}x this needs to be worth "
+                            f"reporting. Corpora with no topic structure still produce a "
+                            f"suggestion; this one looks like that. Pass an explicit k to "
+                            f"cluster anyway."
+                        ),
+                        "suggested_k": suggested,
+                        "decisiveness": decisiveness,
+                        "threshold": EIGENGAP_DECISIVENESS,
+                        "clusters": [],
+                    }
+                k, k_source = suggested, "eigengap"
+            else:
+                k_source = "requested"
+
+            labels = spectral_clustering(component, k=k, normalized=True)
+        except ImportError:
+            return {"verdict": "unavailable", "note": "spectral_graph is not on sys.path.",
+                    "clusters": []}
+        except Exception as exc:  # pragma: no cover - solver-dependent
+            return {"verdict": "unavailable", "note": f"{type(exc).__name__}: {exc}",
+                    "clusters": []}
+
+        nodes = list(component.nodes())
+        # Annotated: the value types are heterogeneous, so without this mypy
+        # infers a union from the literal and the sort key below stops typing.
+        clusters: list[dict[str, Any]] = []
+        for label in range(k):
+            members = [nodes[i] for i in range(len(nodes)) if labels[i] == label]
+            if not members:
+                continue
+            member_set = set(members)
+            documents = [
+                node for node in members
+                if self.graph.nodes[node].get("type") == "document"
+            ]
+            entities = [
+                node for node in members
+                if self.graph.nodes[node].get("type") == "entity"
+            ]
+            # The cluster's name, in effect: its best-connected entities are
+            # what the documents in it have in common, which is the thing a
+            # reader wants and a list of node ids is not.
+            top_entities = sorted(
+                entities, key=lambda node: (-component.degree(node), str(node))
+            )[:max_entities]
+            clusters.append(
+                {
+                    "id": label,
+                    "size": len(members),
+                    "documents": len(documents),
+                    "entities": len(entities),
+                    "conductance": (
+                        float(conductance(component, member_set))
+                        if 0 < len(member_set) < n
+                        else None
+                    ),
+                    "top_entities": top_entities,
+                    "sample_documents": sorted(documents, key=str)[:max_documents],
+                }
+            )
+
+        clusters.sort(key=lambda cluster: -cluster["size"])
+        return {
+            "verdict": "clustered",
+            "k": k,
+            "k_source": k_source,
+            "suggested_k": suggested,
+            "decisiveness": decisiveness,
+            "threshold": EIGENGAP_DECISIVENESS,
+            "component_size": n,
+            "clusters": clusters,
         }
 
     def bottleneck(self, limit: int = 12) -> dict[str, Any]:
