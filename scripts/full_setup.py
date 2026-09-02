@@ -90,9 +90,15 @@ def test_search():
     """Test GraphRAG search."""
     print("\nTesting GraphRAG search...")
 
-    from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+    from langgraph_agent.graphrag_server import open_knowledge_base
 
-    kb = GraphRAGKnowledgeBase()
+    # Opened, not created. The reindex above is what builds the corpus; if it
+    # built nothing, this must say so rather than quietly make an empty store.
+    kb = open_knowledge_base()
+    if kb is None:
+        print("  \u2717 No corpus was built, so there is nothing to search")
+        return False
+
     results = kb.search("Planner agent", top_k=2)
 
     if results:

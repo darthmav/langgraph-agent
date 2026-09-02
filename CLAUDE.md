@@ -456,6 +456,36 @@ deliver the reply.
   node put under a deadline. The worker is a bare daemon thread on purpose:
   `ThreadPoolExecutor`'s atexit hook joins its non-daemon threads, so one
   abandoned worker would hold up interpreter shutdown.
+- **No corpus exists until someone indexes one, and reading is not indexing.**
+  `GraphRAGKnowledgeBase.__init__` *creates* the store -- `mkdir`, plus
+  Chroma's files -- so the two doors are kept apart: `get_knowledge_base()`
+  builds and is reserved for `rpc_reindex` and the index scripts, while
+  `open_knowledge_base()` returns `None` when there is nothing on disk and is
+  what every read goes through (`corpus_exists` / `corpus_state` answer without
+  opening anything at all). Wiring a read to the creating door is not a
+  cosmetic mistake: `serve.py` used to start a preload thread at import and the
+  console polls `rag_stats` every five seconds, so starting the server was
+  enough to leave a store behind within seconds -- one that had never been
+  indexed and reported itself as a knowledge base to everything that looked
+  afterwards. The console reports `absent` / `empty` / `indexed` rather than a
+  bare count, because four zeros read as a knowledge base that happens to be
+  empty, and only one of those states means "press Reindex". *Export* and
+  *Clear* refuse when it is absent: creating a store in order to empty it
+  leaves behind exactly what was asked to be removed.
+- **A search with no corpus returns nothing, and says so.** It used to come
+  back with one fabricated row -- `[GraphRAG not indexed]`, score 0.0, in
+  `results` -- which is a made-up retrieval hit in the field real ones arrive
+  in, and the Builder reads that field. The empty answer carries
+  `source: "no_corpus"` and `NO_CORPUS_NOTE` instead, worded once in
+  `graphrag_server` so the MCP tools, the Builder's belt and the console cannot
+  describe the same absence differently.
+- **The embedding model loads on first use, not on construction.**
+  `GraphRAGKnowledgeBase.embedder` is a lazy property and
+  `sentence_transformers` is imported inside it. Only `add_document` and
+  `search` embed; counting the corpus, listing its documents, drawing its graph
+  and exporting it do not, and those are what the console does on a timer.
+  Loading it in `__init__` meant every header poll paid for the model and
+  importing the module pulled in torch behind it.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - **A corpus clear empties in place and must reach disk.** `clear()` deletes
@@ -496,7 +526,7 @@ deliver the reply.
 
 - **Tests are slow** — The first run loads `sentence-transformers` and Chroma. Subsequent runs use the cached singleton.
 - **Mypy errors from upstream stubs** — Prefer `# type: ignore[...]` with a comment over disabling strict mode.
-- **GraphRAG returns no results** — Run `python scripts/reindex.py` to rebuild the knowledge base.
+- **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus — nothing indexed` when none has been built, and nothing builds one for you. Run `python scripts/reindex.py`, or press *Reindex project*.
 - **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
 - **Graph tab is empty** — Run `python scripts/reindex.py` (or press Reindex project on the Corpus tab). A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.

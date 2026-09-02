@@ -125,10 +125,17 @@ def test_graphrag_search() -> bool:
     print_header("STEP 3: Testing GraphRAG Search")
 
     try:
-        from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+        from langgraph_agent.graphrag_server import open_knowledge_base
 
         print_step("Loading knowledge base")
-        kb = GraphRAGKnowledgeBase()
+        # Opened, not created. Checking that search works must not leave a
+        # corpus behind on a machine that had none -- an empty store then
+        # reports itself as a knowledge base to everything that looks.
+        kb = open_knowledge_base()
+        if kb is None:
+            print("  \u2717 No corpus has been indexed; nothing to search.")
+            print("    Run: python scripts/index_knowledge.py")
+            return False
 
         print_step("Testing search queries")
 

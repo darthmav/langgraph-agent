@@ -1441,8 +1441,13 @@ def main(argv: list[str]) -> int:
         warm_started = time.monotonic()
 
         def _warm() -> int:
-            from langgraph_agent.graphrag_server import get_knowledge_base
-            return int(get_knowledge_base().collection.count())
+            # `open_knowledge_base`, so a sweep that only meant to measure
+            # seats does not leave a corpus behind on a machine that had none.
+            # No corpus counts as zero documents, which is what the warning
+            # below is already about.
+            from langgraph_agent.graphrag_server import open_knowledge_base
+            kb = open_knowledge_base()
+            return int(kb.collection.count()) if kb is not None else 0
 
         try:
             # Bounded for the same reason every node is. Loading the embedder

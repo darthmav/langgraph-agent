@@ -49,11 +49,16 @@ def main():
 
     # 3. Test GraphRAG
     try:
-        from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+        from langgraph_agent.graphrag_server import open_knowledge_base
 
-        kb = GraphRAGKnowledgeBase()
-        kb.search("test", top_k=1)
-        results.append("✓ GraphRAG working")
+        # Opened, not created: a silent verification run must not be the thing
+        # that puts a corpus on a machine that had none.
+        kb = open_knowledge_base()
+        if kb is None:
+            results.append("- GraphRAG has no corpus (run scripts/reindex.py)")
+        else:
+            kb.search("test", top_k=1)
+            results.append("✓ GraphRAG working")
     except Exception as e:
         results.append(f"✗ GraphRAG error: {e}")
 

@@ -39,6 +39,17 @@ reindex regenerates them.
 holding an empty index — the same shape a reindex leaves behind. It arms on the
 first click and disarms itself after a few seconds.
 
+**Nothing builds a corpus but you.** A fresh checkout has none, starting the
+console does not make one, and neither does polling it, searching it or asking
+whether it exists — the reads report `no corpus — nothing indexed` and leave
+the disk alone. Indexing is the only act that creates the store, which is why
+the header keeps three states apart: *absent* (nobody has indexed here),
+*empty* (a corpus that exists and holds nothing — what *Clear corpus* leaves),
+and the counts, once there is something to count. *Export* and *Clear* are
+disabled while it is absent; creating a store in order to empty it would leave
+behind the thing you were asking to be rid of. The local embedding model loads
+on the first index or search, not at startup.
+
 Both *Clear corpus* and *Reindex project* are refused while a run is in flight,
 and the refusal says which run. The Researcher searches this corpus, and
 changing it underneath a run does not fail its search — an emptied corpus

@@ -14,15 +14,19 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import chromadb
 import networkx as nx
 from mcp.server import MCPServer
 
-# Force CPU for sentence-transformers (GPU 1060 3GB not compatible)
+# Force CPU for sentence-transformers (GPU 1060 3GB not compatible). Set at
+# import rather than beside the model load below, because it has to be in the
+# environment before torch is imported, and that import is now deferred.
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
-from sentence_transformers import SentenceTransformer  # noqa: E402
+
+if TYPE_CHECKING:  # pragma: no cover - import cost is the whole point
+    from sentence_transformers import SentenceTransformer
 
 # The one model that runs on this machine. Named once because three places
 # have to agree on it: the embedder the store is built with, the status check
@@ -30,16 +34,37 @@ from sentence_transformers import SentenceTransformer  # noqa: E402
 # produced the corpus it is dumping.
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
+# What every caller says when asked to search a corpus nobody has built. One
+# string because three doors report it -- the MCP tools, the Builder's tool
+# belt, and the console -- and a corpus that reads as absent in one place and
+# as merely empty in another is the confusion this whole path exists to avoid.
+NO_CORPUS_NOTE = (
+    "No corpus has been indexed. Nothing is retrieved and nothing is loaded "
+    "until one is built: run `python scripts/reindex.py`, or press Reindex "
+    "project on the console's Corpus tab."
+)
+
 
 class GraphRAGKnowledgeBase:
-    """Simple GraphRAG: NetworkX graph + Chroma vector store."""
+    """Simple GraphRAG: NetworkX graph + Chroma vector store.
+
+    Constructing this **creates the store on disk** -- `mkdir`, plus Chroma's
+    own files under `chroma/`. That is why it is not the door most callers go
+    through: `open_knowledge_base()` returns the corpus only if one already
+    exists, and `get_knowledge_base()` is reserved for the act of building one.
+    A corpus that appeared because a status poll happened to run is not a
+    corpus anyone asked for.
+    """
+
+    # Declared on the class, not assigned in `__init__`, so an instance built
+    # field by field around a fake collection -- which is how the corpus tests
+    # avoid the model entirely -- still reads as "not loaded yet" rather than
+    # raising on the attribute.
+    _embedder: "SentenceTransformer | None" = None
 
     def __init__(self, persist_dir: str = "./knowledge"):
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
-
-        # Initialize embedding model (local, no API key needed)
-        self.embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
         # Initialize Chroma vector store
         self.chroma_client = chromadb.PersistentClient(str(self.persist_dir / "chroma"))
@@ -51,6 +76,22 @@ class GraphRAGKnowledgeBase:
         # Initialize knowledge graph
         self.graph = nx.DiGraph()
         self._load_graph()
+
+    @property
+    def embedder(self) -> "SentenceTransformer":
+        """The local embedding model, loaded the first time something embeds.
+
+        Deferred because loading it is the one heavyweight thing this machine
+        does, and it is only needed to add a document or to run a query. It
+        used to load in `__init__`, so opening the corpus at all -- a header
+        poll, a document list -- paid for it, and importing this module paid
+        for pulling in torch behind it.
+        """
+        if self._embedder is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        return self._embedder
 
     def _load_graph(self) -> None:
         """Load graph from disk if exists."""
@@ -521,38 +562,93 @@ def index_project_files(
 _kb_instance: GraphRAGKnowledgeBase | None = None
 
 
-def get_knowledge_base() -> GraphRAGKnowledgeBase:
-    """Return the singleton GraphRAG knowledge base instance."""
+def get_knowledge_base(persist_dir: str = "./knowledge") -> GraphRAGKnowledgeBase:
+    """The singleton knowledge base, **built if it does not exist yet**.
+
+    This is the door for the one act that is allowed to bring a corpus into
+    existence: indexing. Everything that only wants to read -- the console's
+    header, the document list, the graph sweep, the Researcher's search --
+    goes through `open_knowledge_base()` instead, which returns `None` rather
+    than manufacturing a store. Reading is not a reason for a corpus to exist.
+
+    `persist_dir` is honoured only on the call that builds the singleton; the
+    process holds one corpus, and the argument exists so a caller that opened
+    a store somewhere other than the default is not silently handed the
+    default one instead.
+    """
     global _kb_instance
     if _kb_instance is None:
-        _kb_instance = GraphRAGKnowledgeBase()
+        _kb_instance = GraphRAGKnowledgeBase(persist_dir)
     return _kb_instance
 
 
-def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, str]:
-    """Check whether a knowledge base exists and has documents.
+def corpus_exists(persist_dir: str = "./knowledge") -> bool:
+    """Whether a corpus has been built, without building or opening one.
 
-    This is intentionally lightweight: it opens the Chroma collection directly
-    without loading the sentence-transformers model, so it can be used in
-    health/status endpoints without blocking startup.
+    A store that was emptied by `clear()` still exists -- that is the point of
+    emptying it in place -- so this answers "has anyone indexed here", not "is
+    there anything in it". `corpus_state()` tells those two apart.
+    """
+    return (Path(persist_dir) / "chroma").is_dir()
+
+
+def open_knowledge_base(persist_dir: str = "./knowledge") -> GraphRAGKnowledgeBase | None:
+    """The corpus if one has been built, `None` if none has. Never builds one.
+
+    The reason this exists rather than every caller using `get_knowledge_base`:
+    constructing a `GraphRAGKnowledgeBase` creates the store on disk. The
+    console polls its header every five seconds, so with the creating door
+    wired to a read, starting the server was enough to leave a corpus behind --
+    an empty one that then reported itself as a knowledge base. A corpus should
+    be there because someone indexed, or not be there at all.
+    """
+    if _kb_instance is not None:
+        return _kb_instance
+    if not corpus_exists(persist_dir):
+        return None
+    return get_knowledge_base(persist_dir)
+
+
+def corpus_state(persist_dir: str = "./knowledge") -> tuple[str, str]:
+    """Report the corpus as `absent`, `empty` or `indexed`, plus the model name.
+
+    Deliberately lightweight and deliberately non-creating: it opens Chroma
+    read-only and never loads sentence-transformers, so the console can poll it
+    on a timer without either blocking on the model or bringing a store into
+    being as a side effect of asking about one.
+
+    `absent` and `empty` are kept apart because they call for different things.
+    Nothing has ever been indexed here, versus a corpus that exists and was
+    emptied -- and a run against either finds nothing, which is exactly why the
+    operator has to be told which it was.
+
+    Returns:
+        (state, embedding_model_name)
+    """
+    chroma_dir = Path(persist_dir) / "chroma"
+    if not chroma_dir.is_dir():
+        return "absent", EMBEDDING_MODEL_NAME
+
+    try:
+        client = chromadb.PersistentClient(str(chroma_dir))
+        # `get_collection`, not `get_or_create_collection`: asking after the
+        # corpus must not create the collection it is asking about.
+        collection = client.get_collection(name="knowledge")
+        return ("indexed" if collection.count() > 0 else "empty"), EMBEDDING_MODEL_NAME
+    except Exception:
+        # A store whose collection is missing or unreadable has nothing to
+        # answer with, which is what `empty` already means to every caller.
+        return "empty", EMBEDDING_MODEL_NAME
+
+
+def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, str]:
+    """Whether the knowledge base holds any documents.
 
     Returns:
         (indexed, embedding_model_name)
     """
-    persist_path = Path(persist_dir)
-    chroma_dir = persist_path / "chroma"
-    if not chroma_dir.exists():
-        return False, EMBEDDING_MODEL_NAME
-
-    try:
-        client = chromadb.PersistentClient(str(chroma_dir))
-        collection = client.get_or_create_collection(
-            name="knowledge",
-            metadata={"hnsw:space": "cosine"},
-        )
-        return collection.count() > 0, EMBEDDING_MODEL_NAME
-    except Exception:
-        return False, EMBEDDING_MODEL_NAME
+    state, model = corpus_state(persist_dir)
+    return state == "indexed", model
 
 
 # Create MCP server
@@ -562,16 +658,34 @@ server = MCPServer("graphrag")
 # Register tools with the server
 @server.tool(name="search_knowledge_graph")
 def search_tool(query: str, top_k: int = 5) -> str:
-    """Search the knowledge base for relevant documents and passages."""
-    results = get_knowledge_base().search(query, top_k)
-    return json.dumps(results, indent=2)
+    """Search the knowledge base for relevant documents and passages.
+
+    Searching a corpus nobody built returns no results and says why. It does
+    not build one: a retrieval call is not a request for a knowledge base.
+    """
+    kb = open_knowledge_base()
+    if kb is None:
+        return json.dumps({"results": [], "source": "no_corpus", "note": NO_CORPUS_NOTE}, indent=2)
+    return json.dumps(kb.search(query, top_k), indent=2)
 
 
 @server.tool(name="query_knowledge_graph")
 def query_tool(entity: str, hops: int = 2) -> str:
     """Query the knowledge graph for entity relationships."""
-    result = get_knowledge_base().query_graph(entity, hops)
-    return json.dumps(result, indent=2)
+    kb = open_knowledge_base()
+    if kb is None:
+        return json.dumps(
+            {
+                "entity": entity,
+                "neighbors": [],
+                "subgraph_nodes": 0,
+                "subgraph_edges": 0,
+                "source": "no_corpus",
+                "note": NO_CORPUS_NOTE,
+            },
+            indent=2,
+        )
+    return json.dumps(kb.query_graph(entity, hops), indent=2)
 
 
 async def main() -> None:

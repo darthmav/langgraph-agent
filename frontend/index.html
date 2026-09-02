@@ -75,6 +75,7 @@ body::before{
 #gone p.muted{color:var(--ink-3)}
 #gone code{color:var(--accent)}
 #stats b{color:var(--ink-2);font-weight:600}
+#stats .nocorpus{color:var(--ink-3);font-style:italic}
 
 #warn{
   grid-area:warn; display:none; background:#3a1618; border-bottom:1px solid #f8717155;
@@ -528,7 +529,9 @@ async function trace(){
 function draw(ns, es){
   const svg = $("#g"), W = svg.clientWidth || 900, H = svg.clientHeight || 520;
   $("#gempty").style.display = ns.length ? "none" : "grid";
-  if(!ns.length) $("#gempty").innerHTML = "No graph yet &mdash; run <code>python scripts/reindex.py</code>,<br>or press Reindex project on the Corpus tab.";
+  if(!ns.length) $("#gempty").innerHTML = CORPUS === "absent"
+    ? "No corpus &mdash; nothing is indexed until you ask for it.<br>Run <code>python scripts/reindex.py</code>, or press Reindex project on the Corpus tab."
+    : "No graph yet &mdash; run <code>python scripts/reindex.py</code>,<br>or press Reindex project on the Corpus tab.";
 
   NODES = ns.map((n, i) => ({...n,
     x: W/2 + Math.cos(i/ns.length*6.283) * Math.min(W,H)*.3,
@@ -641,6 +644,13 @@ async function search(){
   if(!query) return;
   const r = await rpc("search_documents", {query, top_k:+$("#topk").value || 5});
   const hits = r.results || [];
+  // "no results" and "there is nothing to search" are different answers, and
+  // the second one is not a property of the query.
+  if(r.source === "no_corpus"){
+    setCorpusState("absent");
+    $("#hits").innerHTML = `<div class="muted">${esc(r.note || "No corpus has been indexed.")}</div>`;
+    return;
+  }
   $("#hits").innerHTML = hits.length ? hits.map((h,i) =>
     `<div class="hit"><div class="t"><span>${esc(h.metadata?.path || h.id)}</span>`+
     `<span class="sc">${(h.score ?? 0).toFixed(3)}</span></div>`+
@@ -653,11 +663,36 @@ $("#qbtn").onclick = () => search().catch(()=>{});
 $("#q").onkeydown = e => { if(e.key === "Enter") search().catch(()=>{}); };
 
 /* ---------- corpus ---------- */
+
+// Three states, not two: `absent` (nobody has indexed here), `empty` (a corpus
+// that exists and holds nothing — what Clear leaves behind), and `indexed`.
+// The server keeps them apart because a run against either of the first two
+// retrieves nothing, and only one of them is a corpus at all. Export and Clear
+// are meaningless against `absent`, so they are disabled rather than left to
+// fail: creating a store in order to empty it is the opposite of the ask.
+let CORPUS = "absent";
+function setCorpusState(state){
+  CORPUS = state;
+  const absent = state === "absent";
+  $("#exbtn").disabled = absent;
+  $("#clrbtn").disabled = absent;
+  $("#exbtn").title = absent
+    ? "No corpus has been indexed — nothing to export."
+    : "Download the whole corpus as one JSON file — the graph plus every chunk and its metadata. Embeddings are left out; a reindex regenerates them locally.";
+  $("#clrbtn").title = absent
+    ? "No corpus has been indexed — nothing to clear."
+    : "Empty the corpus. The files under knowledge/ stay, holding an empty store — the same shape a reindex leaves. Refused while a run is in flight.";
+}
+
 async function loadDocs(){
-  const docs = (await rpc("list_documents", {}, true)).documents || [];
+  const r = await rpc("list_documents", {}, true);
+  const docs = r.documents || [];
+  if(r.corpus) setCorpusState(r.corpus);
   $("#docs").innerHTML = docs.length ? docs.map(d =>
     `<div class="doc" data-id="${esc(d.id)}"><span>${esc(d.title)}</span><span>${esc(d.id)}</span></div>`).join("")
-    : `<div class="muted">nothing indexed — press Reindex project</div>`;
+    : (CORPUS === "absent"
+        ? `<div class="muted">no corpus — nothing is indexed until you press Reindex project</div>`
+        : `<div class="muted">corpus is empty — press Reindex project</div>`);
   $$("#docs .doc").forEach(el => el.onclick = () => {
     $("#gnode").value = el.dataset.id;
     $$(".tab").find(t => t.dataset.p === "graph").click();
@@ -1117,11 +1152,16 @@ async function poll(quiet){
       rpc("rag_stats", {}, true),
     ]);
     $("#embed-model").textContent = st.embedding;
-    $("#stats").innerHTML =
-      `<span>docs <b>${stats.total_documents}</b></span>`+
-      `<span>chunks <b>${stats.total_chunks}</b></span>`+
-      `<span>nodes <b>${stats.total_nodes}</b></span>`+
-      `<span>edges <b>${stats.total_edges}</b></span>`;
+    setCorpusState(stats.corpus || (stats.total_chunks ? "indexed" : "empty"));
+    // Four zeros read as a knowledge base that happens to be empty. When none
+    // has been built there is nothing to count, and saying so is the honest
+    // reading -- it is also the only one that tells the operator what to do.
+    $("#stats").innerHTML = CORPUS === "absent"
+      ? `<span class="nocorpus">no corpus &mdash; nothing indexed</span>`
+      : `<span>docs <b>${stats.total_documents}</b></span>`+
+        `<span>chunks <b>${stats.total_chunks}</b></span>`+
+        `<span>nodes <b>${stats.total_nodes}</b></span>`+
+        `<span>edges <b>${stats.total_edges}</b></span>`;
     await loadCrew(true);
   }catch(e){ /* goOffline already reported it */ }
 }

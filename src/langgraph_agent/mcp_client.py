@@ -126,55 +126,65 @@ class MCPClient:
 
     # GraphRAG implementations (use local knowledge base when available)
 
+    def _open_kb(self) -> GraphRAGKnowledgeBase | None:
+        """The corpus if one has been built, `None` otherwise.
+
+        `open_knowledge_base`, never `get_knowledge_base`: the second one
+        creates the store, and a Researcher's query is not a request for a
+        knowledge base. Cached on the client so repeated calls in one run do
+        not reopen Chroma. The cache is only ever filled with a real corpus,
+        so a search that happens before the operator indexes does not pin
+        `None` for the rest of the process.
+        """
+        if self._kb is None:
+            try:
+                from langgraph_agent.graphrag_server import open_knowledge_base
+
+                self._kb = open_knowledge_base()
+            except Exception:
+                self._kb = None
+        return self._kb
+
     async def _graphrag_search(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Search the knowledge base (cached singleton)."""
+        """Search the knowledge base (cached singleton).
+
+        With no corpus this returns *no* results. It used to return one
+        fabricated row -- `[GraphRAG not indexed]`, score 0.0 -- which is a
+        made-up retrieval hit sitting in the same field real ones arrive in,
+        and the Builder reads that field.
+        """
         query = args.get("query", "")
         top_k = args.get("top_k", 5)
 
-        # Use the cached knowledge base singleton to avoid reloading models.
-        if self._kb is None:
-            try:
-                from langgraph_agent.graphrag_server import get_knowledge_base
+        kb = self._open_kb()
+        if kb is None:
+            from langgraph_agent.graphrag_server import NO_CORPUS_NOTE
 
-                self._kb = get_knowledge_base()
-            except Exception:
-                self._kb = None
+            return {"results": [], "source": "no_corpus", "note": NO_CORPUS_NOTE}
 
-        if self._kb:
-            results = self._kb.search(query, top_k)
-            return {"results": results, "source": "local_graphrag"}
-        else:
-            return {
-                "results": [{"content": "[GraphRAG not indexed]", "score": 0.0, "id": "no_kb"}],
-                "source": "stub",
-            }
+        return {"results": kb.search(query, top_k), "source": "local_graphrag"}
 
     async def _graphrag_query_graph(self, args: dict[str, Any]) -> dict[str, Any]:
         """Query the knowledge graph."""
         entity = args.get("entity", "")
         hops = args.get("hops", 2)
 
-        if self._kb is None:
-            try:
-                from langgraph_agent.graphrag_server import get_knowledge_base
+        kb = self._open_kb()
+        if kb is None:
+            from langgraph_agent.graphrag_server import NO_CORPUS_NOTE
 
-                self._kb = get_knowledge_base()
-            except Exception:
-                self._kb = None
-
-        if self._kb:
-            result = self._kb.query_graph(entity, hops)
-            result["source"] = "local_graphrag"
-            return result
-        else:
             return {
                 "entity": entity,
                 "neighbors": [],
                 "subgraph_nodes": 0,
                 "subgraph_edges": 0,
-                "source": "stub",
-                "note": "Run 'python scripts/index_knowledge.py' to build the knowledge base",
+                "source": "no_corpus",
+                "note": NO_CORPUS_NOTE,
             }
+
+        result = kb.query_graph(entity, hops)
+        result["source"] = "local_graphrag"
+        return result
 
     # Real filesystem implementations
 

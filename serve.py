@@ -51,37 +51,45 @@ from langgraph_agent.config import (  # noqa: E402
 from langgraph_agent.control import ACTIVITY, RUN_CONTROL  # noqa: E402
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
+    NO_CORPUS_NOTE,
     GraphRAGKnowledgeBase,
+    corpus_state,
     get_knowledge_base,
     index_project_files,
-    is_knowledge_base_indexed,
+    open_knowledge_base,
 )
 
-# Initialize graph and knowledge base
+# Initialize graph. The knowledge base is deliberately *not* initialized here.
 graph = create_agent_graph()
+
+# The corpus, once something has opened one. There is no preload: this used to
+# be filled by a background thread started at import, which meant starting the
+# server created a store on disk and loaded the embedding model whether or not
+# anyone wanted a corpus. A corpus exists because someone indexed, or it does
+# not exist.
 kb: GraphRAGKnowledgeBase | None = None
-_kb_loaded = threading.Event()
 
 
-def _preload_kb() -> None:
-    """Load the knowledge base in the background so the first run is fast."""
+def _open_kb() -> GraphRAGKnowledgeBase | None:
+    """The corpus if one has been built, `None` if none has. Never builds one.
+
+    Every read goes through here. The console polls `rag_stats` every five
+    seconds, so a read that creates is a corpus nobody asked for, arriving
+    within seconds of the server starting and reporting itself as a knowledge
+    base thereafter.
+    """
     global kb
-    try:
-        kb = get_knowledge_base()
-    except Exception:
-        # If the knowledge base cannot be loaded, the first run will attempt
-        # again and fall back to LLM-only research. The server stays usable.
-        pass
-    finally:
-        _kb_loaded.set()
+    if kb is None:
+        kb = open_knowledge_base()
+    return kb
 
 
-# Start background preload as soon as the server module loads.
-threading.Thread(target=_preload_kb, daemon=True).start()
+def _kb_for_indexing() -> GraphRAGKnowledgeBase:
+    """The corpus, **created if it does not exist**. Only `rpc_reindex` may call it.
 
-
-def _kb() -> GraphRAGKnowledgeBase:
-    """The knowledge base, loading it on demand if the preload has not landed."""
+    Indexing is the one act that is allowed to bring a corpus into being,
+    because it is the one act that is a request for one.
+    """
     global kb
     if kb is None:
         kb = get_knowledge_base()
@@ -94,13 +102,34 @@ def _kb() -> GraphRAGKnowledgeBase:
 
 
 def rpc_rag_stats(_: dict[str, Any]) -> dict[str, Any]:
-    """Counters for the console header."""
-    return _kb().stats()
+    """Counters for the console header.
+
+    `corpus` is what the header actually renders on: zeros alone cannot tell a
+    corpus that was indexed and then emptied from one that was never built,
+    and only the second means "press Reindex".
+    """
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        return {
+            "corpus": "absent",
+            "note": NO_CORPUS_NOTE,
+            "total_documents": 0,
+            "total_chunks": 0,
+            "total_nodes": 0,
+            "total_edges": 0,
+        }
+
+    stats = kb_or_none.stats()
+    stats["corpus"] = "indexed" if stats["total_chunks"] else "empty"
+    return stats
 
 
 def rpc_list_documents(_: dict[str, Any]) -> dict[str, Any]:
     """Every document node; the seed set for a graph sweep."""
-    return _kb().list_documents()
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        return {"documents": [], "corpus": "absent", "note": NO_CORPUS_NOTE}
+    return kb_or_none.list_documents()
 
 
 def rpc_query_graph(params: dict[str, Any]) -> dict[str, Any]:
@@ -109,16 +138,39 @@ def rpc_query_graph(params: dict[str, Any]) -> dict[str, Any]:
     `min_degree` defaults to 2 because the common caller is a sweep, where the
     one-document entities bury the structure. A trace passes 1 explicitly.
     """
-    return _kb().neighborhood(
-        str(params.get("node_id", "")),
+    node_id = str(params.get("node_id", ""))
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        return {
+            "error": NO_CORPUS_NOTE,
+            "corpus": "absent",
+            "center_node": node_id,
+            "related_nodes": [],
+            "edges": [],
+            "total_nodes": 0,
+            "total_edges": 0,
+        }
+
+    return kb_or_none.neighborhood(
+        node_id,
         max_depth=int(params.get("max_depth", 2)),
         min_degree=int(params.get("min_degree", 2)),
     )
 
 
 def rpc_search_documents(params: dict[str, Any]) -> dict[str, Any]:
-    """Semantic search over the corpus."""
-    results = _kb().search(str(params.get("query", "")), int(params.get("top_k", 5)))
+    """Semantic search over the corpus.
+
+    With no corpus this returns no results and says so, rather than building
+    one to search. Searching is a read like any other.
+    """
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        return {"results": [], "source": "no_corpus", "note": NO_CORPUS_NOTE}
+
+    results = kb_or_none.search(
+        str(params.get("query", "")), int(params.get("top_k", 5))
+    )
     return {"results": results, "source": "local_graphrag"}
 
 
@@ -166,7 +218,7 @@ def rpc_reindex(_: dict[str, Any]) -> dict[str, Any]:
     from a corpus that is neither the old one nor the new one.
     """
     _refuse_while_a_run_is_in_flight("rebuilt")
-    return index_project_files(_kb())
+    return index_project_files(_kb_for_indexing())
 
 
 def rpc_export_corpus(_: dict[str, Any]) -> dict[str, Any]:
@@ -176,16 +228,25 @@ def rpc_export_corpus(_: dict[str, Any]) -> dict[str, Any]:
     a failure lands on the console's telemetry path instead of replacing the
     page with a JSON error. The browser makes the file at the other end.
     """
-    return _kb().export_corpus()
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        raise ValueError(f"There is no corpus to export. {NO_CORPUS_NOTE}")
+    return kb_or_none.export_corpus()
 
 
 def rpc_clear_corpus(_: dict[str, Any]) -> dict[str, Any]:
     """Empty the knowledge base in place.
 
     Refused mid-run for the reason `_refuse_while_a_run_is_in_flight` sets out.
+    Refused with no corpus for a different one: creating a store in order to
+    empty it would leave behind exactly the thing the operator was asking to
+    be rid of.
     """
     _refuse_while_a_run_is_in_flight("cleared")
-    return _kb().clear()
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        raise ValueError(f"There is no corpus to clear. {NO_CORPUS_NOTE}")
+    return kb_or_none.clear()
 
 
 def rpc_list_seats(_: dict[str, Any]) -> dict[str, Any]:
@@ -220,19 +281,28 @@ def rpc_llm_options(_: dict[str, Any]) -> dict[str, Any]:
 
 
 def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
-    """Everything the console polls for: seats, embedding model, corpus state."""
+    """Everything the console polls for: seats, embedding model, corpus state.
+
+    `corpus` is `absent`, `empty` or `indexed`. The older `graphrag` boolean is
+    kept beside it -- `launch_console.sh` polls this route as its readiness
+    check -- but it collapses the first two, and they are the pair worth
+    telling apart: nothing was ever indexed, versus a corpus that exists and
+    holds nothing.
+    """
     try:
-        kb_indexed, embedding_model = is_knowledge_base_indexed()
+        state, embedding_model = corpus_state()
     except Exception:
-        kb_indexed, embedding_model = False, "unknown"
+        state, embedding_model = "absent", "unknown"
 
     seats = {agent: get_agent_status(agent) for agent in AGENTS}
     architect = seats["architect"]
 
     return {
-        # The embedding model is the one thing that runs on this machine.
+        # The embedding model is the one thing that would run on this machine,
+        # and it is not loaded until something indexes or searches.
         "embedding": embedding_model,
-        "graphrag": kb_indexed,
+        "corpus": state,
+        "graphrag": state == "indexed",
         "llm": f"{architect['model']} ({architect['provider']})",
         "agents": seats,
         "selected": seats,

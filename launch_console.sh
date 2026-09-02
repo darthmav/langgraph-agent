@@ -69,7 +69,8 @@ open_browser() {
 echo ""
 echo "Starting frontend server on ${URL}..."
 
-echo "  (Knowledge base preloads in the background; first run may take a moment)"
+echo "  (No corpus is loaded until you ask for one: press Reindex project"
+echo "   on the Corpus tab, or run python scripts/reindex.py)"
 
 python serve.py > /tmp/ambiguity-console.log 2>&1 &
 SERVER_PID=$!
