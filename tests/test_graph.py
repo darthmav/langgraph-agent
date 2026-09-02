@@ -1107,3 +1107,167 @@ def test_expect_failures_does_not_excuse_an_unverified_file(monkeypatch, tmp_pat
 
     assert result["failed_verification"] == [target]
     assert "Not executed before the deadline" in result["blockers"]
+
+
+# --- The Architect's and Planner's deadlines -------------------------------
+#
+# Both are single-call, tool-free nodes, so they can be wrapped whole the way
+# the Researcher is. What needed thought was not the mechanism but the fallback
+# each one leaves behind.
+
+
+class _HangingLLM:
+    """A seat that never answers in time, until the test releases it.
+
+    It returns rather than raising once released: an exception would travel
+    back out of `_with_deadline` on purpose, which is a different behaviour
+    from a hang and would mask what these tests are checking.
+    """
+
+    def __init__(self, release):
+        self._release = release
+        self.calls = 0
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        self._release.wait(30)
+        return AIMessage(content="")   # abandoned by then; never read
+
+
+def _hang(monkeypatch, seconds=0.4):
+    """Point every seat at a hanging model and shorten every node deadline.
+
+    The Builder keeps its own, larger budget, so patching only
+    NODE_DEADLINE_SECONDS would leave that node waiting out the real one.
+    """
+    import threading
+
+    from langgraph_agent import nodes
+
+    release = threading.Event()
+    monkeypatch.setattr(
+        nodes, "get_agent_llm", lambda agent, temperature=0.1: _HangingLLM(release)
+    )
+    monkeypatch.setattr(nodes, "NODE_DEADLINE_SECONDS", seconds)
+    monkeypatch.setattr(nodes, "BUILDER_DEADLINE_SECONDS", seconds * 2)
+    monkeypatch.setattr(nodes, "VERIFY_RESERVE_SECONDS", seconds)
+    return release
+
+
+def test_a_hung_architect_never_approves(monkeypatch):
+    """The gate ends the run, so a stalled seat must not be able to end one.
+
+    This is the one fallback in the system that could turn a hang into a
+    false success, which is why it is asserted on both passes rather than
+    just the one that happens to be reachable first.
+    """
+    from langgraph_agent import nodes
+
+    release = _hang(monkeypatch)
+    try:
+        opening = nodes.architect_node(initial_state("Do the thing"))
+
+        reviewing = initial_state("Do the thing")
+        reviewing["plan"] = "1. Do it"
+        reviewing["builder_report"] = "Implementation complete"
+        gate = nodes.architect_node(reviewing)
+    finally:
+        release.set()
+
+    assert opening["verdict"] == Verdict.PLAN.value
+    assert gate["verdict"] == Verdict.REVISE.value
+    for result in (opening, gate):
+        assert result["verdict"] != Verdict.APPROVED.value
+        assert any("never an approval" in m for m in result["messages"])
+
+
+def test_a_hung_architect_keeps_the_architecture_it_had(monkeypatch):
+    """Losing it mid-run would strip the constraints out of every later prompt."""
+    from langgraph_agent import nodes
+
+    release = _hang(monkeypatch)
+    state = initial_state("Do the thing")
+    state["plan"] = "1. Do it"
+    state["architecture"] = "Layered, with the parser kept separate."
+    try:
+        result = nodes.architect_node(state)
+    finally:
+        release.set()
+
+    assert result["architecture"] == "Layered, with the parser kept separate."
+
+
+def test_a_hung_architect_still_counts_its_step(monkeypatch):
+    """Otherwise a stalling gate loops forever instead of reaching MAX_STEPS."""
+    from langgraph_agent import nodes
+
+    release = _hang(monkeypatch)
+    state = initial_state("Do the thing")
+    state["plan"] = "1. Do it"
+    try:
+        result = nodes.architect_node(state)
+    finally:
+        release.set()
+
+    assert result["step_count"] == 1
+
+
+def test_a_hung_planner_leaves_a_plan_behind(monkeypatch):
+    """An empty plan would loop uncounted to the recursion limit.
+
+    step_count is incremented only while a plan exists, so a blank fallback
+    would send Planner -> Builder -> Architect round without ever counting,
+    until LangGraph killed the run by exception and discarded its messages.
+    """
+    from langgraph_agent import nodes
+
+    release = _hang(monkeypatch)
+    try:
+        result = nodes.planner_node(initial_state("Do the thing"))
+    finally:
+        release.set()
+
+    assert result["plan"]                      # the load-bearing part
+    assert "did not respond" in result["plan"]
+    assert result["next_agent"] == "Builder"
+    assert any("No response within" in m for m in result["messages"])
+
+
+def test_a_hung_planner_keeps_a_real_plan_over_the_placeholder(monkeypatch):
+    """On a revise cycle the existing plan is better information."""
+    from langgraph_agent import nodes
+
+    release = _hang(monkeypatch)
+    state = initial_state("Do the thing")
+    state["plan"] = "1. The plan from the previous cycle"
+    try:
+        result = nodes.planner_node(state)
+    finally:
+        release.set()
+
+    assert result["plan"] == "1. The plan from the previous cycle"
+
+
+def test_a_stalling_architect_run_still_terminates(monkeypatch):
+    """End to end: every seat hangs, and the run ends at the step ceiling.
+
+    The point of every fallback above is that the graph keeps moving and the
+    counter keeps counting; this asserts the property they exist to give.
+    """
+    from langgraph_agent import graph as graph_module
+    from langgraph_agent import nodes
+
+    release = _hang(monkeypatch, seconds=0.05)
+    try:
+        result = create_agent_graph().invoke(
+            initial_state("Do the thing"),
+            {"recursion_limit": graph_module.RECURSION_LIMIT},
+        )
+    finally:
+        release.set()
+
+    assert result["step_count"] >= graph_module.MAX_STEPS
+    assert result["verdict"] != Verdict.APPROVED.value
+    assert nodes.NODE_DEADLINE_SECONDS == 0.05   # the fixture really applied

@@ -486,15 +486,11 @@ def _parse_architect_output(content: str, reviewing: bool = False) -> dict[str, 
     return result
 
 
-def architect_node(state: AgentState) -> AgentState:
-    """Architect: set direction, then rule on whether the work is done.
+def _rule_on_state(state: AgentState, reviewing: bool) -> dict[str, str]:
+    """Ask the Architect for direction or a ruling; return the parsed output.
 
-    No tools. Runs twice per cycle -- as the entry authority before the Planner,
-    and as the approval gate after the Builder reports. A populated builder
-    report is what tells the two passes apart.
+    Reads state; never writes it, so it is safe to run under `_with_deadline`.
     """
-    reviewing = bool(state.get("builder_report"))
-
     state_injection = _get_state_injection(state)
     goal = state.get("goal", "")
     task = (
@@ -510,7 +506,36 @@ def architect_node(state: AgentState) -> AgentState:
 
     llm = get_agent_llm("architect")
     response = llm.invoke(messages)
-    parsed = _parse_architect_output(response.content, reviewing=reviewing)
+    return _parse_architect_output(response.content, reviewing=reviewing)
+
+
+def architect_node(state: AgentState) -> AgentState:
+    """Architect: set direction, then rule on whether the work is done.
+
+    No tools. Runs twice per cycle -- as the entry authority before the Planner,
+    and as the approval gate after the Builder reports. A populated builder
+    report is what tells the two passes apart.
+
+    Bounded by `NODE_DEADLINE_SECONDS`. The fallback verdict is never
+    `approved`, and that is the whole point of choosing one here: this gate is
+    what ends the run, so a seat that stalled must not be able to end one
+    successfully. `revise` on the gate pass and `plan` on the opening pass both
+    route back to the Planner, and the step counter below carries a repeatedly
+    stalling Architect to MAX_STEPS instead of letting it spin.
+    """
+    reviewing = bool(state.get("builder_report"))
+
+    parsed = _with_deadline(
+        lambda: _rule_on_state(state, reviewing), NODE_DEADLINE_SECONDS, None
+    )
+    timed_out = parsed is None
+    if parsed is None:
+        parsed = {
+            "architecture": "",
+            "verdict": (
+                Verdict.REVISE.value if state.get("plan") else Verdict.PLAN.value
+            ),
+        }
 
     # Keep the opening architecture if the gate pass did not restate it --
     # losing it mid-run would strip the constraints out of every later prompt.
@@ -549,7 +574,14 @@ def architect_node(state: AgentState) -> AgentState:
     if state.get("plan"):
         state["step_count"] = state.get("step_count", 0) + 1
 
-    if overridden:
+    if timed_out:
+        # Said plainly, because the run reads this line to know what happened:
+        # a verdict nobody actually reached is not the same as a ruling.
+        note = (
+            f" (no response within {int(NODE_DEADLINE_SECONDS)}s -- "
+            "not a ruling, and never an approval)"
+        )
+    elif overridden:
         note = f" (approval blocked: {len(blocked)} file(s) do not run)"
     elif blocked:
         note = f" ({len(blocked)} file(s) do not run)"
@@ -560,13 +592,10 @@ def architect_node(state: AgentState) -> AgentState:
     return state
 
 
-def planner_node(state: AgentState) -> AgentState:
-    """Planner: Interpret goal, create structured plan, choose next agent.
+def _make_plan(state: AgentState) -> dict[str, Any]:
+    """Ask the Planner for a plan; return the parsed output.
 
-    As specified:
-    - No tools
-    - Output strict format
-    - Routes to Researcher when knowledge needed, Builder when task is clear
+    Reads state; never writes it, so it is safe to run under `_with_deadline`.
     """
     # Build messages with state injection
     state_injection = _get_state_injection(state)
@@ -581,7 +610,55 @@ def planner_node(state: AgentState) -> AgentState:
     response = llm.invoke(messages)
 
     # Parse the structured output
-    parsed = _parse_planner_output(response.content)
+    return _parse_planner_output(response.content)
+
+
+# What a timed-out Planner leaves in `plan`. It must not be empty, and that is
+# load-bearing rather than cosmetic: the Architect increments `step_count` only
+# while a plan exists, so an empty one would send the run round the
+# Planner/Builder loop uncounted until LangGraph's recursion limit killed it by
+# exception -- discarding every message the run had produced. That is the exact
+# failure the counter was moved to the gate to prevent, and an empty fallback
+# here would reintroduce it through the back door.
+_PLANNER_TIMED_OUT = (
+    "1. The Planner did not respond within {seconds}s, so this goal was never "
+    "broken into steps.\n"
+    "2. Do not guess at the plan. Report the goal as unplanned, and set that "
+    "as a blocker so the Architect sees why nothing was implemented.\n"
+)
+
+
+def planner_node(state: AgentState) -> AgentState:
+    """Planner: Interpret goal, create structured plan, choose next agent.
+
+    As specified:
+    - No tools
+    - Output strict format
+    - Routes to Researcher when knowledge needed, Builder when task is clear
+
+    Bounded by `NODE_DEADLINE_SECONDS`; see `_PLANNER_TIMED_OUT` for why the
+    fallback plan is a real string rather than an empty one.
+    """
+    parsed = _with_deadline(
+        lambda: _make_plan(state), NODE_DEADLINE_SECONDS, None
+    )
+
+    if parsed is None:
+        # An existing plan beats the placeholder: on a revise cycle state
+        # already holds a real one, and re-running it is better information
+        # than a note saying the seat stalled.
+        state["plan"] = state.get("plan") or _PLANNER_TIMED_OUT.format(
+            seconds=int(NODE_DEADLINE_SECONDS)
+        )
+        # Builder rather than Researcher: it is the shorter path back to the
+        # Architect, which is the only node that can end the run, and a second
+        # slow seat in between is the last thing a stalling run needs.
+        state["next_agent"] = "Builder"
+        state["messages"].append(
+            f"[Planner] No response within {int(NODE_DEADLINE_SECONDS)}s; "
+            "routing to Builder"
+        )
+        return state
 
     # Update state
     state["plan"] = parsed.get("plan", "")
