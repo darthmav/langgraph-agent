@@ -103,11 +103,11 @@ CANDIDATES: tuple[Candidate, ...] = (
     Candidate("kimi-code", "ollama", "kimi-k2.7-code:cloud",
               "Code-specialised sibling of kimi-k3"),
     Candidate("qwen", "ollama", "qwen3.5:397b-cloud",
-              "Large general; currently holds Planner"),
+              "Large general; holds Planner and, since the probes, Researcher"),
     Candidate("nemotron", "ollama", "nemotron-3-ultra:cloud",
-              "Large reasoner; currently holds Researcher"),
+              "Large reasoner; held Researcher until it probed empty"),
     Candidate("gemma", "ollama", "gemma4:cloud",
-              "Previous Researcher; kept as the control"),
+              "Researcher before nemotron; also probes empty"),
     Candidate("opus", "anthropic", "claude-opus-5", "Paid control", paid=True),
     Candidate("sonnet", "anthropic", "claude-sonnet-5", "Paid control", paid=True),
     Candidate("haiku", "anthropic", "claude-haiku-4-5", "Paid control", paid=True),
@@ -141,14 +141,18 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "baseline",
         {"architect": "kimi-k3", "planner": "qwen",
-         "researcher": "nemotron", "builder": "kimi-k3"},
-        "Shipped defaults. Everything else is measured against this.",
+         "researcher": "qwen", "builder": "kimi-k3"},
+        "Shipped defaults. Everything else is measured against this. Keep it "
+        "equal to DEFAULT_SEATS -- a control that has drifted from what the "
+        "project ships is measuring nothing anyone runs.",
     ),
     TeamConfig(
         "legacy",
         {"architect": "kimi-k3", "planner": "qwen",
-         "researcher": "gemma", "builder": "kimi-k3"},
-        "Control: the pre-swap seating whose Researcher returned nothing.",
+         "researcher": "nemotron", "builder": "kimi-k3"},
+        "Control: the seating that shipped before the probes were run, whose "
+        "Researcher answers with nothing -- as did gemma4:cloud before it. "
+        "Kept so the difference can be shown rather than asserted.",
     ),
     TeamConfig(
         "kimi-solo",
@@ -166,14 +170,14 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "code-builder",
         {"architect": "kimi-k3", "planner": "qwen",
-         "researcher": "nemotron", "builder": "kimi-code"},
+         "researcher": "qwen", "builder": "kimi-code"},
         "Baseline with a code-specialised Builder. The Builder is the only "
         "seat that calls tools, so it is where specialisation should pay.",
     ),
     TeamConfig(
         "heavy-gate",
         {"architect": "nemotron", "planner": "qwen",
-         "researcher": "nemotron", "builder": "kimi-code"},
+         "researcher": "qwen", "builder": "kimi-code"},
         "Big reasoner on the gate. The Architect ends the run, so a weak gate "
         "shows up as loops rather than as bad text.",
     ),
@@ -187,7 +191,7 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "spend-on-the-gate",
         {"architect": "opus", "planner": "qwen",
-         "researcher": "nemotron", "builder": "kimi-k3"},
+         "researcher": "qwen", "builder": "kimi-k3"},
         "Buys only the seat that decides when to stop. The cheapest way to "
         "find out whether the gate is what is failing.",
     ),

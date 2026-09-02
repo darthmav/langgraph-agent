@@ -12,6 +12,7 @@ The implementation follows the documented architecture: Architect, Planner, Rese
 - The Architect holds the approval gate: the run ends on its `approved` verdict, not on the Builder's say-so.
 - All tests pass with the deterministic `StubLLM`.
 - Seats without credentials silently fall back to `StubLLM`; `get_agent_status()` is what reports the difference to the console.
+- `scripts/diagnose_seats.py` measures which model can hold which seat: phase 1 probes one model in one role through the real prompt and parser, phase 2 runs whole seatings through the real graph in a sandbox. Seat changes should cite it rather than a single run that looped.
 
 ## Defaults
 
@@ -19,7 +20,7 @@ The implementation follows the documented architecture: Architect, Planner, Rese
 |------------|---------|-------|
 | Architect  | Ollama `kimi-k3:cloud` | Override with `ARCHITECT_PROVIDER` / `ARCHITECT_MODEL` |
 | Planner    | Ollama `qwen3.5:397b-cloud` | Override with `PLANNER_PROVIDER` / `PLANNER_MODEL` |
-| Researcher | Ollama `nemotron-3-ultra:cloud` | Override with `RESEARCHER_PROVIDER` / `RESEARCHER_MODEL` |
+| Researcher | Ollama `qwen3.5:397b-cloud` | Override with `RESEARCHER_PROVIDER` / `RESEARCHER_MODEL` |
 | Builder    | Ollama `kimi-k3:cloud` | Override with `BUILDER_PROVIDER` / `BUILDER_MODEL` |
 | OpenAI fallback | `gpt-4o-mini` | Set `OPENAI_API_KEY` and `OPENAI_MODEL` to use |
 | Embeddings | `all-MiniLM-L6-v2` | Runs on-device for GraphRAG; no API key required |

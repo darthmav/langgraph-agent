@@ -41,7 +41,7 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
     ("anthropic", "builder"): "claude-sonnet-5",
     ("ollama", "architect"): "kimi-k3:cloud",
     ("ollama", "planner"): "qwen3.5:397b-cloud",
-    ("ollama", "researcher"): "nemotron-3-ultra:cloud",
+    ("ollama", "researcher"): "qwen3.5:397b-cloud",
     ("ollama", "builder"): "kimi-k3:cloud",
     ("openai", "architect"): "gpt-4o",
     ("openai", "planner"): "gpt-4o",
@@ -59,7 +59,7 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
 DEFAULT_SEATS: dict[str, dict[str, str]] = {
     "architect": {"provider": "ollama", "model": "kimi-k3:cloud"},
     "planner": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
-    "researcher": {"provider": "ollama", "model": "nemotron-3-ultra:cloud"},
+    "researcher": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
     "builder": {"provider": "ollama", "model": "kimi-k3:cloud"},
 }
 
@@ -425,7 +425,7 @@ def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
     Default seats (cloud only -- see DEFAULT_SEATS):
         Architect  -> Ollama    kimi-k3:cloud      (leading authority)
         Planner    -> Ollama    qwen3.5:397b-cloud
-        Researcher -> Ollama    nemotron-3-ultra:cloud
+        Researcher -> Ollama    qwen3.5:397b-cloud
         Builder    -> Ollama    kimi-k3:cloud
     """
     seat = _resolve_seat(agent)

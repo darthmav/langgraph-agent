@@ -88,7 +88,7 @@ python example_usage.py
   |---|---|---|
   | Architect | ollama | `kimi-k3:cloud` |
   | Planner | ollama | `qwen3.5:397b-cloud` |
-  | Researcher | ollama | `nemotron-3-ultra:cloud` |
+  | Researcher | ollama | `qwen3.5:397b-cloud` |
   | Builder | ollama | `kimi-k3:cloud` |
 
   Anthropic and OpenAI remain optional cloud providers; no seat uses either by
@@ -250,7 +250,13 @@ deliver the reply.
   regexes alike. It routes to the **Builder**, not back to the Planner: the
   plan is not what failed, and re-planning would aim the run at the same seat
   again. The feed message names the seat's model, since changing it is the
-  only thing that actually fixes this.
+  only thing that actually fixes this. Which model to name is a measurement,
+  not a guess: `scripts/diagnose_seats.py --phase probe` asks each candidate
+  the Researcher's own question with retrieval stubbed out, and on this
+  machine `gemma4:cloud`, `nemotron-3-ultra:cloud` and `kimi-k2.7-code:cloud`
+  all answer with nothing, while `qwen3.5:397b-cloud` and `kimi-k3:cloud`
+  answer in full. Re-run it before changing the seat rather than trusting that
+  list, which is one machine on one day.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step
