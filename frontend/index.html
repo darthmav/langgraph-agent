@@ -1144,6 +1144,41 @@ $("#eng-prompt").onkeydown = e => {
 };
 
 /* ---------- polling ---------- */
+// Structural health of the knowledge graph, from the A1 check in
+// reports/spectral_applicability.md. Two numbers, because they fail
+// differently: `components` rises when the corpus fragments into islands, and
+// lambda_2 falls when the main body is still one piece but only just. An
+// entity-extraction regression moves both while docs and chunks hold steady,
+// which is the whole reason this sits next to those counters.
+//
+// lambda_2 is titled rather than labelled: the header has room for a number,
+// not for a definition, and the operator who needs to know what it means is
+// hovering anyway.
+function healthChip(stats){
+  const parts = [];
+  if(typeof stats.components === "number" && stats.components > 1){
+    // 1 component is the healthy default and says nothing worth the width.
+    const orphans = stats.isolated_nodes
+      ? ` (${stats.isolated_nodes} orphaned)` : "";
+    parts.push(
+      `<span title="Connected components of the undirected projection. `+
+      `More than one means the corpus has fragmented into islands that no `+
+      `entity links together.${orphans ? " Orphaned nodes link to nothing at all." : ""}">`+
+      `parts <b>${stats.components}</b></span>`);
+  }
+  // Explicitly not `stats.lambda_2 &&`: 0.0 is a real reading -- the main body
+  // is on the point of splitting -- and is exactly the value worth showing.
+  if(typeof stats.lambda_2 === "number"){
+    parts.push(
+      `<span title="Algebraic connectivity (normalized lambda_2) of the largest `+
+      `component, in [0, 2]. Higher is better knit; a fall between reindexes `+
+      `means the corpus is coming apart even while the counts hold steady.">`+
+      `knit <b>${stats.lambda_2.toFixed(3)}</b></span>`);
+  }
+  return parts.join("");
+}
+
+
 async function poll(quiet){
   if(EXITING) return;
   try{
@@ -1161,7 +1196,8 @@ async function poll(quiet){
       : `<span>docs <b>${stats.total_documents}</b></span>`+
         `<span>chunks <b>${stats.total_chunks}</b></span>`+
         `<span>nodes <b>${stats.total_nodes}</b></span>`+
-        `<span>edges <b>${stats.total_edges}</b></span>`;
+        `<span>edges <b>${stats.total_edges}</b></span>`+
+        healthChip(stats);
     await loadCrew(true);
   }catch(e){ /* goOffline already reported it */ }
 }

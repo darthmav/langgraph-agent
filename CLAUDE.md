@@ -479,6 +479,38 @@ deliver the reply.
   `source: "no_corpus"` and `NO_CORPUS_NOTE` instead, worded once in
   `graphrag_server` so the MCP tools, the Builder's belt and the console cannot
   describe the same absence differently.
+- **`stats()` carries a structural health check, and it counts components
+  with networkx rather than with the spectrum.** `connectivity()` reports
+  `components`, `largest_component`, `isolated_nodes` and `lambda_2` -- the A1
+  application from `reports/spectral_applicability.md`. It exists because an
+  entity-extraction regression in `add_document` changes no counter and raises
+  nothing: it fragments the graph, and that is visible here and nowhere else.
+  Three decisions that are not interchangeable with the obvious alternatives.
+  *Components come from `nx.number_connected_components`, not from a
+  zero-eigenvalue count.* The identity "multiplicity of 0 = number of
+  components" holds for `L = D - A`; on the **normalized** Laplacian an
+  isolated node has `D^-1/2 = 0`, so the `I` term leaves a bare 1 on its
+  diagonal and it contributes eigenvalue **1, not 0**. On this project's graph
+  shape that returns 1 where the truth is 30, because 29 of the 30 components
+  are orphans -- and it costs 42x the linear-time answer to get there.
+  *`lambda_2` is measured on the largest component*, because on the whole graph
+  it is identically 0 whenever the corpus is disconnected, which a real one is;
+  a signal that reads 0.0 every time is not a signal. *And it is normalized*,
+  so it stays in [0, 2] and does not scale with degree -- an unnormalized
+  `lambda_2` grows as documents mention more entities, which makes this
+  reindex's value incomparable with last week's, and comparing across reindexes
+  is the whole point. `lambda_2` is `None`, never 0.0, when there is nothing to
+  measure: 0.0 is a real reading meaning "about to split in two", and the empty
+  corpus must not report the alarming one. A failure to compute it is named in
+  `lambda_2_unavailable` rather than dropped, so "could not measure" never
+  reads as "measured 0". `spectral_graph` is imported **inside** the method: it
+  lives at the project root and is not part of the installed distribution, so a
+  top-level import would turn a missing diagnostic into a module that will not
+  load at all from anywhere but the root. The result is cached against
+  `(nodes, edges)` because the console polls `stats()` every five seconds and
+  the eigendecomposition is ~44ms on a 920-node graph; that key is sound
+  because every mutation path here only adds (`add_document`) or zeroes
+  (`clear`), and a re-add that moves neither count moves no structure either.
 - **The embedding model loads on first use, not on construction.**
   `GraphRAGKnowledgeBase.embedder` is a lazy property and
   `sentence_transformers` is imported inside it. Only `add_document` and

@@ -331,3 +331,154 @@ def test_both_methods_are_registered_and_not_quiet():
     assert serve.RPC_METHODS["clear_corpus"] is serve.rpc_clear_corpus
     assert "export_corpus" not in serve.QUIET_METHODS
     assert "clear_corpus" not in serve.QUIET_METHODS
+
+
+# ---------------------------------------------------------------------------
+# connectivity (the A1 health check)
+# ---------------------------------------------------------------------------
+
+
+def _bipartite_corpus(docs: int, ents: int, per_doc: int = 4) -> nx.DiGraph:
+    """The shape `add_document` actually mints: document -> entity, directed."""
+    G = nx.DiGraph()
+    for d in range(docs):
+        G.add_node(f"d{d}", type="document")
+        for e in range(per_doc):
+            entity = f"e{(d * per_doc + e) % ents}"
+            G.add_node(entity, type="entity")
+            G.add_edge(f"d{d}", entity, relation="mentions")
+    return G
+
+
+def test_connectivity_counts_components_networkx_style_not_spectrally(kb):
+    """The zero-eigenvalue identity is for `L = D - A`, not the normalized one.
+
+    On `I - D^-1/2 A D^-1/2` an isolated node has `D^-1/2 = 0`, so the `I` term
+    leaves a bare 1 on its diagonal and it contributes eigenvalue **1, not 0**.
+    A component count read off the normalized spectrum therefore misses every
+    orphan, which is precisely the failure this check exists to catch.
+    """
+    kb.graph = _bipartite_corpus(6, 12)
+    kb.graph.add_node("orphan_a", type="document")
+    kb.graph.add_node("orphan_b", type="document")
+    kb._connectivity_cache = None
+
+    health = kb.connectivity()
+
+    undirected = kb.graph.to_undirected(as_view=True)
+    assert health["components"] == nx.number_connected_components(undirected)
+    assert health["isolated_nodes"] == 2
+    assert health["components"] > 1
+
+
+def test_lambda_2_is_measured_on_the_largest_component(kb):
+    """On the whole graph it is identically 0 once anything is orphaned.
+
+    A health signal that reads 0.0 on every disconnected corpus -- and a real
+    one is disconnected -- carries no information. The largest component's
+    lambda_2 is the number that moves.
+    """
+    kb.graph = _bipartite_corpus(8, 16)
+    kb._connectivity_cache = None
+    connected = kb.connectivity()
+    assert connected["lambda_2"] is not None and connected["lambda_2"] > 0
+
+    kb.graph.add_node("orphan", type="document")
+    kb._connectivity_cache = None
+    orphaned = kb.connectivity()
+
+    # The orphan is counted, and does not drag lambda_2 to zero.
+    assert orphaned["components"] == connected["components"] + 1
+    assert orphaned["lambda_2"] == pytest.approx(connected["lambda_2"], rel=1e-9)
+
+
+def test_dropping_edges_moves_the_health_numbers(kb):
+    """The point of the check: a regression the counters cannot see.
+
+    An entity-extraction regression in `add_document` leaves the document count
+    untouched and raises nothing. It fragments the graph, and that is visible
+    here and nowhere else in `stats()`.
+    """
+    kb.graph = _bipartite_corpus(20, 10)
+    kb._connectivity_cache = None
+    before = kb.connectivity()
+
+    kb.graph.remove_edges_from(list(kb.graph.edges())[::2])
+    kb._connectivity_cache = None
+    after = kb.connectivity()
+
+    assert after["components"] > before["components"]
+
+
+def test_connectivity_is_defined_on_an_empty_and_a_single_node_graph(kb):
+    """lambda_2 is None, never 0.0: 0.0 is a reading, not an absence.
+
+    A graph with nothing to measure and a graph on the point of splitting in
+    two are opposite diagnoses, and returning 0.0 for both would report the
+    empty corpus as the alarming one.
+    """
+    kb.graph = nx.DiGraph()
+    kb._connectivity_cache = None
+    empty = kb.connectivity()
+    assert empty == {
+        "components": 0,
+        "largest_component": 0,
+        "isolated_nodes": 0,
+        "lambda_2": None,
+    }
+
+    kb.graph = nx.DiGraph()
+    kb.graph.add_node("only", type="document")
+    kb._connectivity_cache = None
+    single = kb.connectivity()
+    assert single["components"] == 1
+    assert single["lambda_2"] is None
+    assert "fewer than 2 nodes" in single["lambda_2_unavailable"]
+
+
+def test_stats_caches_connectivity_against_the_graph_shape(kb):
+    """`stats()` is polled every five seconds; the eigendecomposition is not free."""
+    kb.graph = _bipartite_corpus(10, 20)
+    kb._connectivity_cache = None
+
+    first = kb.stats()
+    assert kb._connectivity_cache is not None
+    cached_at, _ = kb._connectivity_cache
+    assert cached_at == (kb.graph.number_of_nodes(), kb.graph.number_of_edges())
+
+    # A second call at the same shape reuses it rather than recomputing.
+    marker = {"components": -1, "largest_component": -1, "isolated_nodes": -1, "lambda_2": -1.0}
+    kb._connectivity_cache = (cached_at, marker)
+    assert kb.stats()["components"] == -1
+
+    # Changing the graph changes the key, so the stale entry cannot survive.
+    kb.graph.add_node("fresh", type="document")
+    assert kb.stats()["components"] == first["components"] + 1
+
+
+def test_stats_still_reports_counters_when_lambda_2_cannot_be_computed(kb, monkeypatch):
+    """The health check is a diagnostic; it must not cost the console its header."""
+    import spectral_graph
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("solver unavailable")
+
+    monkeypatch.setattr(spectral_graph, "compute_spectrum", _explode)
+    kb.graph = _bipartite_corpus(6, 12)
+    kb._connectivity_cache = None
+
+    stats = kb.stats()
+
+    assert stats["total_nodes"] == kb.graph.number_of_nodes()
+    assert stats["lambda_2"] is None
+    # Named, not silently dropped: "could not measure" must never read as
+    # "measured 0".
+    assert "solver unavailable" in stats["lambda_2_unavailable"]
+
+
+def test_stats_does_not_load_the_embedder_for_the_health_check(kb):
+    """The header poll still touches nothing heavyweight."""
+    kb.graph = _bipartite_corpus(6, 12)
+    kb._connectivity_cache = None
+    kb.stats()
+    assert kb._embedder is None

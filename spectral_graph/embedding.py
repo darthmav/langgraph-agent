@@ -92,7 +92,7 @@ def spectral_embedding(
     else:
         embedding = eigenvectors[:, :dim]
 
-    return embedding
+    return np.asarray(embedding)
 
 
 def laplacian_eigenmap(

@@ -5,6 +5,8 @@ Provides functions to compute eigenvalues and eigenvectors of Laplacian
 matrices using appropriate solvers (dense vs sparse) based on graph size.
 """
 
+from typing import Any
+
 import networkx as nx
 import numpy as np
 from scipy import sparse
@@ -18,7 +20,7 @@ def smallest_eigsh(
     L: sparse.spmatrix,
     k: int,
     return_eigenvectors: bool = True,
-):
+) -> Any:
     """The k smallest eigenpairs of a Laplacian, via shift-invert.
 
     `eigsh(L, k, which="SM")` -- what every sparse branch here used to call --
@@ -88,7 +90,7 @@ def smallest_eigsh(
 
 def compute_spectrum(
     G: nx.Graph,
-    k: int = None,
+    k: int | None = None,
     normalized: bool = False,
     which: str = "SM",
 ) -> np.ndarray:
@@ -160,7 +162,7 @@ def compute_eigenpairs(
     k: int = 2,
     normalized: bool = False,
     which: str = "SM",
-) -> tuple:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute k eigenvalue-eigenvector pairs of the graph Laplacian.
 
