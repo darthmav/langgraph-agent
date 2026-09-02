@@ -14,6 +14,7 @@ file and a worker still writing into the project after the node returned.
 """
 
 import threading
+import time
 
 # Why a run ended, when the caller did not say.
 DEFAULT_STOP_REASON = "Stopped from the console."
@@ -85,3 +86,63 @@ class RunControl:
 # The single control for this process. The server runs one graph object and one
 # run at a time, so one control is the whole story.
 RUN_CONTROL = RunControl()
+
+
+class NodeActivity:
+    """Which seat is executing *right now*, for the console's seat lights.
+
+    Deliberately separate from `_run_progress["node"]` in `serve.py`, which is
+    fed by `graph.stream` and therefore names the node that has just *finished*
+    -- LangGraph yields an update when a superstep completes, not when one
+    starts. That is the right value for the feed, which lists what happened, and
+    the wrong one for a light meaning "this seat is working": it lights the
+    previous seat for the whole of the next seat's turn, so the slowest node in
+    the run is the one node whose light never comes on. A stalled Architect
+    would show as a busy Builder, which is precisely backwards.
+
+    Set from the graph rather than from inside the node bodies: every node has
+    several return paths (a stop, a deadline fallback, the ordinary one), so a
+    wrapper with a `finally` is the only way a light cannot be left on by an
+    exit nobody thought about.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._node = ""
+        self._since = 0.0
+
+    def enter(self, node: str) -> None:
+        with self._lock:
+            self._node = node
+            self._since = time.monotonic()
+
+    def leave(self, node: str) -> None:
+        """Clear the light, unless someone else already claimed it.
+
+        The name check matters even though the graph runs one node at a time:
+        a node abandoned by `_with_deadline` keeps a worker thread alive, and
+        nothing that finishes late may darken the seat that is working now.
+        """
+        with self._lock:
+            if self._node == node:
+                self._node = ""
+                self._since = 0.0
+
+    def clear(self) -> None:
+        """No seat is working. The run's `finally` calls this."""
+        with self._lock:
+            self._node = ""
+            self._since = 0.0
+
+    def current(self) -> str:
+        with self._lock:
+            return self._node
+
+    def busy_for(self) -> float:
+        """Seconds the current seat has been in its turn; 0.0 when idle."""
+        with self._lock:
+            return time.monotonic() - self._since if self._node else 0.0
+
+
+# One run at a time, so one activity light, for the same reason as RUN_CONTROL.
+ACTIVITY = NodeActivity()

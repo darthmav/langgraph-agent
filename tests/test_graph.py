@@ -16,6 +16,8 @@ import pytest
 
 from langgraph_agent import AgentState, ResearchStatus, Verdict, create_agent_graph
 from langgraph_agent.config import StubLLM
+from langgraph_agent.control import ACTIVITY
+from langgraph_agent.graph import RECURSION_LIMIT, _tracked
 
 
 @pytest.fixture
@@ -1794,3 +1796,55 @@ def test_a_parenthesised_filename_survives_normalization():
         _report_path_key("- examples/filter_band_pass_(40_60_hz).png")
         == "examples/filter_band_pass_(40_60_hz).png"
     )
+
+
+# --- The seat lights: which agent is actually working ------------------------
+# The console's rainbow dot is only worth anything if it means "this seat's node
+# is on the stack right now". These pin that meaning, and above all that a light
+# can never be left on by a node that ended some way nobody planned for.
+
+
+def test_a_running_node_is_the_one_reported_as_working():
+    """The light names the node executing, not the one before or after it."""
+    seen = {}
+
+    def node(state: AgentState) -> AgentState:
+        seen["during"] = ACTIVITY.current()
+        return state
+
+    ACTIVITY.clear()
+    assert ACTIVITY.current() == ""
+    _tracked("researcher", node)(initial_state("g"))
+    assert seen["during"] == "researcher"
+    assert ACTIVITY.current() == ""
+
+
+def test_a_node_that_raises_still_puts_its_light_out():
+    """The `finally` is the whole reason the marking lives in the wrapper."""
+
+    def node(state: AgentState) -> AgentState:
+        raise RuntimeError("the seat fell over")
+
+    ACTIVITY.clear()
+    with pytest.raises(RuntimeError):
+        _tracked("builder", node)(initial_state("g"))
+    assert ACTIVITY.current() == ""
+
+
+def test_a_late_worker_cannot_darken_the_seat_that_is_working_now():
+    """`_with_deadline` abandons threads; one finishing late must not clear."""
+    ACTIVITY.clear()
+    ACTIVITY.enter("architect")
+    ACTIVITY.leave("planner")  # a node that was abandoned turns after
+    assert ACTIVITY.current() == "architect"
+    ACTIVITY.leave("architect")
+    assert ACTIVITY.current() == ""
+
+
+def test_no_seat_is_working_once_the_run_is_over(agent_graph):
+    """A whole graph run leaves the crew idle, not stuck on its last node."""
+    ACTIVITY.clear()
+    agent_graph.invoke(initial_state("Add a health check endpoint"),
+                       {"recursion_limit": RECURSION_LIMIT})
+    assert ACTIVITY.current() == ""
+    assert ACTIVITY.busy_for() == 0.0

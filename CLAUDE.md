@@ -319,6 +319,22 @@ deliver the reply.
   than per-file because the Builder chooses the filenames, so a run with it on
   will not block on an unintended failure either — which is why the failure
   stays visible in the report instead of being dropped. Defaults off.
+- **The seat lights answer "who is working", and `run_progress["node"]`
+  cannot.** `graph.stream` yields an update when a superstep *completes*, so
+  `node` names the seat that just finished -- right for the feed, which lists
+  what happened, and backwards for a light meaning "this seat is working": it
+  lights the previous seat for the whole of the next seat's turn, so the
+  slowest node in the run is the one node whose light never comes on and a
+  stalled Architect shows as a busy Builder. `ACTIVITY` (`control.py`, a
+  process-global beside `RUN_CONTROL` for the same reason) is entered and left
+  by `_tracked` in `graph.py`, so a seat is lit for exactly as long as its node
+  is on the stack, and `run_progress` reports it as `active`. The marking is a
+  wrapper rather than lines in the node bodies because every node has several
+  exits -- the stop, a deadline fallback, the ordinary return -- and only a
+  `finally` covers the one nobody thought about. `leave` checks the name it was
+  given: a worker `_with_deadline` abandoned finishes late, and must not darken
+  the seat working now. `_finish_run` clears it as a backstop, since a light
+  left on outlives the run in every console still open.
 - **The emergency stop is cooperative, and the recovery is the point.**
   `RUN_CONTROL` (`control.py`) is a process-global flag, not a state field: the
   graph compiles without a checkpointer, so nothing outside a node can write

@@ -6,11 +6,12 @@ Implements the 4-Agent System architecture:
 - Step count limit to prevent infinite loops
 """
 
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from langgraph_agent.control import ACTIVITY
 from langgraph_agent.nodes import (
     architect_node,
     builder_node,
@@ -74,6 +75,37 @@ def _route_from_researcher(state: AgentState) -> Literal["planner", "builder"]:
     return "builder"
 
 
+class _NodeFn(Protocol):
+    """A graph node: `(state) -> state`, with the parameter named `state`.
+
+    Spelled out rather than written as `Callable[[AgentState], AgentState]`
+    because LangGraph's own node protocol names its parameter, and a bare
+    `Callable` -- whose parameter is positional and nameless -- does not
+    satisfy it. `add_node` then rejects a perfectly good wrapper.
+    """
+
+    def __call__(self, state: AgentState) -> AgentState: ...
+
+
+def _tracked(name: str, node: _NodeFn) -> _NodeFn:
+    """Mark a seat as working for exactly as long as its node is on the stack.
+
+    This is the only honest source for "is this seat doing work": the graph's
+    stream reports a node when it *ends*, so a light driven from there is always
+    one seat behind. The `finally` is what makes it safe -- a node that raises,
+    times out, or returns early on the emergency stop still puts its light out.
+    """
+
+    def run(state: AgentState) -> AgentState:
+        ACTIVITY.enter(name)
+        try:
+            return node(state)
+        finally:
+            ACTIVITY.leave(name)
+
+    return run
+
+
 def create_agent_graph() -> CompiledStateGraph[AgentState, Any, AgentState, AgentState]:
     """Create and compile the 4-agent system graph.
 
@@ -91,10 +123,10 @@ def create_agent_graph() -> CompiledStateGraph[AgentState, Any, AgentState, Agen
     """
     graph_builder = StateGraph(AgentState)
 
-    graph_builder.add_node("architect", architect_node)
-    graph_builder.add_node("planner", planner_node)
-    graph_builder.add_node("researcher", researcher_node)
-    graph_builder.add_node("builder", builder_node)
+    graph_builder.add_node("architect", _tracked("architect", architect_node))
+    graph_builder.add_node("planner", _tracked("planner", planner_node))
+    graph_builder.add_node("researcher", _tracked("researcher", researcher_node))
+    graph_builder.add_node("builder", _tracked("builder", builder_node))
 
     # The Architect is the entry point: nothing is planned before the
     # architectural direction and its constraints exist.

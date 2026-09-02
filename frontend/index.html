@@ -98,7 +98,31 @@ body::before{
 .seat:hover{transform:translateX(2px)}
 .seat .nm{display:flex;align-items:center;gap:6px;font:10px var(--mono);
   letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);margin-bottom:6px}
-.seat .dot{width:5px;height:5px;border-radius:50%;background:var(--role,var(--ink-3));flex:none}
+.seat .dot{width:5px;height:5px;border-radius:50%;background:var(--role,var(--ink-3));flex:none;
+  transition:width .15s,height .15s}
+/* The rainbow means one thing: this seat's node is on the stack right now.
+   It is driven by run_progress.active -- the node actually executing -- and
+   not by the feed's last-finished node, so a seat lights for exactly as long
+   as it is working. Nothing else on the card animates, or the colour stops
+   being evidence and becomes decoration. */
+.seat.working .dot{
+  width:7px;height:7px;
+  animation:seat-rainbow 1.5s linear infinite;
+}
+@keyframes seat-rainbow{
+  0%  {background:#ff5a5a;box-shadow:0 0 7px #ff5a5a}
+  16% {background:#ffa93d;box-shadow:0 0 7px #ffa93d}
+  33% {background:#ffe14d;box-shadow:0 0 7px #ffe14d}
+  50% {background:#4ee36b;box-shadow:0 0 7px #4ee36b}
+  66% {background:#4ea3ff;box-shadow:0 0 7px #4ea3ff}
+  83% {background:#a96bff;box-shadow:0 0 7px #a96bff}
+  100%{background:#ff5a5a;box-shadow:0 0 7px #ff5a5a}
+}
+/* Someone who has asked for less motion still has to be able to tell which
+   seat is working, so the cycle stops and the lit state stays lit. */
+@media (prefers-reduced-motion: reduce){
+  .seat.working .dot{animation:none;background:var(--amber);box-shadow:0 0 7px var(--amber)}
+}
 .seat select{width:100%;font:10px var(--mono);padding:4px 5px;background:var(--bg-2);
   color:var(--accent);border:1px solid var(--line);border-radius:5px;cursor:pointer}
 .seat .plc{margin-top:5px;font:9px var(--mono);letter-spacing:.12em;color:var(--ink-3)}
@@ -383,6 +407,7 @@ async function loadCrew(quiet){
   for(const s of seats){
     const el = document.createElement("div");
     el.className = "seat";
+    el.dataset.role = String(s.role || "").toLowerCase();
     el.style.setProperty("--role", ROLE_COLOR[s.role] || "#5a6474");
 
     // A seat that cannot run says so on the card, with the reason it gave --
@@ -400,6 +425,10 @@ async function loadCrew(quiet){
     el.querySelector("select").onchange = e => setSeat(s.role, e.target.value);
     $("#seats").appendChild(el);
   }
+
+  // The 5s status poll rebuilds these cards from scratch, so the working seat
+  // has to be re-lit here or a run's lights blink out every five seconds.
+  paintActiveSeat();
 
   // Two different failures, worded differently: a seat with no credentials
   // falls back to a stub and the run still completes with canned text; a seat
@@ -896,6 +925,9 @@ async function run(){
     polling = true;
     try{
       const p = await rpc("run_progress", {}, true);
+      // `active` is the seat working now; between supersteps it is empty and
+      // every light is out, which is the truth for that moment.
+      setActiveSeat(p && p.running ? p.active : "");
       if(p && p.running){
         done = p.messages || []; node = p.node || ""; budget = p.budget || 0;
         // Learned from the server rather than assumed: it is what a Stop is
@@ -927,8 +959,25 @@ async function run(){
   }finally{
     clearInterval(CURRENT.timer); CURRENT.timer = null;
     CURRENT.inflight = false; CURRENT.stopping = false; CURRENT.runId = "";
+    // The poll that would have cleared these is the one just stopped, so a
+    // finished run would otherwise leave its last seat lit indefinitely.
+    setActiveSeat("");
     setRunButtons();
   }
+}
+
+// Which seat's node is executing right now, or "" for none. Held in a variable
+// rather than read back off the DOM because loadCrew replaces the cards.
+let ACTIVE_SEAT = "";
+
+function setActiveSeat(role){
+  ACTIVE_SEAT = String(role || "").toLowerCase();
+  paintActiveSeat();
+}
+
+function paintActiveSeat(){
+  document.querySelectorAll("#seats .seat").forEach(el =>
+    el.classList.toggle("working", !!ACTIVE_SEAT && el.dataset.role === ACTIVE_SEAT));
 }
 
 // Each node logs "[Role] ..." into messages; that log is the run's actual
@@ -1029,6 +1078,7 @@ async function reattach(){
       let q;
       try{ q = await rpc("run_progress", {}, true); }catch(e){ return; }
       if(!q) return;
+      setActiveSeat(q.running ? q.active : "");
       if(q.running){
         $("#feed").innerHTML =
           stagesFrom(q.messages || []).map(x =>

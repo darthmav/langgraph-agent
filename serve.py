@@ -48,7 +48,7 @@ from langgraph_agent.config import (  # noqa: E402
     list_ollama_models,
     set_agent_llm,
 )
-from langgraph_agent.control import RUN_CONTROL  # noqa: E402
+from langgraph_agent.control import ACTIVITY, RUN_CONTROL  # noqa: E402
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
     GraphRAGKnowledgeBase,
@@ -316,11 +316,22 @@ RUN_BUDGET_SECONDS = float(os.getenv("RUN_BUDGET_SECONDS", "300"))
 
 def rpc_run_progress(_: dict[str, Any]) -> dict[str, Any]:
     """A snapshot of the run currently in flight, for the console to poll."""
+    # Read outside `_run_lock`: `ACTIVITY` carries its own, and the node it
+    # names is set by the graph rather than by this module.
+    active = ACTIVITY.current()
+    active_for = ACTIVITY.busy_for()
     with _run_lock:
         return {
             "running": bool(_run_progress["running"]),
             "goal": str(_run_progress["goal"]),
             "node": str(_run_progress["node"]),
+            # `node` is the seat that last *finished* -- `graph.stream` yields
+            # on completion -- which is what the feed lists. `active` is the
+            # seat whose node is on the stack right now, which is what the
+            # console's seat lights mean. They are usually different, and
+            # during the slowest node of the run they always are.
+            "active": active,
+            "active_for": round(active_for, 1),
             "messages": list(_run_progress["messages"]),
             "budget": RUN_BUDGET_SECONDS,
             # The console needs both to reattach after a reload: the id to aim
@@ -402,6 +413,10 @@ def _finish_run() -> None:
     sees it finished and takes the exit itself. Exactly one of those happens.
     """
     RUN_CONTROL.disarm()
+    # Belt and braces behind each node's own `finally`: a run that ended is a
+    # run with no seat working, and a light left on would claim otherwise for
+    # as long as the console stayed open.
+    ACTIVITY.clear()
     with _run_lock:
         _run_progress["running"] = False
         _run_progress["stopping"] = False
