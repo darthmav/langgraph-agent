@@ -282,7 +282,16 @@ five applications against `graphrag_server.py`. This benchmark supports A1
 (connectivity health check — the component count and λ₂ are exact and cheap)
 and A3 (bottleneck detection — the strongest measured advantage, on the
 architecture that matches the knowledge graph). It weakens A2's implied
-reliance on the eigengap to pick k: choose k another way, or bound it. And it
+reliance on the eigengap to pick k: choose k another way, or bound it.
+
+> **Resolved since.** All three are now implemented in `graphrag_server.py`
+> (`connectivity()`, `topics()`, `bottleneck()`). A2's k problem is handled by
+> gating the eigengap's answer on how decisively it won — measured across 18
+> corpora with a planted topic count the heuristic was right every time at
+> 5.1–23.4×, while a grid, a small-world ring, an expander and a single dense
+> topic all landed at 1.0–1.8×, so a 3× threshold rejects the cases this
+> benchmark caught it failing. Per-cluster conductance is carried alongside as
+> an independent check. And it
 adds a prerequisite none of them state — the knowledge graph is an
 `nx.DiGraph`, every entry point here refuses one, and `to_undirected()` is
 deliberately the caller's decision to make.
