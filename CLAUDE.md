@@ -182,12 +182,22 @@ check, so it must keep working.
   `files_changed` is: the Builder's account of its own work is not evidence.
   A file clears only by running clean: files that failed on an earlier pass are
   re-verified even when the current pass did not touch them, because otherwise
-  the Builder retires a failure by doing nothing. The one exception is a
-  carried path that no longer exists on disk — deleting the file is a real fix,
+  the Builder retires a failure by doing nothing. Two paths are exempt. The
+  first is a carried path that no longer exists on disk — deleting the file is
+  a real fix,
   and re-running a missing path fails forever, which pinned
   `failed_verification` open and made the gate rewrite every `approved` to
-  `revise` until the step ceiling. The exception applies only to carried paths;
-  a path in `files_changed` was just written by a tool that reported success.
+  `revise` until the step ceiling. That exception applies only to carried
+  paths; a path in `files_changed` was just written by a tool that reported
+  success. The second is a **module inside a package** (`_is_package_module`:
+  its directory has an `__init__.py`). `python pkg/mod.py` puts `pkg/` on
+  `sys.path` instead of the project root, so a module importing its own package
+  absolutely — the normal way to write one — raises `ModuleNotFoundError`
+  however correct it is; executing it proves nothing and produces a failure no
+  edit to the file can clear. Such a file is reported `SKIPPED`, not passed:
+  the report says how many were skipped and that a package module only proves
+  itself through a root-level script that imports it. Those scripts are
+  ordinary files and still get executed.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step

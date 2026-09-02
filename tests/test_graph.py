@@ -695,6 +695,73 @@ def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
     assert result["blockers"] == ""
 
 
+def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
+    """`python pkg/mod.py` cannot import pkg, so running it proves nothing.
+
+    A module that imports its own package absolutely dies with
+    ModuleNotFoundError under direct execution however correct it is. Treating
+    that as a failure pinned failed_verification open on a working package and
+    the gate rewrote every `approved` to `revise` until the step ceiling.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    target = pkg / "mod.py"
+
+    llm = _WritesFileLLM(target, "from pkg.missing import nothing\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a package module"))
+
+    assert result["files_changed"] == [str(target)]
+    assert result["failed_verification"] == []
+    assert result["blockers"] == ""
+    # Skipped loudly: the Architect must see that nothing ran it.
+    assert "SKIPPED" in result["builder_report"]
+    assert "root-level script" in result["builder_report"]
+
+
+def test_a_root_level_script_is_still_executed(monkeypatch, tmp_path):
+    """The skip is for package modules only; a loose script still has to run."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "verify_it.py"  # no __init__.py beside it
+    llm = _WritesFileLLM(target, "assert False, 'boom'\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a verification script"))
+
+    assert result["failed_verification"] == [str(target)]
+    assert "do not run" in result["blockers"]
+
+
+def test_package_module_skip_does_not_hide_a_failing_script(monkeypatch, tmp_path):
+    """A skipped module beside a failing script still leaves the run blocked."""
+    from langgraph_agent.nodes import _verify_written_files
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    module = pkg / "mod.py"
+    module.write_text("from pkg.missing import nothing\n")
+    script = tmp_path / "verify_it.py"
+    script.write_text("assert False\n")
+
+    log: list[str] = []
+    results = _verify_written_files([str(module), str(script)], log)
+    statuses = {path: status for path, status, _ in results}
+
+    assert statuses[str(module)] == "skipped"
+    assert statuses[str(script)] == "failed"
+    assert f"verify({module}) -> skipped" in log
+
+
 def test_expect_failures_defaults_off():
     """The strict behaviour is what you get without asking for otherwise."""
     assert initial_state("anything")["expect_failures"] is False

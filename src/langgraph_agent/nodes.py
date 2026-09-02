@@ -820,6 +820,17 @@ VERIFY_TIMEOUT_SECONDS = 60
 # traceback that matters, not so much that it buries the plan.
 MAX_VERIFY_DETAIL_CHARS = 800
 
+# Why a package module is not executed, said in the report so the Architect
+# reads a reason rather than a silence.
+PACKAGE_MODULE_SKIP_REASON = (
+    "not executed: module inside a package, which `python <path>` cannot import. "
+    "Cover it with a root-level script that imports the package."
+)
+
+# How each verification status reads in the report. "SKIPPED" is shouted like
+# "FAILED" on purpose: an unexecuted file is not a passing one.
+_VERIFY_LABELS = {"ok": "ran clean", "failed": "FAILED", "skipped": "SKIPPED"}
+
 
 # A Builder often answers the Blockers section with "none" and then keeps
 # writing -- "none - Note: this file raises by design". Only the leading token
@@ -845,9 +856,25 @@ def _clean_blockers(text: str) -> str:
     return text.strip()
 
 
+def _is_package_module(path: str) -> bool:
+    """True for a .py file that lives inside a Python package.
+
+    `python pkg/mod.py` puts *pkg* on sys.path rather than the project root, so
+    a module that imports its own package absolutely -- `from pkg.other import
+    x`, the normal way to write one -- dies with ModuleNotFoundError no matter
+    how correct it is. Executing it proves nothing about the code and produces
+    a failure that cannot be fixed inside the file.
+
+    The test is the one Python itself uses to decide what a package is: the
+    directory holding the file has an `__init__.py`.
+    """
+    parent = Path(path).parent
+    return (parent / "__init__.py").exists()
+
+
 def _verify_written_files(
     files_changed: list[str], tool_log: list[str]
-) -> list[tuple[str, bool, str]]:
+) -> list[tuple[str, str, str]]:
     """Execute the runnable files the Builder wrote and report what happened.
 
     Writing a file is not evidence that it works. The Builder previously
@@ -856,12 +883,23 @@ def _verify_written_files(
     time anyone ran it. Running it here means a broken file comes back as a
     blocker the loop can act on, rather than as a success nobody checked.
 
-    Returns one (path, ok, detail) per runnable file.
+    A file inside a package is skipped instead: see `_is_package_module`. The
+    skip is reported, never silent -- a module nobody ran is exactly what this
+    pass exists to surface, and the way to cover one is a root-level script
+    that imports it, which this pass does execute.
+
+    Returns one (path, status, detail) per runnable file, where status is
+    "ok", "failed" or "skipped".
     """
-    results: list[tuple[str, bool, str]] = []
+    results: list[tuple[str, str, str]] = []
 
     for path in files_changed:
         if not path.endswith(RUNNABLE_SUFFIXES):
+            continue
+
+        if _is_package_module(path):
+            results.append((path, "skipped", PACKAGE_MODULE_SKIP_REASON))
+            tool_log.append(f"verify({path}) -> skipped")
             continue
 
         try:
@@ -870,7 +908,7 @@ def _verify_written_files(
                 {"command": f"python {path}", "timeout": VERIFY_TIMEOUT_SECONDS},
             )
         except Exception as exc:
-            results.append((path, False, str(exc)))
+            results.append((path, "failed", str(exc)))
             tool_log.append(f"verify({path}) -> failed")
             continue
 
@@ -882,7 +920,7 @@ def _verify_written_files(
                 result.get("stderr") or result.get("error") or result.get("stdout") or ""
             ).strip()[:MAX_VERIFY_DETAIL_CHARS]
 
-        results.append((path, ok, detail))
+        results.append((path, "ok" if ok else "failed", detail))
         tool_log.append(f"verify({path}) -> {'ok' if ok else 'failed'}")
 
     return results
@@ -957,18 +995,28 @@ def builder_node(state: AgentState) -> AgentState:
         if path not in files_changed and Path(path).exists()
     ]
     verification = _verify_written_files(files_changed + carried, tool_log)
-    failed = [(path, detail) for path, ok, detail in verification if not ok]
+    failed = [
+        (path, detail) for path, status, detail in verification if status == "failed"
+    ]
+    skipped = [path for path, status, _ in verification if status == "skipped"]
 
     parsed = _parse_builder_output(content)
     builder_report = parsed.get("changes_made") or content or "No report produced."
 
     if verification:
-        builder_report += "\n\nVerification (each runnable file was executed):\n"
+        builder_report += (
+            "\n\nVerification (each runnable file was executed, except as noted):\n"
+        )
         # fall through to the per-file lines below
         builder_report += "\n".join(
-            f"- {path}: {'ran clean' if ok else 'FAILED'}"
-            + (f"\n{detail}" if detail else "")
-            for path, ok, detail in verification
+            f"- {path}: {_VERIFY_LABELS[status]}" + (f"\n{detail}" if detail else "")
+            for path, status, detail in verification
+        )
+    if skipped:
+        builder_report += (
+            f"\n\n{len(skipped)} package module(s) were not executed. A package "
+            "module only proves itself through a root-level script that imports "
+            "it; write one if none of the scripts above cover it."
         )
 
     if tool_log:
