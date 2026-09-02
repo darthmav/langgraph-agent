@@ -4,7 +4,7 @@ The 4-Agent System:
 - Architect writes: architecture, verdict
 - Planner writes: plan, next_agent
 - Researcher writes: research, research_status
-- Builder writes: builder_report, files_changed, blockers
+- Builder writes: builder_report, files_changed, blockers, failed_verification
 """
 
 from enum import Enum
@@ -48,6 +48,15 @@ class AgentState(TypedDict):
         research_status: Status from Researcher (ready_for_builder | need_replan | no_relevant_knowledge)
         blockers: What's blocking progress (set by Builder when stuck)
         files_changed: List of file paths modified by Builder
+        failed_verification: Files the Builder wrote that did not run. Set by
+            the Builder every pass, so it clears once a file is fixed. A
+            non-empty list blocks the Architect from approving, unless
+            expect_failures is set.
+        expect_failures: Per-run opt-out, set by the caller and never by an
+            agent. A file that does not run is still executed, still reported
+            and still listed in failed_verification -- it just stops blocking
+            approval and sets no blocker. For goals whose product is a failing
+            file: a deliberate fixture, an expected-to-fail test.
         step_count: Number of steps taken (for loop limit)
     """
 
@@ -62,4 +71,6 @@ class AgentState(TypedDict):
     research_status: str  # ResearchStatus enum value
     blockers: str
     files_changed: list[str]
+    failed_verification: list[str]
+    expect_failures: bool
     step_count: int

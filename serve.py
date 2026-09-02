@@ -219,6 +219,10 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         "research_status": "",
         "blockers": "",
         "files_changed": [],
+        "failed_verification": [],
+        # Opt-out for goals whose product is a file that does not run. Off
+        # unless the caller asks, so the default stays strict.
+        "expect_failures": bool(params.get("expect_failures", False)),
         "step_count": 0,
     }
     # Streamed rather than invoked so the last state survives the ceiling.

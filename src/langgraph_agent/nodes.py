@@ -10,6 +10,7 @@ Implements the 4-Agent System with strict prompts and tool binding:
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -444,6 +445,24 @@ def architect_node(state: AgentState) -> AgentState:
         state["architecture"] = parsed["architecture"]
     state["verdict"] = parsed["verdict"]
 
+    # A file that does not run cannot be approved work, whatever the Architect
+    # concluded. This is the one place the gate's ruling is overridden, and it
+    # is deliberate: the Architect reads the failure in `blockers` and had
+    # approved past it. The verdict is rewritten rather than the routing
+    # patched, so the state says what actually happened.
+    #
+    # Note the cost: a goal that legitimately calls for a failing file can no
+    # longer be approved, and will run to MAX_STEPS before the ceiling ends it.
+    blocked = list(state.get("failed_verification") or [])
+    if state.get("expect_failures"):
+        # The caller asked for a failing file, so a failure is the product.
+        # The list stays in state and the report still shows it; it just does
+        # not overrule the gate.
+        blocked = []
+    overridden = bool(blocked) and state["verdict"] == Verdict.APPROVED.value
+    if overridden:
+        state["verdict"] = Verdict.REVISE.value
+
     # The gate is the one point every cycle passes through, so it is where the
     # loop counter belongs. The Builder used to own it, which let a
     # Planner/Researcher loop run without ever counting a step.
@@ -457,7 +476,13 @@ def architect_node(state: AgentState) -> AgentState:
     if state.get("plan"):
         state["step_count"] = state.get("step_count", 0) + 1
 
-    state["messages"].append(f"[Architect] Verdict: {state['verdict']}")
+    if overridden:
+        note = f" (approval blocked: {len(blocked)} file(s) do not run)"
+    elif blocked:
+        note = f" ({len(blocked)} file(s) do not run)"
+    else:
+        note = ""
+    state["messages"].append(f"[Architect] Verdict: {state['verdict']}{note}")
 
     return state
 
@@ -783,6 +808,124 @@ def _run_builder_tools(
     return "", True
 
 
+# Files the Builder writes that can be executed as a script. Anything else it
+# produces -- markdown, config, data -- has nothing to run.
+RUNNABLE_SUFFIXES = (".py",)
+
+# Per-file ceiling for the verification pass. A written script that hangs is a
+# failed verification, not a reason to stall the whole run.
+VERIFY_TIMEOUT_SECONDS = 60
+
+# Verification output kept in the report. Enough for the next cycle to see the
+# traceback that matters, not so much that it buries the plan.
+MAX_VERIFY_DETAIL_CHARS = 800
+
+# Why a package module is not executed, said in the report so the Architect
+# reads a reason rather than a silence.
+PACKAGE_MODULE_SKIP_REASON = (
+    "not executed: module inside a package, which `python <path>` cannot import. "
+    "Cover it with a root-level script that imports the package."
+)
+
+# How each verification status reads in the report. "SKIPPED" is shouted like
+# "FAILED" on purpose: an unexecuted file is not a passing one.
+_VERIFY_LABELS = {"ok": "ran clean", "failed": "FAILED", "skipped": "SKIPPED"}
+
+
+# A Builder often answers the Blockers section with "none" and then keeps
+# writing -- "none - Note: this file raises by design". Only the leading token
+# is the answer; the rest is commentary, and keeping the whole string made
+# state claim something was blocked while literally saying "none".
+#
+# Matched only where the token stands as a complete clause: followed by the end
+# of the string or a separator. "none of the tests pass" continues into a real
+# sentence and stays a blocker -- swallowing that would be the silent success
+# this module spends its time preventing. The match is deliberately narrow, so
+# an unrecognised phrasing ("none needed") is kept as a blocker rather than
+# dropped: a spurious blocker costs a cycle, a dropped one costs the guarantee.
+_NO_BLOCKER = re.compile(
+    r"^\s*(?:none|n/?a|nothing|no\s+blockers?)\s*(?:$|[-\u2014\u2013:;.,])",
+    re.IGNORECASE,
+)
+
+
+def _clean_blockers(text: str) -> str:
+    """The Blockers section as an actual blocker, or empty when it says none."""
+    if not text or _NO_BLOCKER.match(text):
+        return ""
+    return text.strip()
+
+
+def _is_package_module(path: str) -> bool:
+    """True for a .py file that lives inside a Python package.
+
+    `python pkg/mod.py` puts *pkg* on sys.path rather than the project root, so
+    a module that imports its own package absolutely -- `from pkg.other import
+    x`, the normal way to write one -- dies with ModuleNotFoundError no matter
+    how correct it is. Executing it proves nothing about the code and produces
+    a failure that cannot be fixed inside the file.
+
+    The test is the one Python itself uses to decide what a package is: the
+    directory holding the file has an `__init__.py`.
+    """
+    parent = Path(path).parent
+    return (parent / "__init__.py").exists()
+
+
+def _verify_written_files(
+    files_changed: list[str], tool_log: list[str]
+) -> list[tuple[str, str, str]]:
+    """Execute the runnable files the Builder wrote and report what happened.
+
+    Writing a file is not evidence that it works. The Builder previously
+    reported "Implementation complete" for a module it had never executed, and
+    the Architect approved it -- the file raised an AssertionError the first
+    time anyone ran it. Running it here means a broken file comes back as a
+    blocker the loop can act on, rather than as a success nobody checked.
+
+    A file inside a package is skipped instead: see `_is_package_module`. The
+    skip is reported, never silent -- a module nobody ran is exactly what this
+    pass exists to surface, and the way to cover one is a root-level script
+    that imports it, which this pass does execute.
+
+    Returns one (path, status, detail) per runnable file, where status is
+    "ok", "failed" or "skipped".
+    """
+    results: list[tuple[str, str, str]] = []
+
+    for path in files_changed:
+        if not path.endswith(RUNNABLE_SUFFIXES):
+            continue
+
+        if _is_package_module(path):
+            results.append((path, "skipped", PACKAGE_MODULE_SKIP_REASON))
+            tool_log.append(f"verify({path}) -> skipped")
+            continue
+
+        try:
+            result = _call_mcp_tool_sync(
+                "terminal_execute",
+                {"command": f"python {path}", "timeout": VERIFY_TIMEOUT_SECONDS},
+            )
+        except Exception as exc:
+            results.append((path, "failed", str(exc)))
+            tool_log.append(f"verify({path}) -> failed")
+            continue
+
+        ok = bool(result.get("success")) if isinstance(result, dict) else False
+        detail = ""
+        if isinstance(result, dict) and not ok:
+            # stderr first: a traceback is what the next cycle needs to see.
+            detail = str(
+                result.get("stderr") or result.get("error") or result.get("stdout") or ""
+            ).strip()[:MAX_VERIFY_DETAIL_CHARS]
+
+        results.append((path, "ok" if ok else "failed", detail))
+        tool_log.append(f"verify({path}) -> {'ok' if ok else 'failed'}")
+
+    return results
+
+
 def builder_node(state: AgentState) -> AgentState:
     """Builder: implement the plan by actually calling tools.
 
@@ -804,7 +947,6 @@ def builder_node(state: AgentState) -> AgentState:
 
     files_changed: list[str] = []
     tool_log: list[str] = []
-    blockers = ""
     exhausted = False
 
     messages: list[Any] = [
@@ -830,8 +972,52 @@ def builder_node(state: AgentState) -> AgentState:
             tool_llm, messages, files_changed, tool_log
         )
 
+    # Every runnable file the Builder wrote is executed before it gets to claim
+    # the work is done. This is in code rather than left to the prompt for the
+    # same reason files_changed is: the Builder's own account of its work is
+    # not evidence.
+    #
+    # Files that failed on an earlier pass are re-checked even when this pass
+    # did not touch them. Verifying only what was just written let the Builder
+    # clear a failure by doing nothing: the broken file stayed on disk, the
+    # next pass wrote nothing, the failure list came back empty and the gate
+    # approved. A file clears only by running clean.
+    # A carried file that is gone from disk drops out instead of failing.
+    # Deleting it is a real fix -- a file that does not exist cannot raise --
+    # but `python <missing path>` exits non-zero forever, so re-running it
+    # pinned failed_verification open and the gate rewrote every `approved` to
+    # `revise` until the step ceiling ended the run. Only carried paths get
+    # this; a path in files_changed was just written by a tool that reported
+    # success, and its absence would be the write lying.
+    carried = [
+        path
+        for path in (state.get("failed_verification") or [])
+        if path not in files_changed and Path(path).exists()
+    ]
+    verification = _verify_written_files(files_changed + carried, tool_log)
+    failed = [
+        (path, detail) for path, status, detail in verification if status == "failed"
+    ]
+    skipped = [path for path, status, _ in verification if status == "skipped"]
+
     parsed = _parse_builder_output(content)
     builder_report = parsed.get("changes_made") or content or "No report produced."
+
+    if verification:
+        builder_report += (
+            "\n\nVerification (each runnable file was executed, except as noted):\n"
+        )
+        # fall through to the per-file lines below
+        builder_report += "\n".join(
+            f"- {path}: {_VERIFY_LABELS[status]}" + (f"\n{detail}" if detail else "")
+            for path, status, detail in verification
+        )
+    if skipped:
+        builder_report += (
+            f"\n\n{len(skipped)} package module(s) were not executed. A package "
+            "module only proves itself through a root-level script that imports "
+            "it; write one if none of the scripts above cover it."
+        )
 
     if tool_log:
         builder_report += "\n\nTool calls:\n" + "\n".join(f"- {c}" for c in tool_log)
@@ -849,9 +1035,18 @@ def builder_node(state: AgentState) -> AgentState:
             + ", ".join(claimed)
         )
 
-    parsed_blockers = parsed.get("next_steps_blockers", "")
-    if parsed_blockers and parsed_blockers.strip().lower() not in {"none", "n/a", ""}:
-        blockers = parsed_blockers
+    blockers = _clean_blockers(parsed.get("next_steps_blockers", ""))
+
+    # A failed verification outranks whatever the model concluded: it wrote a
+    # file that does not run, and the Architect must see that as unfinished --
+    # unless the run was asked for one, in which case it is the product, not a
+    # defect. It is still executed and still reported either way.
+    expected = bool(state.get("expect_failures"))
+    if failed and not expected:
+        blockers = "Files that do not run: " + "; ".join(
+            f"{path} ({detail.splitlines()[-1] if detail else 'no output'})"
+            for path, detail in failed
+        )
 
     if exhausted and not blockers:
         blockers = (
@@ -861,10 +1056,21 @@ def builder_node(state: AgentState) -> AgentState:
 
     state["builder_report"] = builder_report
     state["files_changed"] = files_changed
+    # Written every pass, including empty, so a file that gets fixed on a later
+    # cycle stops blocking the gate.
+    state["failed_verification"] = [path for path, _ in failed]
     state["blockers"] = blockers
-    state["messages"].append(
-        f"[Builder] Implementation complete. Files: {len(files_changed)}"
-    )
+    # The feed line has to carry the verification result too. "Implementation
+    # complete" beside a file that does not run is the same false claim this
+    # pass exists to catch, and it is what the Architect reads in state.
+    if failed:
+        suffix = " (expected for this run)" if expected else ""
+        summary = (
+            f"Wrote {len(files_changed)} file(s); {len(failed)} do not run{suffix}"
+        )
+    else:
+        summary = f"Implementation complete. Files: {len(files_changed)}"
+    state["messages"].append(f"[Builder] {summary}")
 
     # step_count is incremented by the Architect gate, not here: every cycle
     # passes through the gate, but a Planner/Researcher loop never reaches the

@@ -165,6 +165,8 @@ button.go:disabled{opacity:.5;cursor:not-allowed}
 /* ---- engineer ---- */
 #eng-input{display:flex;gap:8px;flex:none;margin-top:10px}
 #eng-prompt{flex:1;resize:none;font:12px var(--mono);min-height:38px}
+.optout{display:flex;align-items:center;gap:5px;font:11px var(--mono);color:var(--ink-2);white-space:nowrap;cursor:pointer}
+.optout input{cursor:pointer}
 .msg{border-radius:10px;padding:9px 12px;margin-bottom:8px;font:12px/1.6 var(--sans);white-space:pre-wrap}
 .msg.user{background:var(--user-msg);color:#dbe9ff}
 .msg.sys{background:var(--bg-3);border-left:3px solid var(--accent);color:var(--ink-2);font:11px/1.6 var(--mono)}
@@ -215,6 +217,9 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
         <div class="scroll" id="director"><div class="muted">Give the Architect a goal. It sets the direction, the Planner breaks it down, and it rules on the result.</div></div>
         <div id="eng-input">
           <textarea id="eng-prompt" rows="1" placeholder="Tell the Architect what you want done&hellip;"></textarea>
+          <label class="optout" title="A file that does not run is still executed and still reported — it just stops blocking the Architect's approval. For goals whose product is a failing file.">
+            <input type="checkbox" id="eng-expect-fail"> expect failures
+          </label>
           <button class="go" id="eng-send">Run</button>
         </div>
       </div>
@@ -618,9 +623,13 @@ function stageCard(role, text, badge){
 async function run(){
   const goal = $("#eng-prompt").value.trim();
   if(!goal) return;
+  // Read once, at submit: toggling the box mid-run must not change the run.
+  const expectFail = $("#eng-expect-fail").checked;
   const btn = $("#eng-send");
   btn.disabled = true; btn.textContent = "Running…";
-  $("#director").innerHTML += `<div class="msg user">${esc(goal)}</div>`;
+  $("#director").innerHTML += `<div class="msg user">${esc(goal)}`
+    + (expectFail ? ` <span class="badge">expect failures</span>` : "")
+    + `</div>`;
   $("#eng-prompt").value = "";
 
   // A run is many cloud calls long and the POST does not return until the last
@@ -658,7 +667,7 @@ async function run(){
   }, 1000);
 
   try{
-    const r = await rpc("run_goal", {goal});
+    const r = await rpc("run_goal", {goal, expect_failures: expectFail});
     clearInterval(timer);
     renderRun(r);
   }catch(e){

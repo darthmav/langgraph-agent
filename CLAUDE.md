@@ -114,6 +114,8 @@ Every node reads/writes `AgentState`:
     "research_status": "ready_for_builder" | "need_replan" | "no_relevant_knowledge",
     "blockers": str,
     "files_changed": list[str],
+    "failed_verification": list[str],
+    "expect_failures": bool,
     "step_count": int,
 }
 ```
@@ -172,6 +174,45 @@ check, so it must keep working.
   `MAX_BUILDER_TOOL_TURNS`; `files_changed` is appended only when a write
   tool reports success, never from the model's prose. A seat whose model
   cannot call tools (`StubLLM`) still reports but changes nothing.
+- **The Builder must run what it writes.** Every file it wrote with a
+  `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
+  the tool loop, and a file that raises becomes a blocker plus a `FAILED` line
+  in the report — the feed says "N did not run" rather than "Implementation
+  complete". Enforced in code, not left to the prompt, for the same reason
+  `files_changed` is: the Builder's account of its own work is not evidence.
+  A file clears only by running clean: files that failed on an earlier pass are
+  re-verified even when the current pass did not touch them, because otherwise
+  the Builder retires a failure by doing nothing. Two paths are exempt. The
+  first is a carried path that no longer exists on disk — deleting the file is
+  a real fix,
+  and re-running a missing path fails forever, which pinned
+  `failed_verification` open and made the gate rewrite every `approved` to
+  `revise` until the step ceiling. That exception applies only to carried
+  paths; a path in `files_changed` was just written by a tool that reported
+  success. The second is a **module inside a package** (`_is_package_module`:
+  its directory has an `__init__.py`). `python pkg/mod.py` puts `pkg/` on
+  `sys.path` instead of the project root, so a module importing its own package
+  absolutely — the normal way to write one — raises `ModuleNotFoundError`
+  however correct it is; executing it proves nothing and produces a failure no
+  edit to the file can clear. Such a file is reported `SKIPPED`, not passed:
+  the report says how many were skipped and that a package module only proves
+  itself through a root-level script that imports it. Those scripts are
+  ordinary files and still get executed.
+- **A failed verification blocks approval.** `failed_verification` carries the
+  paths, and the Architect rewrites its own `approved` to `revise` while that
+  list is non-empty — the one place the gate's ruling is overridden. The step
+  ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot hang
+  it. The cost is real: a goal that legitimately wants a failing file (a
+  deliberate fixture, an expected-to-fail test) can no longer be approved and
+  will run to one of those limits — unless the run opts out.
+- **`expect_failures` is the per-run opt-out**, set by the caller (the console
+  checkbox, or `run_goal({goal, expect_failures: true})`) and never by an
+  agent. It suppresses the block, not the check: the file is still executed,
+  still reported as `FAILED`, and still listed in `failed_verification`. It
+  just stops overruling the gate and sets no blocker. It is per-run rather
+  than per-file because the Builder chooses the filenames, so a run with it on
+  will not block on an unintended failure either — which is why the failure
+  stays visible in the report instead of being dropped. Defaults off.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.

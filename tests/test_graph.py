@@ -41,6 +41,8 @@ def initial_state(goal: str) -> AgentState:
         "research_status": "",
         "blockers": "",
         "files_changed": [],
+        "failed_verification": [],
+        "expect_failures": False,
         "step_count": 0,
     }
 
@@ -394,3 +396,414 @@ def test_default_seats_need_no_api_key():
 
     assert set(DEFAULT_SEATS) == set(AGENTS)
     assert all(seat["provider"] == "ollama" for seat in DEFAULT_SEATS.values())
+
+
+class _WritesFileLLM(_ToolCallingLLM):
+    """Writes a caller-supplied file body, then reports success."""
+
+    def __init__(self, path, body):
+        super().__init__(path)
+        self._body = body
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "filesystem_write",
+                    "args": {"path": str(self._path), "content": self._body},
+                    "id": "call_1",
+                }],
+            )
+        return AIMessage(
+            content=(
+                "## Changes Made\nWrote it.\n\n"
+                f"## Files Modified\n- {self._path}\n\n"
+                "## Next Steps / Blockers\nnone\n"
+            )
+        )
+
+
+def test_builder_runs_the_python_it_writes(monkeypatch, tmp_path):
+    """A written module that raises must come back as a blocker, not success.
+
+    This is the failure that shipped: a file written, reported complete, and
+    approved -- which raised an AssertionError the first time it was run.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "broken.py"
+    llm = _WritesFileLLM(target, "assert False, 'boom'\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a module"))
+
+    # The write happened, and is still reported as a change...
+    assert result["files_changed"] == [str(target)]
+    # ...but the run failed, so the Builder does not get to claim completion.
+    assert "do not run" in result["blockers"]
+    assert "boom" in result["blockers"] or "AssertionError" in result["blockers"]
+    assert "FAILED" in result["builder_report"]
+    assert "do not run" in result["messages"][-1]
+    assert "Implementation complete" not in result["messages"][-1]
+
+
+def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
+    """A file that executes cleanly verifies, and sets no blocker."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "fine.py"
+    llm = _WritesFileLLM(target, "print('ok')\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a module"))
+
+    assert result["blockers"] == ""
+    assert "ran clean" in result["builder_report"]
+    assert "Implementation complete" in result["messages"][-1]
+
+
+def test_builder_only_executes_runnable_files(monkeypatch, tmp_path):
+    """Markdown has nothing to run; the verification pass must skip it."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "notes.md"
+    llm = _WritesFileLLM(target, "# just prose\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write notes"))
+
+    assert result["files_changed"] == [str(target)]
+    assert result["blockers"] == ""
+    assert "Verification" not in result["builder_report"]
+
+
+class _ApprovingLLM:
+    """An Architect seat that always rules approved."""
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content="## Architecture\nfine\n\n## Verdict\napproved\n"
+        )
+
+
+def test_failed_verification_blocks_approval(monkeypatch):
+    """An Architect that approves work which does not run is overruled."""
+    from langgraph_agent.nodes import architect_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _ApprovingLLM(),
+    )
+
+    state = initial_state("Write a module")
+    state["plan"] = "1. Write it"
+    state["builder_report"] = "wrote it"
+    state["failed_verification"] = ["broken.py"]
+
+    result = architect_node(state)
+
+    assert result["verdict"] == Verdict.REVISE.value
+    assert "approval blocked" in result["messages"][-1]
+    # revise routes back to the Planner rather than ending the run.
+    from langgraph_agent.graph import _route_from_architect
+
+    assert _route_from_architect(result) == "planner"
+
+
+def test_approval_stands_once_verification_passes(monkeypatch):
+    """With nothing failing, the Architect's approval is left alone."""
+    from langgraph_agent.nodes import architect_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _ApprovingLLM(),
+    )
+
+    state = initial_state("Write a module")
+    state["plan"] = "1. Write it"
+    state["builder_report"] = "wrote it"
+    state["failed_verification"] = []
+
+    result = architect_node(state)
+
+    assert result["verdict"] == Verdict.APPROVED.value
+    assert "blocked" not in result["messages"][-1]
+
+
+def test_step_ceiling_still_ends_a_permanently_failing_run():
+    """The block must not create a run that cannot end."""
+    from langgraph_agent.graph import MAX_STEPS, _route_from_architect
+
+    state = initial_state("anything")
+    state["verdict"] = Verdict.REVISE.value
+    state["failed_verification"] = ["broken.py"]
+    state["step_count"] = MAX_STEPS
+
+    assert _route_from_architect(state) == "__end__"
+
+
+class _WritesNothingLLM:
+    """A Builder pass that calls no tools and reports success anyway."""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content=(
+                "## Changes Made\nNothing to do.\n\n"
+                "## Files Modified\n\n\n"
+                "## Next Steps / Blockers\nnone\n"
+            )
+        )
+
+
+def test_a_pass_that_writes_nothing_cannot_clear_a_failure(monkeypatch, tmp_path):
+    """A broken file stays broken until it runs, not until it is ignored.
+
+    The Builder could otherwise clear a failed verification by doing nothing on
+    the next pass: the file stayed on disk, the failure list came back empty
+    and the Architect approved.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    broken = tmp_path / "broken.py"
+    broken.write_text("assert False, 'still broken'\n")
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+
+    state = initial_state("Fix it")
+    state["plan"] = "1. Fix the module"
+    state["failed_verification"] = [str(broken)]
+
+    result = builder_node(state)
+
+    assert result["files_changed"] == []            # nothing written this pass
+    assert result["failed_verification"] == [str(broken)]  # still failing
+    assert "do not run" in result["blockers"]
+
+
+def test_a_deleted_file_clears_its_failure(monkeypatch, tmp_path):
+    """Deleting the broken file is a fix, not a permanent failure.
+
+    A carried path that no longer exists used to be re-run anyway, and
+    `python <missing path>` fails forever: failed_verification never emptied,
+    the gate rewrote every `approved` to `revise`, and the run could only end
+    at the step ceiling.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "_tmp_scratch.py"  # never created
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+
+    state = initial_state("Drop the scratch script")
+    state["plan"] = "1. Remove it"
+    state["failed_verification"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert result["failed_verification"] == []
+    assert result["blockers"] == ""
+    assert str(gone) not in result["builder_report"]
+
+
+def test_a_fixed_file_clears_its_failure(monkeypatch, tmp_path):
+    """Once the file actually runs, the failure is retired."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "broken.py"
+    target.write_text("assert False\n")
+
+    llm = _WritesFileLLM(target, "print('fixed')\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    state = initial_state("Fix it")
+    state["plan"] = "1. Fix the module"
+    state["failed_verification"] = [str(target)]
+
+    result = builder_node(state)
+
+    assert result["failed_verification"] == []
+    assert result["blockers"] == ""
+
+
+def test_expect_failures_lets_the_gate_approve(monkeypatch):
+    """With the opt-out set, a failing file no longer overrules the Architect."""
+    from langgraph_agent.nodes import architect_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _ApprovingLLM(),
+    )
+
+    state = initial_state("Write a deliberate fixture")
+    state["plan"] = "1. Write it"
+    state["builder_report"] = "wrote it"
+    state["failed_verification"] = ["fixture.py"]
+    state["expect_failures"] = True
+
+    result = architect_node(state)
+
+    assert result["verdict"] == Verdict.APPROVED.value
+    assert "blocked" not in result["messages"][-1]
+    # The failure is not hidden -- it stays in state for the report.
+    assert result["failed_verification"] == ["fixture.py"]
+
+
+def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
+    """The opt-out suppresses the block, not the check."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "fixture.py"
+    llm = _WritesFileLLM(target, "assert False, 'by design'\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    state = initial_state("Write a deliberate fixture")
+    state["expect_failures"] = True
+    result = builder_node(state)
+
+    # Executed and reported...
+    assert "FAILED" in result["builder_report"]
+    assert result["failed_verification"] == [str(target)]
+    assert "expected for this run" in result["messages"][-1]
+    # ...but not treated as a blocker.
+    assert result["blockers"] == ""
+
+
+def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
+    """`python pkg/mod.py` cannot import pkg, so running it proves nothing.
+
+    A module that imports its own package absolutely dies with
+    ModuleNotFoundError under direct execution however correct it is. Treating
+    that as a failure pinned failed_verification open on a working package and
+    the gate rewrote every `approved` to `revise` until the step ceiling.
+    """
+    from langgraph_agent.nodes import builder_node
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    target = pkg / "mod.py"
+
+    llm = _WritesFileLLM(target, "from pkg.missing import nothing\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a package module"))
+
+    assert result["files_changed"] == [str(target)]
+    assert result["failed_verification"] == []
+    assert result["blockers"] == ""
+    # Skipped loudly: the Architect must see that nothing ran it.
+    assert "SKIPPED" in result["builder_report"]
+    assert "root-level script" in result["builder_report"]
+
+
+def test_a_root_level_script_is_still_executed(monkeypatch, tmp_path):
+    """The skip is for package modules only; a loose script still has to run."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "verify_it.py"  # no __init__.py beside it
+    llm = _WritesFileLLM(target, "assert False, 'boom'\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a verification script"))
+
+    assert result["failed_verification"] == [str(target)]
+    assert "do not run" in result["blockers"]
+
+
+def test_package_module_skip_does_not_hide_a_failing_script(monkeypatch, tmp_path):
+    """A skipped module beside a failing script still leaves the run blocked."""
+    from langgraph_agent.nodes import _verify_written_files
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    module = pkg / "mod.py"
+    module.write_text("from pkg.missing import nothing\n")
+    script = tmp_path / "verify_it.py"
+    script.write_text("assert False\n")
+
+    log: list[str] = []
+    results = _verify_written_files([str(module), str(script)], log)
+    statuses = {path: status for path, status, _ in results}
+
+    assert statuses[str(module)] == "skipped"
+    assert statuses[str(script)] == "failed"
+    assert f"verify({module}) -> skipped" in log
+
+
+def test_expect_failures_defaults_off():
+    """The strict behaviour is what you get without asking for otherwise."""
+    assert initial_state("anything")["expect_failures"] is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "none",
+        "None.",
+        "n/a",
+        "N/A - all good",
+        "no blockers",
+        "No blockers.",
+        "nothing",
+        "none - see the report",
+        "none — Note: this file intentionally raises AssertionError by design",
+        "",
+    ],
+)
+def test_a_blockers_section_saying_none_is_not_a_blocker(text):
+    """"none" followed by commentary still means there are no blockers."""
+    from langgraph_agent.nodes import _clean_blockers
+
+    assert _clean_blockers(text) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "none of the tests pass",
+        "nothing works after the refactor",
+        "Missing API key for the provider",
+        "no blockers were resolved; the import still fails",
+    ],
+)
+def test_a_real_blocker_starting_with_none_survives(text):
+    """The match must not swallow a sentence that only begins with the word.
+
+    Dropping "none of the tests pass" would be exactly the silent success the
+    verification pass exists to prevent.
+    """
+    from langgraph_agent.nodes import _clean_blockers
+
+    assert _clean_blockers(text) == text
