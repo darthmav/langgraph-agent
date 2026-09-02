@@ -221,6 +221,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
             <input type="checkbox" id="eng-expect-fail"> expect failures
           </label>
           <button class="go" id="eng-send">Run</button>
+          <button class="go danger" id="eng-stop" disabled
+                  title="Halt the run at its next safe boundary. Work already in flight — a file write, a test run, a model call — finishes first, so this can take up to a minute. Everything the run produced is kept.">Stop</button>
         </div>
       </div>
       <div class="col">
@@ -620,13 +622,44 @@ function stageCard(role, text, badge){
     `<div class="sd">${esc(text)}</div></div>`;
 }
 
+// The run in flight, at module scope. It used to be entirely local to run(),
+// which meant nothing outside that call could reach the poll timer or name the
+// run -- and a Stop button has to do both. `inflight` also gates the Enter key,
+// which previously bypassed the disabled Run button and could start a second
+// run behind the first.
+let CURRENT = {inflight:false, timer:null, runId:"", stopping:false};
+
+function setRunButtons(){
+  $("#eng-send").disabled = CURRENT.inflight;
+  $("#eng-send").textContent = CURRENT.inflight ? "Running…" : "Run";
+  $("#eng-stop").disabled = !CURRENT.inflight || CURRENT.stopping;
+  $("#eng-stop").textContent = CURRENT.stopping ? "Stopping…" : "Stop";
+}
+
+// The run_goal fetch is deliberately left in flight. It is how the partial
+// state comes back, and aborting it would throw away the very thing the stop
+// exists to keep.
+async function stopRun(){
+  if(!CURRENT.inflight || CURRENT.stopping) return;
+  CURRENT.stopping = true; setRunButtons();
+  try{
+    const r = await rpc("stop_run", {run_id: CURRENT.runId, reason: "Stopped from the console."});
+    $("#director").innerHTML +=
+      `<div class="msg sys"><b>Emergency stop</b> <span class="badge bad">STOPPING</span>\n\n${esc(r.detail || "")}</div>`;
+    $("#director").scrollTop = $("#director").scrollHeight;
+  }catch(e){
+    CURRENT.stopping = false; setRunButtons();
+  }
+}
+
 async function run(){
+  if(CURRENT.inflight) return;
   const goal = $("#eng-prompt").value.trim();
   if(!goal) return;
   // Read once, at submit: toggling the box mid-run must not change the run.
   const expectFail = $("#eng-expect-fail").checked;
-  const btn = $("#eng-send");
-  btn.disabled = true; btn.textContent = "Running…";
+  CURRENT.inflight = true; CURRENT.stopping = false; CURRENT.runId = "";
+  setRunButtons();
   $("#director").innerHTML += `<div class="msg user">${esc(goal)}`
     + (expectFail ? ` <span class="badge">expect failures</span>` : "")
     + `</div>`;
@@ -653,7 +686,7 @@ async function run(){
   };
   paint();
 
-  const timer = setInterval(async () => {
+  CURRENT.timer = setInterval(async () => {
     paint();
     if(polling) return;              // never stack polls behind a slow one
     polling = true;
@@ -661,6 +694,10 @@ async function run(){
       const p = await rpc("run_progress", {}, true);
       if(p && p.running){
         done = p.messages || []; node = p.node || ""; budget = p.budget || 0;
+        // Learned from the server rather than assumed: it is what a Stop is
+        // aimed at, and it survives the console losing track of the run.
+        CURRENT.runId = p.run_id || CURRENT.runId;
+        if(p.stopping && !CURRENT.stopping){ CURRENT.stopping = true; setRunButtons(); }
       }
     }catch(e){ /* the run itself reports failure; a missed poll is not news */ }
     finally{ polling = false; }
@@ -668,10 +705,8 @@ async function run(){
 
   try{
     const r = await rpc("run_goal", {goal, expect_failures: expectFail});
-    clearInterval(timer);
     renderRun(r);
   }catch(e){
-    clearInterval(timer);
     $("#feed").innerHTML = stageCard("architect", "Run failed: "+e.message, `<span class="badge bad">FAIL</span>`);
     // The director pane is where the goal was typed and where a finished run
     // answers. Reporting the failure only in the feed leaves that pane showing
@@ -683,8 +718,12 @@ async function run(){
     // A seat that just failed should lose its live chip now rather than at the
     // next 5s poll, so the cause is on screen next to the failure.
     poll(true);
+    // A failed run still produced whatever it produced, and the server kept it.
+    showLastRun("after the failure");
   }finally{
-    btn.disabled = false; btn.textContent = "Run";
+    clearInterval(CURRENT.timer); CURRENT.timer = null;
+    CURRENT.inflight = false; CURRENT.stopping = false; CURRENT.runId = "";
+    setRunButtons();
   }
 }
 
@@ -697,7 +736,32 @@ function stagesFrom(messages){
   });
 }
 
-function renderRun(r){
+// What a stopped run leaves behind. These fields exist on every run but were
+// only ever visible in the State tab's JSON dump, which is not where anyone
+// looks after cutting a run short -- and they are exactly what "recover the
+// information" means: what got written, what nobody proved, what blocked.
+function recoveryBlock(r){
+  const files = r.files_changed || [];
+  const unproven = r.failed_verification || [];
+  const parts = [];
+  parts.push(files.length
+    ? `Written: ${files.length} file(s) — ${files.join(", ")}`
+    : "Written: nothing reached disk.");
+  if(unproven.length){
+    // Said plainly, because this is where the safeguard checkbox stops
+    // mattering: a file nobody executed is unproven, not expected-to-fail, so
+    // "expect failures" does not clear it.
+    parts.push(`Unproven (nobody ran these): ${unproven.join(", ")}`
+      + (r.expect_failures
+          ? " — expect failures was ON, and does not clear an unrun file."
+          : ""));
+  }
+  if(r.blockers) parts.push(`Blockers: ${r.blockers}`);
+  if(r.plan) parts.push(`Plan so far:\n${r.plan}`);
+  return parts.join("\n\n");
+}
+
+function renderRun(r, note){
   $("#state-dump").textContent = JSON.stringify(r, null, 2);
 
   const stages = stagesFrom(r.messages);
@@ -709,17 +773,76 @@ function renderRun(r){
   impact.style.display = files.length ? "block" : "none";
   impact.textContent = files.length ? `Changed this machine — ${files.length} file(s): ${files.join(", ")}` : "";
 
-  const verdict = r.verdict || "(none)";
-  const cls = verdict === "approved" ? "ok" : "bad";
-  $("#director").innerHTML +=
-    `<div class="msg sys"><b>Architect verdict:</b> <span class="badge ${cls}">${esc(verdict)}</span>`+
-    (r.architecture ? `\n\n${esc(r.architecture)}` : "")+
-    (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
-    `</div>`;
+  const tag = note ? ` <span class="badge">${esc(note)}</span>` : "";
+  if(r.stopped){
+    // A stopped run has no verdict to report -- nobody ruled -- so it is
+    // titled by what happened instead, and answered with what survived.
+    $("#director").innerHTML +=
+      `<div class="msg sys"><b>Run stopped</b> <span class="badge bad">STOPPED</span>${tag}`+
+      (r.stop_reason ? ` ${esc(r.stop_reason)}` : "")+
+      `\n\n${esc(recoveryBlock(r))}`+
+      (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
+      `</div>`;
+  }else{
+    const verdict = r.verdict || "(none)";
+    const cls = verdict === "approved" ? "ok" : "bad";
+    $("#director").innerHTML +=
+      `<div class="msg sys"><b>Architect verdict:</b> <span class="badge ${cls}">${esc(verdict)}</span>${tag}`+
+      (r.architecture ? `\n\n${esc(r.architecture)}` : "")+
+      (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
+      `</div>`;
+  }
   $("#director").scrollTop = $("#director").scrollHeight;
 }
 
+// The server keeps the last run's final state, so a console that reloaded --
+// or one whose fetch died -- can still show what the run produced.
+async function showLastRun(note){
+  try{
+    const r = await rpc("last_run", {}, true);
+    if(r && r.snapshot) renderRun(r.snapshot, note || `recovered — ${r.snapshot.finished_at || ""}`);
+  }catch(e){ /* nothing to recover is not an error */ }
+}
+
+// Reattach to a run that was already going when this page loaded. Without it a
+// reload mid-run orphaned the console: the server kept working and the browser
+// showed an idle form with no way to stop it.
+async function reattach(){
+  try{
+    const p = await rpc("run_progress", {}, true);
+    if(!p || !p.running){ await showLastRun(); return; }
+    CURRENT.inflight = true;
+    CURRENT.runId = p.run_id || "";
+    CURRENT.stopping = !!p.stopping;
+    setRunButtons();
+    $("#director").innerHTML +=
+      `<div class="msg sys"><b>Reattached</b> to a run already in flight`+
+      (p.goal ? `\n\n${esc(p.goal)}` : "")+`</div>`;
+    // This page has no run_goal fetch of its own to return the final state, so
+    // it watches for the run to end and then reads the server's snapshot.
+    CURRENT.timer = setInterval(async () => {
+      let q;
+      try{ q = await rpc("run_progress", {}, true); }catch(e){ return; }
+      if(!q) return;
+      if(q.running){
+        $("#feed").innerHTML =
+          stagesFrom(q.messages || []).map(x =>
+            stageCard(x.role || "graph", x.text, `<span class="badge ok">DONE</span>`)).join("")
+          + stageCard(q.node || "architect", `${q.node || "Loop"} running…`,
+                      `<span class="badge run">RUN</span>`);
+        if(q.stopping && !CURRENT.stopping){ CURRENT.stopping = true; setRunButtons(); }
+        return;
+      }
+      clearInterval(CURRENT.timer); CURRENT.timer = null;
+      CURRENT.inflight = false; CURRENT.stopping = false; CURRENT.runId = "";
+      setRunButtons();
+      showLastRun();
+    }, 1000);
+  }catch(e){ /* offline is already reported */ }
+}
+
 $("#eng-send").onclick = () => run();
+$("#eng-stop").onclick = () => stopRun();
 $("#eng-prompt").onkeydown = e => {
   if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); run(); }
 };
@@ -743,6 +866,7 @@ async function poll(quiet){
 
 (async () => {
   await poll(true);
+  await reattach();
   await sweep().catch(()=>{});
   setInterval(() => poll(true), 5000);
   addEventListener("visibilitychange", () => { if(!document.hidden) poll(true); });

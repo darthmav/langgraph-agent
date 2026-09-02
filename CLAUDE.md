@@ -44,6 +44,7 @@ python example_usage.py
 │   ├── config.py              # Seats, LLM setup (Anthropic + Ollama Cloud) + StubLLM
 │   ├── nodes.py               # Architect, Planner, Researcher, Builder nodes + prompt loading
 │   ├── graph.py               # StateGraph wiring + conditional edges
+│   ├── control.py             # RUN_CONTROL: the emergency stop signal
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
 │   └── mcp_client.py          # MCP client / local tool bindings
 ├── prompts/
@@ -120,6 +121,10 @@ Every node reads/writes `AgentState`:
 }
 ```
 
+`stopped`, `stop_reason`, `run_id` and `elapsed_s` are added to the payload
+`run_goal` returns, not to `AgentState`: that schema describes what the agents
+write, not how the run ended.
+
 The Architect writes `architecture` and `verdict`; the verdict is what routes
 the loop and what ends it. `step_count` is incremented by the Architect gate,
 not by the Builder — every cycle passes the gate, but a Planner/Researcher loop
@@ -164,6 +169,12 @@ The console drives a single `POST /rpc` taking `{method, params}` and returning
 `RPC_METHODS` in `serve.py`. The `/api/*` routes are compatibility wrappers over
 the same functions — `launch_console.sh` polls `/api/status` as its readiness
 check, so it must keep working.
+
+`run_goal` blocks its own HTTP thread for the whole run, which is why the server
+is a `ThreadingHTTPServer` — `stop_run` and `run_progress` are served on other
+threads while it sits there. Only one run may be in flight: a second `run_goal`
+is refused rather than allowed to clobber `_run_progress`, which has always been
+a single global.
 
 ## Important Notes
 
@@ -213,6 +224,33 @@ check, so it must keep working.
   than per-file because the Builder chooses the filenames, so a run with it on
   will not block on an unintended failure either — which is why the failure
   stays visible in the report instead of being dropped. Defaults off.
+- **The emergency stop is cooperative, and the recovery is the point.**
+  `RUN_CONTROL` (`control.py`) is a process-global flag, not a state field: the
+  graph compiles without a checkpointer, so nothing outside a node can write
+  into a state the graph is already streaming. It is checked at the top of the
+  Builder's tool turn loop, before each file in `_verify_written_files`, at the
+  top of the three tool-free nodes, and between supersteps in `serve.py` — never
+  inside a tool batch, because skipping calls there leaves `ToolMessage` replies
+  missing for `tool_call_id`s the model was already told about. Nothing in
+  flight is abandoned, for the same reason the Builder's deadline never abandons
+  a tool call. It is kept apart from `_Deadline` deliberately: a run the operator
+  stopped must not be reported as one that overran its own budget, and the report
+  is the only place anyone finds out which happened.
+- **A stopped run must come back with what it produced.** The final state used
+  to be returned to the caller and dropped, so a stop that lost the partial
+  plan, research and report would be no better than killing the server —
+  which is the thing it replaces. `rpc_run_goal` writes a snapshot
+  (`runs/last_run.json`, atomically) in every exit path, *including the
+  exception path*, and `last_run` serves it to a console that reloaded. The
+  bookkeeping is in a `finally`; before that, a run that raised left
+  `_run_progress["running"]` True forever and the console polled a run that no
+  longer existed.
+- **The stop does not touch `expect_failures`, and must not.** A file the stop
+  prevented anyone from executing is `unverified`, and `unverified` blocks
+  approval whatever the opt-out says — that opt-out is for a file the run meant
+  to fail, still executed and still reported, not for a gap in the evidence. So
+  ticking the box cannot make a stopped run look finished. The console says so
+  explicitly in the recovery block rather than leaving it to be inferred.
 - **Three nested timeouts, and none of them is redundant.**
   `LLM_TIMEOUT_SECONDS` (config.py) bounds one provider call at the socket —
   each provider spells it differently (`client_kwargs={"timeout":…}` for

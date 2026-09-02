@@ -1271,3 +1271,209 @@ def test_a_stalling_architect_run_still_terminates(monkeypatch):
     assert result["step_count"] >= graph_module.MAX_STEPS
     assert result["verdict"] != Verdict.APPROVED.value
     assert nodes.NODE_DEADLINE_SECONDS == 0.05   # the fixture really applied
+
+
+# ---------------------------------------------------------------------------
+# The emergency stop
+#
+# Cooperative by construction: nothing here interrupts work in flight. The
+# checks decline to start the *next* piece of work, which is why a stopped run
+# never leaves a half-written file behind -- and why what it did write is still
+# on disk and still reported.
+# ---------------------------------------------------------------------------
+
+
+class _StopsAfterWritingLLM(_ToolCallingLLM):
+    """Writes a file, then trips the emergency stop before the next turn."""
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        from langgraph_agent.control import RUN_CONTROL
+
+        self.calls += 1
+        if self.calls == 1:
+            RUN_CONTROL.arm("run-under-test")
+            RUN_CONTROL.stop("run-under-test", "Stopped from the console.")
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "filesystem_write",
+                    "args": {"path": str(self._path), "content": "half a job\n"},
+                    "id": "call_1",
+                }],
+            )
+        raise AssertionError("the stop should have ended the turn loop")
+
+
+def test_a_stopped_builder_keeps_the_files_it_already_wrote(monkeypatch, tmp_path):
+    """The write in flight completes; the next turn never starts."""
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "half.txt"
+    llm = _StopsAfterWritingLLM(target)
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a file"))
+
+    # The tool call that was already issued ran to completion -- abandoning it
+    # is what would leave a half-written file in the project.
+    assert target.read_text() == "half a job\n"
+    assert result["files_changed"] == [str(target)]
+    # ...and the loop stopped rather than taking another turn.
+    assert llm.calls == 1
+    assert "emergency stop" in result["blockers"]
+    assert "Implementation complete" not in result["messages"][-1]
+    assert "Stopped by the operator" in result["messages"][-1]
+
+
+def test_a_stopped_builder_is_not_described_as_out_of_time(monkeypatch, tmp_path):
+    """A run the operator stopped must not be reported as one that overran.
+
+    The two are separate flags for exactly this reason: the report is the only
+    place anyone finds out which of them happened.
+    """
+    from langgraph_agent.nodes import BUILDER_DEADLINE_SECONDS, builder_node
+
+    llm = _StopsAfterWritingLLM(tmp_path / "half.txt")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a file"))
+
+    assert f"{int(BUILDER_DEADLINE_SECONDS)}s" not in result["blockers"]
+    assert "deadline" not in result["messages"][-1]
+
+
+def test_a_stopped_run_leaves_written_files_unproven(monkeypatch, tmp_path):
+    """Files nobody executed come back unverified, not clear."""
+    from langgraph_agent.control import RUN_CONTROL
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "works.py"
+    target.write_text("print('fine')\n")
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: StubLLM(),
+    )
+    state = initial_state("Fix the module")
+    # Carried from an earlier pass: the file exists and would pass if run.
+    state["failed_verification"] = [str(target)]
+
+    RUN_CONTROL.arm("run-under-test")
+    RUN_CONTROL.stop("run-under-test")
+    result = builder_node(state)
+
+    assert result["failed_verification"] == [str(target)]
+    assert "NOT RUN" in result["builder_report"]
+    assert "the run was stopped" in result["builder_report"]
+
+
+def test_expect_failures_does_not_clear_a_file_the_stop_left_unrun(
+    monkeypatch, tmp_path
+):
+    """The safeguard checkbox cannot make a stopped run look finished.
+
+    `expect_failures` is for a file the run *meant* to fail -- still executed,
+    still reported. A file the stop prevented anyone from executing is a gap in
+    the evidence, not an expected result, so it goes on blocking either way.
+    """
+    from langgraph_agent.control import RUN_CONTROL
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "works.py"
+    target.write_text("print('fine')\n")
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: StubLLM(),
+    )
+    state = initial_state("Fix the module")
+    state["failed_verification"] = [str(target)]
+    state["expect_failures"] = True
+
+    RUN_CONTROL.arm("run-under-test")
+    RUN_CONTROL.stop("run-under-test")
+    result = builder_node(state)
+
+    assert result["failed_verification"] == [str(target)]
+    assert "Not executed before the stop" in result["blockers"]
+
+
+def test_a_stopped_seat_never_calls_its_model(monkeypatch):
+    """The tool-free nodes bail before spending a cloud call."""
+    from langgraph_agent.control import RUN_CONTROL
+    from langgraph_agent.nodes import architect_node, planner_node, researcher_node
+
+    class _Counting(StubLLM):
+        calls = 0
+
+        def invoke(self, messages):
+            type(self).calls += 1
+            return super().invoke(messages)
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _Counting(),
+    )
+
+    RUN_CONTROL.arm("run-under-test")
+    RUN_CONTROL.stop("run-under-test")
+
+    for node, role in (
+        (architect_node, "Architect"),
+        (planner_node, "Planner"),
+        (researcher_node, "Researcher"),
+    ):
+        result = node(initial_state("anything"))
+        assert f"[{role}] Stopped by the emergency stop" in result["messages"][-1]
+
+    assert _Counting.calls == 0
+
+
+def test_a_stopped_architect_never_approves(monkeypatch):
+    """The gate is what ends the run, so a stop must not end one successfully."""
+    from langgraph_agent.control import RUN_CONTROL
+    from langgraph_agent.nodes import architect_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: StubLLM(),
+    )
+
+    state = initial_state("Ship it")
+    state["plan"] = "1. Do it"
+    state["builder_report"] = "Implementation complete."  # the gate pass
+    before = state["step_count"]
+
+    RUN_CONTROL.arm("run-under-test")
+    RUN_CONTROL.stop("run-under-test")
+    result = architect_node(state)
+
+    assert result["verdict"] != Verdict.APPROVED.value
+    # A pass that did no work does not count as a step.
+    assert result["step_count"] == before
+
+
+def test_a_stale_stop_cannot_kill_the_run_that_replaced_it():
+    """A Stop held over from a finished run must not hit the current one."""
+    from langgraph_agent.control import RUN_CONTROL
+
+    RUN_CONTROL.arm("run-two")
+    assert RUN_CONTROL.stop("run-one") is False
+    assert RUN_CONTROL.stopped() is False
+
+    assert RUN_CONTROL.stop("run-two") is True
+    assert RUN_CONTROL.stopped() is True
+
+
+def test_stopping_nothing_is_refused_not_faked():
+    """With no run armed there is nothing to stop, and saying so is the answer."""
+    from langgraph_agent.control import RUN_CONTROL
+
+    assert RUN_CONTROL.stop() is False
+    assert RUN_CONTROL.stopped() is False

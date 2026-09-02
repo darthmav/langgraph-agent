@@ -20,6 +20,7 @@ from typing import Any, TypeVar, cast
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from langgraph_agent.config import get_agent_llm
+from langgraph_agent.control import RUN_CONTROL
 from langgraph_agent.mcp_client import mcp_client
 from langgraph_agent.state import AgentState, ResearchStatus, Verdict
 
@@ -525,6 +526,20 @@ def architect_node(state: AgentState) -> AgentState:
     """
     reviewing = bool(state.get("builder_report"))
 
+    if RUN_CONTROL.stopped():
+        # A stopped gate can no more end the run successfully than a timed-out
+        # one can, and for the same reason: this node is what ends it. Nothing
+        # was ruled here, so nothing is approved. `step_count` is deliberately
+        # not advanced -- this pass did no work -- and the architecture already
+        # in state is kept, since the recovered run is read with it.
+        if reviewing:
+            state["verdict"] = Verdict.REVISE.value
+        state["messages"].append(
+            "[Architect] Stopped by the emergency stop before this seat ran; "
+            "no verdict was reached."
+        )
+        return state
+
     parsed = _with_deadline(
         lambda: _rule_on_state(state, reviewing), NODE_DEADLINE_SECONDS, None
     )
@@ -639,6 +654,16 @@ def planner_node(state: AgentState) -> AgentState:
     Bounded by `NODE_DEADLINE_SECONDS`; see `_PLANNER_TIMED_OUT` for why the
     fallback plan is a real string rather than an empty one.
     """
+    if RUN_CONTROL.stopped():
+        # Any plan already in state is kept -- see `_PLANNER_TIMED_OUT` for why
+        # an empty one here is load-bearing rather than cosmetic. `next_agent`
+        # is left alone so the recovered state still records the last real
+        # routing decision rather than one nobody made.
+        state["messages"].append(
+            "[Planner] Stopped by the emergency stop before this seat ran."
+        )
+        return state
+
     parsed = _with_deadline(
         lambda: _make_plan(state), NODE_DEADLINE_SECONDS, None
     )
@@ -801,6 +826,15 @@ def researcher_node(state: AgentState) -> AgentState:
     node that never returns never reaches one, so the run sat inside this
     function indefinitely while the console still showed the Planner as current.
     """
+    if RUN_CONTROL.stopped():
+        # Distinct from an empty corpus: nothing was retrieved because nothing
+        # was attempted. Leaving `research` untouched keeps whatever an earlier
+        # cycle found instead of overwriting it with a note.
+        state["messages"].append(
+            "[Researcher] Stopped by the emergency stop before this seat ran."
+        )
+        return state
+
     timed_out = (_RESEARCH_TIMED_OUT.format(seconds=int(NODE_DEADLINE_SECONDS)), "timed_out")
     research_findings, research_status = _with_deadline(
         lambda: _gather_research(state), NODE_DEADLINE_SECONDS, timed_out
@@ -961,13 +995,13 @@ def _run_builder_tools(
     files_changed: list[str],
     tool_log: list[str],
     deadline: _Deadline,
-) -> tuple[str, bool, bool]:
+) -> tuple[str, bool, bool, bool]:
     """Let the Builder call tools until it stops asking for them.
 
-    Returns the Builder's closing message, whether it ran out of turns, and
-    whether it ran out of time. `files_changed` is appended to only when a write
-    tool reports success, so the list stays a record of what happened rather
-    than what was claimed.
+    Returns the Builder's closing message, whether it ran out of turns, whether
+    it ran out of time, and whether the operator stopped it. `files_changed` is
+    appended to only when a write tool reports success, so the list stays a
+    record of what happened rather than what was claimed.
 
     The deadline is enforced in two places, and only one of them may abandon
     work. The model's own call is wrapped, because discarding a half-received
@@ -976,22 +1010,32 @@ def _run_builder_tools(
     mid-`filesystem_write` would keep writing into the project after this node
     returned. So each turn's tools always run to completion, and the budget is
     re-checked at the top of the next turn instead.
+
+    The emergency stop obeys the same rule, and is checked in the same place --
+    never inside the batch below. Skipping the remaining calls of a batch would
+    leave `ToolMessage` replies missing for `tool_call_id`s the model has
+    already been told about, which corrupts the message list rather than ending
+    cleanly. It is kept apart from the deadline so the report can say which one
+    happened: a run the operator stopped must not be described as one that
+    exceeded its own budget.
     """
     for _ in range(MAX_BUILDER_TOOL_TURNS):
+        if RUN_CONTROL.stopped():
+            return "", False, False, True
         if deadline.expired():
-            return "", False, True
+            return "", False, True, False
 
         # None is the sentinel for "gave up"; a real response is never None.
         response = _with_deadline(
             lambda: llm.invoke(messages), deadline.remaining(), None
         )
         if response is None:
-            return "", False, True
+            return "", False, True, False
 
         calls = list(getattr(response, "tool_calls", None) or [])
 
         if not calls:
-            return str(response.content), False, False
+            return str(response.content), False, False, False
 
         messages.append(response)
 
@@ -1037,7 +1081,7 @@ def _run_builder_tools(
                 ToolMessage(content=payload, tool_call_id=str(call.get("id", "")))
             )
 
-    return "", True, False
+    return "", True, False, False
 
 
 # Files the Builder writes that can be executed as a script. Anything else it
@@ -1065,6 +1109,14 @@ PACKAGE_MODULE_SKIP_REASON = (
 # not running, and sets the blocker that says so. Better to admit it was never
 # executed.
 MIN_VERIFY_SLICE_SECONDS = 1.0
+
+# Why a file was left unrun when the operator stopped the run. Worded apart
+# from the deadline reason because the two are not the same event, and the
+# report is the only place anyone finds out which one happened.
+VERIFY_STOPPED_REASON = (
+    "not executed: the run was stopped before this file was reached. It is "
+    "unproven, not passing, and is re-checked on the next cycle."
+)
 
 # Why a file was left unrun when the Builder's budget ran out.
 VERIFY_DEADLINE_SKIP_REASON = (
@@ -1144,7 +1196,8 @@ def _verify_written_files(
     not, so `deadline` bounds the pass as a whole. Files past it come back
     "unverified" rather than "ok": treating an unrun file as passing is the
     exact false clearance this pass exists to prevent, and the caller keeps
-    them in `failed_verification` so the next cycle re-runs them.
+    them in `failed_verification` so the next cycle re-runs them. The emergency
+    stop lands in the same place and with the same status, for the same reason.
 
     Returns one (path, status, detail) per runnable file, where status is
     "ok", "failed", "skipped" or "unverified".
@@ -1158,6 +1211,16 @@ def _verify_written_files(
         if _is_package_module(path):
             results.append((path, "skipped", PACKAGE_MODULE_SKIP_REASON))
             tool_log.append(f"verify({path}) -> skipped")
+            continue
+
+        if RUN_CONTROL.stopped():
+            # `unverified`, not `skipped`: nobody ran this file, which is
+            # exactly the gap this pass exists to surface. It keeps blocking
+            # approval even under `expect_failures`, because that opt-out is
+            # for a file the run meant to fail -- still executed, still
+            # reported -- not for one that was never executed at all.
+            results.append((path, "unverified", VERIFY_STOPPED_REASON))
+            tool_log.append(f"verify({path}) -> not run (stopped)")
             continue
 
         if deadline is not None and deadline.remaining() < MIN_VERIFY_SLICE_SECONDS:
@@ -1222,6 +1285,7 @@ def builder_node(state: AgentState) -> AgentState:
     tool_log: list[str] = []
     exhausted = False
     out_of_time = False
+    stopped = False
 
     # The loop is held to the budget minus the verification reserve; whatever it
     # does not spend is handed on below, so a quick build still gets a long
@@ -1246,14 +1310,20 @@ def builder_node(state: AgentState) -> AgentState:
         # without tool support. It still reports; it just cannot change a file.
         tool_llm = None
 
-    if tool_llm is None:
+    if RUN_CONTROL.stopped():
+        # Nothing new is started once the stop is in -- no model call, no
+        # tools. The verification pass below still runs, and its own stop check
+        # brings back every carried file as unproven rather than clear, which
+        # is what keeps a stopped run from looking finished.
+        content, stopped = "", True
+    elif tool_llm is None:
         reply = _with_deadline(
             lambda: str(llm.invoke(messages).content), loop_deadline.remaining(), None
         )
         out_of_time = reply is None
         content = reply or ""
     else:
-        content, exhausted, out_of_time = _run_builder_tools(
+        content, exhausted, out_of_time, stopped = _run_builder_tools(
             tool_llm, messages, files_changed, tool_log, loop_deadline
         )
 
@@ -1309,9 +1379,13 @@ def builder_node(state: AgentState) -> AgentState:
             "it; write one if none of the scripts above cover it."
         )
     if unverified:
+        why = (
+            "the run was stopped"
+            if stopped
+            else f"the Builder ran out of its {int(BUILDER_DEADLINE_SECONDS)}s budget"
+        )
         builder_report += (
-            f"\n\n{len(unverified)} file(s) were not executed: the Builder ran "
-            f"out of its {int(BUILDER_DEADLINE_SECONDS)}s budget. They are "
+            f"\n\n{len(unverified)} file(s) were not executed: {why}. They are "
             "unproven rather than working, and are re-checked next cycle."
         )
 
@@ -1349,8 +1423,16 @@ def builder_node(state: AgentState) -> AgentState:
     # reported -- not for one that was never executed at all, which is a gap in
     # the evidence rather than an expected result.
     if unverified:
-        note = "Not executed before the deadline: " + ", ".join(unverified)
+        lead = "Not executed before the stop" if stopped else "Not executed before the deadline"
+        note = f"{lead}: " + ", ".join(unverified)
         blockers = f"{blockers}. {note}" if blockers else note
+
+    if stopped and not blockers:
+        blockers = (
+            "Stopped by the emergency stop before the Builder finished. "
+            "Anything it had already written is kept; anything it did not get "
+            "to run is listed above as unproven."
+        )
 
     if out_of_time and not blockers:
         blockers = (
@@ -1382,10 +1464,16 @@ def builder_node(state: AgentState) -> AgentState:
             f"Wrote {len(files_changed)} file(s); {len(failed)} do not run{suffix}"
         )
     elif unverified:
+        why = "stopped" if stopped else "deadline"
         summary = (
             f"Wrote {len(files_changed)} file(s); {len(unverified)} not run "
-            "(deadline)"
+            f"({why})"
         )
+    elif stopped:
+        # Never "Implementation complete", for the same reason a deadline-cut
+        # Builder never says it: the node was cut off, and the feed line is
+        # what the Architect and the operator read.
+        summary = f"Stopped by the operator. Files: {len(files_changed)}"
     elif out_of_time:
         # Never "Implementation complete": the node was cut off, and the feed
         # saying otherwise is the same false claim the verification pass exists

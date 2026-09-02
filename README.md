@@ -33,6 +33,25 @@ The left rail is the crew: one card per seat, each with its model, where the
 prompt goes (`REMOTE` / `LOCAL`), and a status chip when the seat cannot
 actually run — `NO KEY`, `FAILING`, `OFFLINE` or `NOT PULLED`.
 
+### Stopping a run
+
+**Stop** sits next to Run and halts the run in flight. It is cooperative: work
+already started — a file write, a staged commit, a test run, a model call —
+finishes first, and nothing further is begun, so a stopped run never leaves a
+half-written file behind. Expect it to land within one tool call rather than
+instantly.
+
+Nothing is thrown away. The run returns its state as it stood, the console shows
+what was written, what nobody got to run, and what blocked, and the server keeps
+that snapshot in `runs/last_run.json` — so a reload, or a run that died on a
+failing seat, still has something to show. Reloading during a run reattaches to
+it, Stop included.
+
+The **expect failures** checkbox is unchanged by this. It excuses a file the run
+*meant* to fail, which is still executed and still reported; a file the stop
+prevented anyone from running is unproven rather than expected, so it goes on
+blocking approval either way.
+
 See [`frontend/README.md`](frontend/README.md) for full documentation.
 
 ## Architecture

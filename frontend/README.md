@@ -47,6 +47,17 @@ the feed says the loop is running with an elapsed timer, then renders one stage
 card per agent from the run's own message log. It shows the path the run
 actually took, not a fixed sequence.
 
+*Stop* halts the run at its next safe boundary. It is cooperative — the file
+write or model call already in flight finishes, and nothing further starts — so
+it lands within a tool call rather than instantly, and never leaves a file half
+written. The run then renders as `STOPPED` rather than as a verdict, with what
+was written, what nobody ran, and what blocked. The server keeps that snapshot,
+so reloading the page gets it back; reloading *during* a run reattaches to it
+instead, Stop included.
+
+*expect failures* is unrelated to Stop and stays what it was: it excuses a file
+the run meant to fail, not one nobody executed.
+
 **Graph** — the knowledge graph. *Sweep all* walks every document through
 `query_graph` and dedupes the edges; *Trace* centres on one node. Documents are
 green with permanent labels, entities are blue with labels on hover (they

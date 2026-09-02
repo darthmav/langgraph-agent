@@ -13,8 +13,10 @@ the `/api/*` routes are thin compatibility wrappers over the same dispatch.
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
+import uuid
 import warnings
 from collections.abc import Callable
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -46,6 +48,7 @@ from langgraph_agent.config import (  # noqa: E402
     list_ollama_models,
     set_agent_llm,
 )
+from langgraph_agent.control import RUN_CONTROL  # noqa: E402
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
     GraphRAGKnowledgeBase,
@@ -180,8 +183,65 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
 # the POST that started it does not return until all of them are done, so
 # without this the console can only show elapsed seconds -- a working run and a
 # wedged one look exactly alike from the browser.
-_run_progress: dict[str, Any] = {"running": False, "goal": "", "messages": [], "node": ""}
+_run_progress: dict[str, Any] = {
+    "running": False,
+    "goal": "",
+    "messages": [],
+    "node": "",
+    # Identifies the run a Stop is aimed at. Without it a Stop click held over
+    # from a finished run -- a stale tab, a reload -- would kill whatever
+    # happened to be running when it finally landed.
+    "run_id": "",
+    "stopping": False,
+}
 _run_lock = threading.Lock()
+
+# The last run's final state, kept so a stop is recoverable. Until now the
+# final state was returned to the caller and then dropped: a stopped run whose
+# partial plan, research and builder report were lost would be no better than
+# killing the server, which is the thing the stop exists to replace. Also
+# written to disk, so it survives a page reload and a restart.
+_last_run_snapshot: dict[str, Any] | None = None
+RUNS_DIR = Path(__file__).parent / "runs"
+LAST_RUN_PATH = RUNS_DIR / "last_run.json"
+
+
+def _save_snapshot(snapshot: dict[str, Any]) -> None:
+    """Keep the run's outcome in memory and on disk.
+
+    Written to a temp file and renamed, because the console fetches this on
+    load: a reader arriving mid-write would otherwise get half a JSON document.
+    A disk failure is swallowed -- the in-memory copy is what the current page
+    reads, and losing the file is not worth failing a run that already finished.
+    """
+    global _last_run_snapshot
+    _last_run_snapshot = snapshot
+    try:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", dir=RUNS_DIR, suffix=".tmp", delete=False, encoding="utf-8"
+        ) as handle:
+            json.dump(snapshot, handle, default=str, indent=2)
+            temp_name = handle.name
+        os.replace(temp_name, LAST_RUN_PATH)
+    except OSError:
+        pass
+
+
+def _load_snapshot() -> dict[str, Any] | None:
+    """The last run's outcome, from memory or from the file a restart left."""
+    global _last_run_snapshot
+    if _last_run_snapshot is not None:
+        return _last_run_snapshot
+    try:
+        with open(LAST_RUN_PATH, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(loaded, dict):
+        _last_run_snapshot = loaded
+        return _last_run_snapshot
+    return None
 
 # Wall-clock budget for one run. MAX_STEPS bounds how many times the Architect
 # may send work back, which is the right logical bound but says nothing about
@@ -202,13 +262,88 @@ def rpc_run_progress(_: dict[str, Any]) -> dict[str, Any]:
             "node": str(_run_progress["node"]),
             "messages": list(_run_progress["messages"]),
             "budget": RUN_BUDGET_SECONDS,
+            # The console needs both to reattach after a reload: the id to aim
+            # a Stop at this run, and `stopping` to keep the button honest
+            # about a stop that has been asked for but not yet landed.
+            "run_id": str(_run_progress["run_id"]),
+            "stopping": bool(_run_progress["stopping"]),
         }
+
+
+def rpc_stop_run(params: dict[str, Any]) -> dict[str, Any]:
+    """Ask the run in flight to stop at its next safe boundary.
+
+    Cooperative, and returns immediately: this only sets a flag. Work already
+    started -- a file write, a staged commit, a test run, a model call -- runs
+    to completion, because abandoning it would leave a half-written file or a
+    worker still writing into the project. So the run ends within one tool call
+    or one model call, not instantly, and the caller is told so.
+
+    Served on a different thread from the run it stops: `rpc_run_goal` blocks
+    its own request thread for the whole run, which is why the server is a
+    ThreadingHTTPServer.
+    """
+    run_id = str(params.get("run_id", ""))
+    reason = str(params.get("reason", ""))
+
+    if not RUN_CONTROL.stop(run_id, reason):
+        armed = RUN_CONTROL.run_id()
+        detail = (
+            "No run is in flight."
+            if not armed
+            else "That Stop was for a run that has already ended."
+        )
+        return {"stopping": False, "run_id": armed, "detail": detail}
+
+    with _run_lock:
+        _run_progress["stopping"] = True
+
+    return {
+        "stopping": True,
+        "run_id": RUN_CONTROL.run_id(),
+        "detail": (
+            "Stopping. Nothing further will be started; the call already in "
+            "flight finishes first, so this can take up to a minute."
+        ),
+    }
+
+
+def rpc_last_run(_: dict[str, Any]) -> dict[str, Any]:
+    """The last run's final state, for a console that reloaded and lost it."""
+    return {"snapshot": _load_snapshot()}
 
 
 def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     """Run a goal through the four-agent loop and return the final state."""
+    run_id = uuid.uuid4().hex
+    goal = str(params.get("goal", ""))
+
+    # One run at a time, said out loud. The server already assumed it --
+    # `_run_progress` is a single global -- and the console could break the
+    # assumption, because the textarea's Enter handler was not gated behind the
+    # disabled Run button. It also makes the stop unambiguous: there is exactly
+    # one run for a Stop to mean.
+    #
+    # Checked and claimed under one lock, arming included. Two acquisitions
+    # would leave a window where two POSTs both pass the check, and a stop
+    # armed outside it could reach a run that was then refused.
+    with _run_lock:
+        if _run_progress["running"]:
+            raise ValueError(
+                "A run is already in flight. Stop it before starting another."
+            )
+        RUN_CONTROL.arm(run_id)
+        _run_progress.update(
+            running=True,
+            goal=goal,
+            messages=[],
+            node="",
+            run_id=run_id,
+            stopping=False,
+        )
+
     state: AgentState = {
-        "goal": str(params.get("goal", "")),
+        "goal": goal,
         "messages": [],
         "architecture": "",
         "verdict": "",
@@ -221,7 +356,9 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         "files_changed": [],
         "failed_verification": [],
         # Opt-out for goals whose product is a file that does not run. Off
-        # unless the caller asks, so the default stays strict.
+        # unless the caller asks, so the default stays strict. Untouched by the
+        # stop: a file nobody executed is unproven, not expected-to-fail, and
+        # goes on blocking approval either way.
         "expect_failures": bool(params.get("expect_failures", False)),
         "step_count": 0,
     }
@@ -232,51 +369,100 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     last = state
     started = time.monotonic()
     over_budget = False
-    with _run_lock:
-        _run_progress.update(
-            running=True, goal=state["goal"], messages=[], node=""
-        )
+    stopped = False
+    node_at_stop = ""
 
+    # Everything below is in a try/finally so the bookkeeping runs even when the
+    # graph raises. Without it a run that died left `running` True forever and
+    # the console polled a run that no longer existed -- and the snapshot, which
+    # is the whole recovery story, would only ever be written by runs that did
+    # not need recovering.
     try:
-        for event in graph.stream(state, {"recursion_limit": RECURSION_LIMIT}):
-            for node, node_state in event.items():
-                if not isinstance(node_state, dict):
-                    continue
-                last = node_state  # type: ignore[assignment]
-                messages = list(node_state.get("messages", []))
-                with _run_lock:
-                    _run_progress["node"] = node
-                    _run_progress["messages"] = messages
-                # Also on the server's own terminal: a run that is working and
-                # a run that is wedged are otherwise indistinguishable there too.
-                print(f"[run] {node} -> {messages[-1] if messages else '...'}")
+        try:
+            for event in graph.stream(state, {"recursion_limit": RECURSION_LIMIT}):
+                for node, node_state in event.items():
+                    if not isinstance(node_state, dict):
+                        continue
+                    last = node_state  # type: ignore[assignment]
+                    messages = list(node_state.get("messages", []))
+                    with _run_lock:
+                        _run_progress["node"] = node
+                        _run_progress["messages"] = messages
+                    # Also on the server's own terminal: a run that is working and
+                    # a run that is wedged are otherwise indistinguishable there too.
+                    print(f"[run] {node} -> {messages[-1] if messages else '...'}")
 
-            # Checked between supersteps, so the run stops at a node boundary
-            # with its state intact rather than mid-call.
-            if time.monotonic() - started > RUN_BUDGET_SECONDS:
-                over_budget = True
-                break
-    except GraphRecursionError:
-        last["messages"] = [
-            *last.get("messages", []),
-            "[Graph] Stopped at the recursion ceiling without an approved "
-            "verdict. The work below is what the run produced before it "
-            "was cut off.",
-        ]
+                # Both checks sit between supersteps, so the run stops at a node
+                # boundary with its state intact rather than mid-call. The nodes
+                # carry their own stop checks as well; this one is the backstop
+                # that guarantees the run ends however far in the seats got.
+                if RUN_CONTROL.stopped():
+                    stopped = True
+                    node_at_stop = str(_run_progress["node"])
+                    break
+                if time.monotonic() - started > RUN_BUDGET_SECONDS:
+                    over_budget = True
+                    break
+        except GraphRecursionError:
+            last["messages"] = [
+                *last.get("messages", []),
+                "[Graph] Stopped at the recursion ceiling without an approved "
+                "verdict. The work below is what the run produced before it "
+                "was cut off.",
+            ]
 
-    if over_budget:
         elapsed = int(time.monotonic() - started)
-        last["messages"] = [
-            *last.get("messages", []),
-            f"[Graph] Stopped after {elapsed}s, over the {int(RUN_BUDGET_SECONDS)}s "
-            "budget, without an approved verdict. The work above is what the run "
-            "produced. Raise RUN_BUDGET_SECONDS to give it longer.",
-        ]
 
-    with _run_lock:
-        _run_progress["running"] = False
+        if stopped:
+            last["messages"] = [
+                *last.get("messages", []),
+                f"[Graph] Stopped by the emergency stop after {elapsed}s, at the "
+                f"{node_at_stop or 'first'} boundary, without an approved verdict. "
+                "Nothing further was started. Anything already written is listed "
+                "below, and anything nobody ran is unproven rather than working.",
+            ]
+        elif over_budget:
+            last["messages"] = [
+                *last.get("messages", []),
+                f"[Graph] Stopped after {elapsed}s, over the {int(RUN_BUDGET_SECONDS)}s "
+                "budget, without an approved verdict. The work above is what the run "
+                "produced. Raise RUN_BUDGET_SECONDS to give it longer.",
+            ]
 
-    return dict(last)
+        # Run-level facts, added to the payload rather than to AgentState:
+        # AgentState describes what the agents wrote, not how the run ended.
+        payload = dict(last)
+        payload.update(
+            run_id=run_id,
+            stopped=stopped,
+            stop_reason=RUN_CONTROL.reason() if stopped else "",
+            over_budget=over_budget,
+            elapsed_s=elapsed,
+            finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        _save_snapshot(payload)
+        return payload
+    except Exception as exc:
+        # A run that raised still produced whatever it produced, and that is
+        # exactly the case where the operator most wants it back.
+        payload = dict(last)
+        payload.update(
+            run_id=run_id,
+            stopped=stopped,
+            stop_reason=RUN_CONTROL.reason() if stopped else "",
+            over_budget=over_budget,
+            elapsed_s=int(time.monotonic() - started),
+            finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            error=str(exc),
+        )
+        _save_snapshot(payload)
+        raise
+    finally:
+        RUN_CONTROL.disarm()
+        with _run_lock:
+            _run_progress["running"] = False
+            _run_progress["stopping"] = False
+            _run_progress["run_id"] = ""
 
 
 RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -291,6 +477,8 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "status": rpc_status,
     "run_goal": rpc_run_goal,
     "run_progress": rpc_run_progress,
+    "stop_run": rpc_stop_run,
+    "last_run": rpc_last_run,
 }
 
 # Methods the console polls on a timer. Logging these buries everything else.
@@ -332,6 +520,7 @@ class Handler(SimpleHTTPRequestHandler):
         # Compatibility routes for the previous /api surface.
         aliases: dict[str, tuple[str, dict[str, Any]]] = {
             "/api/run": ("run_goal", data),
+            "/api/stop": ("stop_run", data),
             "/api/search": ("search_documents", data),
             "/api/set-llm": ("set_seat", data),
         }
