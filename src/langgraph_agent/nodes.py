@@ -1090,8 +1090,10 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "terminal_execute",
             "description": (
-                "Run a simple shell command in the project. Shell "
-                "metacharacters are rejected, so pipes and redirection do not work."
+                "Run a simple shell command in the project. Only letters, digits, "
+                "spaces and _ . / - : ' \" = , are accepted anywhere in the command, "
+                "including inside quotes -- so pipes and redirection do not work, and "
+                "neither do regex characters such as ^ * ( ) | in a grep pattern."
             ),
             "parameters": {
                 "type": "object",

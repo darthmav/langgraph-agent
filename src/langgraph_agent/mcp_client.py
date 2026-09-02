@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
 
 
+# The complement of what `_terminal_execute` allows, written once so the
+# refusal and the check can never name different sets of characters.
+_DISALLOWED_COMMAND_CHARS = re.compile(r"[^A-Za-z0-9_./\s\-:'\"=,]")
+
+
 class MCPClient:
     """Client for MCP servers (GraphRAG, Filesystem, Git).
 
@@ -237,10 +242,19 @@ class MCPClient:
         command = args.get("command", "")
         # Allow only simple commands: alphanumerics, dashes, underscores, dots,
         # slashes, spaces, and a few safe flags/punctuation.
-        if not re.fullmatch(r"[A-Za-z0-9_./\s\-:'\"=,]+", command):
+        rejected = list(dict.fromkeys(_DISALLOWED_COMMAND_CHARS.findall(command)))
+        if rejected:
             return {
                 "success": False,
-                "error": "Command contains disallowed shell metacharacters",
+                # Name them. "Shell metacharacters" reads as pipes and
+                # redirection, but the class also catches `^ * ( )` inside a
+                # quoted regex -- a caller shown only the category cannot see
+                # which character it tripped on, so it retries variants that
+                # trip on the same one, a tool turn each.
+                "error": (
+                    "Command contains disallowed shell metacharacters: "
+                    + " ".join(repr(char) for char in rejected)
+                ),
                 "command": command,
             }
 
