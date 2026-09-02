@@ -12,7 +12,11 @@ from scipy import sparse
 from scipy.linalg import eigh
 from scipy.sparse.linalg import eigsh
 
-from spectral_graph.laplacian import laplacian_matrix, normalized_laplacian_matrix
+from spectral_graph.laplacian import (
+    _require_undirected,
+    laplacian_matrix,
+    normalized_laplacian_matrix,
+)
 
 
 def fiedler_vector(G: nx.Graph, normalized: bool = False) -> np.ndarray:
@@ -53,6 +57,11 @@ def fiedler_vector(G: nx.Graph, normalized: bool = False) -> np.ndarray:
     >>> np.abs(np.sum(fiedler)) < 1e-10
     True
     """
+    # Ahead of nx.is_connected, which raises NetworkXNotImplemented on a
+    # directed graph -- a true refusal, but one that says nothing about why
+    # this package will not take it or what to do instead.
+    _require_undirected(G)
+
     n = G.number_of_nodes()
 
     if n < 2:

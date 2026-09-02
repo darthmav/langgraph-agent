@@ -15,6 +15,7 @@ import networkx as nx
 import numpy as np
 
 from spectral_graph.embedding import spectral_embedding
+from spectral_graph.laplacian import _degree_vector, _require_undirected
 from spectral_graph.spectrum import compute_spectrum
 
 
@@ -202,6 +203,12 @@ def conductance(G: nx.Graph, S) -> float:
     >>> round(conductance(G, {0, 1}), 6)
     0.333333
     """
+    # This one reads G's adjacency directly and never builds a Laplacian, so
+    # it is the one path the guard in `laplacian.py` cannot cover. On a
+    # DiGraph, `G[u]` yields successors only: the cut would be counted one way
+    # round and silently halved.
+    _require_undirected(G)
+
     S = set(S)
     if not S or len(S) == G.number_of_nodes():
         return float("inf")
@@ -215,7 +222,11 @@ def conductance(G: nx.Graph, S) -> float:
             if v not in S:
                 boundary += w
 
-    total_vol = sum(w for _, w in G.degree(weight="weight"))
+    # Same degree convention as the Laplacian: A's row sums, which count a
+    # self-loop once -- exactly as the vol_S loop above does when it reaches u
+    # as its own neighbour. G.degree() counts it twice, so the two halves of
+    # this ratio disagreed on any graph with a self-loop.
+    total_vol = float(_degree_vector(G).sum())
     denom = min(vol_S, total_vol - vol_S)
     if denom <= 0:
         return float("inf")

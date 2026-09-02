@@ -335,3 +335,135 @@ def test_cheeger_bounds_closed_form_on_complete_graph() -> None:
     lambda2 = n / (n - 1)
     assert lower == pytest.approx(lambda2 / 2, abs=1e-9)
     assert upper == pytest.approx(np.sqrt(2 * lambda2), abs=1e-9)
+
+
+# --- Directed input, and self-loops -----------------------------------------
+# Two defects found by auditing this package against inputs the project would
+# actually hand it, rather than against the graph families above. Both were
+# silent: neither raised, and both returned a plausible number.
+
+
+def _public_graph_functions() -> list:
+    """Every exported function whose first parameter is a graph.
+
+    Discovered from `__all__` rather than listed by hand, so a function added
+    to the package later is covered by the directed-input test without anyone
+    remembering to add it here.
+    """
+    import inspect
+
+    import spectral_graph as sg
+
+    found = []
+    for name in sg.__all__:
+        obj = getattr(sg, name)
+        if not callable(obj):
+            continue
+        try:
+            params = list(inspect.signature(obj).parameters.values())
+        except (TypeError, ValueError):  # pragma: no cover - builtins
+            continue
+        if params and params[0].annotation in (nx.Graph, "nx.Graph"):
+            found.append((name, obj))
+    return found
+
+
+@pytest.mark.parametrize(
+    "name,fn", _public_graph_functions(), ids=lambda v: v if isinstance(v, str) else ""
+)
+def test_every_public_entry_point_refuses_a_directed_graph(name, fn) -> None:
+    """A DiGraph must raise, not return a number computed from half a matrix.
+
+    `nx.adjacency_matrix` on a directed graph returns a non-symmetric A, so
+    `L = D - A` is non-symmetric too, and `eigvalsh`/`eigsh` read a single
+    triangle of it. Nothing raises and nothing is logged: the caller gets a
+    well-formed float that is the algebraic connectivity of a matrix they
+    never passed. On this project's own 928-node knowledge graph -- which is
+    a DiGraph -- that path returned 0.865 against a true value of 0.267.
+
+    The refusal is checked at every public entry point because the low-level
+    guard in `laplacian.py` cannot cover the functions that read `G` directly
+    without ever building a Laplacian; `conductance` is one.
+    """
+    D = nx.DiGraph([(0, 1), (1, 2), (2, 0), (0, 3)])
+    extra = {"conductance": ({0, 1},)}.get(name, ())
+    with pytest.raises(ValueError, match="undirected"):
+        fn(D, *extra)
+
+
+def test_the_undirected_projection_is_accepted_and_is_the_real_answer() -> None:
+    """The caller converts, explicitly. The package does not do it for them.
+
+    `to_undirected()` is a modelling decision -- it declares that a reversed
+    edge means the same thing -- and it changes the answer. Making it silently
+    would be the same wrong-number-without-warning failure the guard exists to
+    stop, just moved somewhere less visible.
+    """
+    D = nx.DiGraph([(0, 1), (1, 2), (2, 0), (0, 3)])
+    lambda2 = algebraic_connectivity(D.to_undirected())
+    assert lambda2 == pytest.approx(nx.algebraic_connectivity(D.to_undirected()), abs=1e-9)
+
+
+@pytest.mark.parametrize("weight", [1.0, 7.5], ids=["unweighted", "weighted"])
+def test_a_self_loop_leaves_the_laplacian_singular(weight: float) -> None:
+    """L @ 1 == 0 is what makes L a Laplacian, and a self-loop broke it.
+
+    `G.degree()` counts a self-loop twice while `nx.adjacency_matrix` puts a
+    single w on the diagonal, so `D - A` kept +w per self-loop and `L @ 1`
+    came back [0, 1, 0] on a three-node graph. That is not a rounding
+    artefact: it makes L non-PSD, puts a negative eigenvalue in the spectrum,
+    and moves every eigenvalue after it. Degrees now come from A's row sums,
+    which is also what NetworkX does.
+    """
+    G = nx.Graph()
+    G.add_edge(0, 1, weight=weight)
+    G.add_edge(1, 2, weight=weight)
+    G.add_edge(1, 1, weight=weight)
+
+    L = laplacian_matrix(G).toarray()
+    assert np.allclose(L @ np.ones(3), 0.0, atol=TOL)
+    assert np.allclose(L, L.T, atol=TOL)
+    assert compute_spectrum(G).min() > -TOL
+    assert np.allclose(L, nx.laplacian_matrix(G).toarray().astype(float), atol=TOL)
+
+
+def test_a_self_loop_keeps_the_normalized_spectrum_in_range() -> None:
+    """The normalized Laplacian's eigenvalues live in [0, 2]; a self-loop kept
+    them there only once the degrees agreed with the adjacency they normalize."""
+    G = nx.Graph()
+    G.add_edges_from([(0, 1), (1, 2)])
+    G.add_edge(1, 1)
+
+    L_norm = normalized_laplacian_matrix(G).toarray()
+    eigenvalues = np.linalg.eigvalsh(L_norm)
+    assert eigenvalues.min() > -TOL
+    assert eigenvalues.max() < 2.0 + 1e-9
+    assert np.allclose(
+        L_norm, nx.normalized_laplacian_matrix(G).toarray().astype(float), atol=1e-9
+    )
+
+
+def test_degree_matrix_agrees_with_the_adjacency_it_is_paired_with() -> None:
+    """D is only meaningful next to the A it will be subtracted from."""
+    G = nx.Graph()
+    G.add_edge(0, 1, weight=2.0)
+    G.add_edge(0, 0, weight=5.0)
+    A = adjacency_matrix(G).toarray()
+    assert np.allclose(degree_matrix(G).diagonal(), A.sum(axis=1), atol=TOL)
+
+
+def test_conductance_uses_one_volume_convention_on_both_sides() -> None:
+    """vol(S) and vol(V) counted a self-loop differently, so phi could exceed 1.
+
+    The numerator walks `G[u]`, which reaches u as its own neighbour once; the
+    denominator used `G.degree()`, which counts it twice. Both now come from
+    A's row sums.
+    """
+    G = nx.Graph()
+    G.add_edges_from([(0, 1), (1, 2), (2, 3)])
+    G.add_edge(0, 0)
+    phi = conductance(G, {0, 1})
+    assert 0.0 <= phi <= 1.0
+    total_vol = float(adjacency_matrix(G).toarray().sum())
+    vol_S = float(adjacency_matrix(G).toarray()[[0, 1], :].sum())
+    assert phi == pytest.approx(1.0 / min(vol_S, total_vol - vol_S), abs=1e-12)

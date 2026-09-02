@@ -14,6 +14,60 @@ import numpy as np
 from scipy import sparse
 
 
+def _require_undirected(G: nx.Graph) -> None:
+    """Refuse a directed graph, loudly, naming the conversion.
+
+    Every construction in this package assumes a symmetric adjacency matrix.
+    A directed graph does not raise on its way through: `nx.adjacency_matrix`
+    returns a non-symmetric A, `L = D - A` inherits that, and the symmetric
+    eigensolvers (`eigvalsh`, `eigsh`) read a single triangle of it -- so the
+    call returns a perfectly plausible number computed from a matrix nobody
+    passed. Measured on this project's own 928-node knowledge graph, feeding
+    the DiGraph straight in gave an algebraic connectivity of 0.865 where the
+    true value is 0.267: a 224% error, with no warning and no exception.
+
+    The conversion is deliberately not done for the caller. `to_undirected()`
+    changes the answer -- it is a modelling decision about what a reversed
+    edge means in that graph -- and a package that quietly makes it for you
+    is the same silent-wrong-answer failure wearing a friendlier face.
+    """
+    if G.is_directed():
+        raise ValueError(
+            f"spectral_graph requires an undirected graph, got "
+            f"{type(G).__name__}. Spectral theory here assumes a symmetric "
+            f"adjacency matrix; a directed one silently yields eigenvalues of "
+            f"a matrix you did not pass. Convert explicitly with "
+            f"G.to_undirected() so the choice is yours and is visible."
+        )
+
+
+def _degree_vector(G: nx.Graph, A: sparse.csr_matrix | None = None) -> np.ndarray:
+    """Weighted degrees, as the row sums of the adjacency matrix.
+
+    Row sums rather than `G.degree(weight="weight")`, and the difference is
+    self-loops: NetworkX's `degree` counts a self-loop twice, while
+    `nx.adjacency_matrix` puts a single w on the diagonal. Subtracting one
+    from the other left +1 per self-loop on L's diagonal and broke the
+    defining property of a Laplacian -- `L @ 1 == 0` came back as [0, 1, 0]
+    on a three-node graph with one self-loop, which also makes L not PSD and
+    quietly corrupts every eigenvalue downstream.
+
+    Taking degrees from A is what makes `D - A` sum to zero by construction,
+    for any weights and any self-loops, and it is what NetworkX's own
+    `laplacian_matrix` does. Every Laplacian here goes through this, so the
+    three constructions cannot drift apart again.
+
+    `A` is accepted so a caller that has already built the adjacency does not
+    build it twice. Reading degrees off A rather than off `G.degree()` would
+    otherwise have doubled the adjacency construction in every Laplacian here
+    -- a correctness fix is not worth paying for with a silent 2x.
+    """
+    _require_undirected(G)
+    if A is None:
+        A = adjacency_matrix(G)
+    return np.asarray(A.sum(axis=1), dtype=np.float64).ravel()
+
+
 def adjacency_matrix(G: nx.Graph) -> sparse.csr_matrix:
     """
     Compute the adjacency matrix of a graph.
@@ -37,6 +91,7 @@ def adjacency_matrix(G: nx.Graph) -> sparse.csr_matrix:
     >>> A.shape
     (5, 5)
     """
+    _require_undirected(G)
     return nx.adjacency_matrix(G).astype(np.float64)
 
 
@@ -66,8 +121,10 @@ def degree_matrix(G: nx.Graph) -> sparse.csr_matrix:
     # Weight-aware to match adjacency_matrix, which honours edge weights by
     # default. Mixing a weighted A with unweighted degrees makes L = D - A
     # non-PSD on any weighted graph (nx.karate_club_graph() is one).
-    degrees = np.array([d for _, d in G.degree(weight="weight")], dtype=np.float64)
-    return sparse.diags(degrees, format="csr")
+    # Taken from A's row sums rather than G.degree(), which counts a self-loop
+    # twice against the single w that A carries on the diagonal -- see
+    # `_degree_vector`.
+    return sparse.diags(_degree_vector(G), format="csr")
 
 
 def laplacian_matrix(G: nx.Graph) -> sparse.csr_matrix:
@@ -103,7 +160,7 @@ def laplacian_matrix(G: nx.Graph) -> sparse.csr_matrix:
     True
     """
     A = adjacency_matrix(G)
-    D = degree_matrix(G)
+    D = sparse.diags(_degree_vector(G, A), format="csr")
     return D - A
 
 
@@ -136,7 +193,7 @@ def normalized_laplacian_matrix(G: nx.Graph) -> sparse.csr_matrix:
     """
     n = G.number_of_nodes()
     A = adjacency_matrix(G)
-    degrees = np.array([d for _, d in G.degree(weight="weight")], dtype=np.float64)
+    degrees = _degree_vector(G, A)
 
     # Handle isolated nodes (degree 0)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -179,7 +236,7 @@ def random_walk_laplacian_matrix(G: nx.Graph) -> sparse.csr_matrix:
     """
     n = G.number_of_nodes()
     A = adjacency_matrix(G)
-    degrees = np.array([d for _, d in G.degree(weight="weight")], dtype=np.float64)
+    degrees = _degree_vector(G, A)
 
     # Handle isolated nodes (degree 0)
     with np.errstate(divide="ignore", invalid="ignore"):
