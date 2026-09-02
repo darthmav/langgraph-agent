@@ -247,6 +247,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <button class="go" id="eng-send">Run</button>
           <button class="go danger" id="eng-stop" disabled
                   title="Halt the run at its next safe boundary. Work already in flight — a file write, a test run, a model call — finishes first, so this can take up to a minute. Everything the run produced is kept.">Stop</button>
+          <button class="go ghost" id="eng-clear" disabled
+                  title="Clear the transcript, the Action Feed and the State dump. Nothing on disk is touched — the last run's saved state is still there, and a reload brings it back.">Clear</button>
         </div>
       </div>
       <div class="col">
@@ -695,6 +697,42 @@ $("#clrbtn").onclick = async () => {
 };
 
 /* ---------- engineer ---------- */
+
+// The pristine Engineer view, read off the markup rather than restated here, so
+// the placeholder text has exactly one definition. Captured at parse time:
+// reattach() and showLastRun() both append, and either may have run long before
+// anyone reaches for Clear.
+const ENGINEER_EMPTY = {
+  director: $("#director").innerHTML,
+  feed:     $("#feed").innerHTML,
+  state:    $("#state-dump").textContent,
+};
+
+// Clearing takes nothing off disk: the server still holds the last run, and a
+// reload paints it back. This empties the whole Engineer view rather than the
+// transcript alone -- the feed, the impact banner and the state dump all
+// describe the run whose messages just went, and "Changed this machine -- 3
+// files" standing over an empty transcript is a half-cleared screen.
+function clearEngineerView(){
+  $("#director").innerHTML = ENGINEER_EMPTY.director;
+  $("#feed").innerHTML = ENGINEER_EMPTY.feed;
+  $("#state-dump").textContent = ENGINEER_EMPTY.state;
+  const impact = $("#impact");
+  impact.style.display = "none"; impact.textContent = "";
+  // The typed goal and the expect-failures box are inputs, not transcript, and
+  // are deliberately left alone.
+  setClearButton();
+}
+
+// Off while a run is in flight, because the poll timer repaints the feed every
+// second and would undo the clear inside of one -- and off when there is
+// nothing to clear.
+function setClearButton(){
+  const pristine = $("#director").innerHTML === ENGINEER_EMPTY.director
+                && $("#feed").innerHTML === ENGINEER_EMPTY.feed;
+  $("#eng-clear").disabled = CURRENT.inflight || pristine;
+}
+
 function stageCard(role, text, badge){
   return `<div class="stage" style="--role:${ROLE_COLOR[role] || "#5a6474"}">`+
     `<div class="sn"><span>${esc(role)}</span>${badge || ""}</div>`+
@@ -713,6 +751,7 @@ function setRunButtons(){
   $("#eng-send").textContent = CURRENT.inflight ? "Running…" : "Run";
   $("#eng-stop").disabled = !CURRENT.inflight || CURRENT.stopping;
   $("#eng-stop").textContent = CURRENT.stopping ? "Stopping…" : "Stop";
+  setClearButton();
 }
 
 // The run_goal fetch is deliberately left in flight. It is how the partial
@@ -930,6 +969,7 @@ function renderRun(r, note){
       `</div>`;
   }
   $("#director").scrollTop = $("#director").scrollHeight;
+  setClearButton();
 }
 
 // The server keeps the last run's final state, so a console that reloaded --
@@ -980,6 +1020,7 @@ async function reattach(){
 
 $("#eng-send").onclick = () => run();
 $("#eng-stop").onclick = () => stopRun();
+$("#eng-clear").onclick = () => clearEngineerView();
 // A run in flight is the one case worth a question: exiting through it means
 // stopping it, and the operator should say so rather than discover it.
 $("#exit").onclick = () => CURRENT.inflight ? armExitConfirm(true) : requestExit(false);
@@ -1009,6 +1050,7 @@ async function poll(quiet){
 
 (async () => {
   await poll(true);
+  setClearButton();
   await reattach();
   await sweep().catch(()=>{});
   setInterval(() => poll(true), 5000);
