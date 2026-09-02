@@ -31,6 +31,10 @@ python -m pytest tests/ -v
 # Re-index project files into GraphRAG
 python scripts/reindex.py
 
+# Find out which model actually works in which seat
+python scripts/diagnose_seats.py --list
+python scripts/diagnose_seats.py --phase probe
+
 # Run the example
 python example_usage.py
 ```
@@ -60,7 +64,8 @@ python example_usage.py
 │   ├── verify_and_test.py     # Manual verification runner
 │   ├── auto_verify.py         # Silent verification
 │   ├── quick_test.sh          # Bash quick check
-│   └── full_setup.py          # Automated setup + re-index
+│   ├── full_setup.py          # Automated setup + re-index
+│   └── diagnose_seats.py      # Role probes + team runs per seating
 ├── frontend/
 │   ├── index.html             # Web console SPA
 │   └── README.md

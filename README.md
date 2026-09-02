@@ -214,6 +214,51 @@ python -m pytest tests/ -v
 pytest --cov=langgraph_agent tests/
 ```
 
+## Diagnosing the seats
+
+`scripts/diagnose_seats.py` answers "which model actually works in which seat",
+in two phases that are deliberately kept apart because one is far cheaper than
+the other.
+
+```bash
+# What it knows how to run — costs nothing
+python scripts/diagnose_seats.py --list
+python scripts/diagnose_seats.py --dry-run
+
+# Phase 1 only: one call per model per role
+python scripts/diagnose_seats.py --phase probe
+
+# Phase 2 only: whole runs, one sandbox each
+python scripts/diagnose_seats.py --phase teams --configs baseline,legacy --verbose
+
+# Include the paid Anthropic controls
+python scripts/diagnose_seats.py --anthropic --exercise all
+```
+
+**Phase 1 — role probes.** One bounded call per (model, role) pair, through the
+real role prompt and the real parser the node uses. It answers whether a model
+can hold a seat at all: did it answer, did the answer parse, and — for the
+Builder — can it call a tool. `empty` is the status that matters, because a
+seat that returns nothing loops the run rather than failing it.
+
+**Phase 2 — team runs.** Each configuration runs the same short exercise through
+the same graph the console drives, instrumented per node. It answers what the
+probes cannot: whether four seats that each work alone make progress *together*.
+Watch the `cycles` column — a run that passes the gate repeatedly while
+producing nothing is the hand-off loop worth acting on.
+
+Team runs let the Builder write files, so each one runs in its own sandbox
+directory (a `chdir`), never in the project. Reports land in
+`reports/diagnostics/<timestamp>/` as both `report.md` and `results.json`.
+
+> Run `python scripts/reindex.py` first if you care about the results. Against
+> an empty corpus every Researcher falls back to its model, which reads exactly
+> like a bad Researcher seat — the script warns when it finds one, and records
+> the corpus size in the report.
+
+Nothing here is a benchmark. One short exercise per configuration is a data
+point against non-deterministic models, not a ranking.
+
 ## Development Tools
 
 ```bash
@@ -308,6 +353,10 @@ tool name to the external server.
 │   └── builder.txt             # Builder system prompt
 ├── tests/
 │   └── test_graph.py           # Graph tests
+├── scripts/
+│   ├── reindex.py              # Rebuild the GraphRAG corpus
+│   ├── index_knowledge.py      # First-time indexing
+│   └── diagnose_seats.py       # Which model works in which seat
 ├── example_usage.py            # Demo script
 ├── test_cloud.py               # Cloud LLM end-to-end test
 ├── README.md

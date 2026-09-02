@@ -59,3 +59,8 @@ knowledge/knowledge_graph.json
 # Last-run snapshot, written so a stopped or crashed run stays recoverable
 # across a page reload. Per-machine runtime state, not history.
 runs/
+
+# Seat diagnostic output (scripts/diagnose_seats.py writes one timestamped
+# directory per sweep). Per-run measurements against non-deterministic models,
+# not history — the committed reports/*.md are written deliberately.
+reports/diagnostics/
