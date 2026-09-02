@@ -200,6 +200,20 @@ deliver the reply.
   `MAX_BUILDER_TOOL_TURNS`; `files_changed` is appended only when a write
   tool reports success, never from the model's prose. A seat whose model
   cannot call tools (`StubLLM`) still reports but changes nothing.
+- **"Described but not written" compares two spellings of a path, so both go
+  through `_report_path_key`.** The check is the report's harshest claim --
+  the mirror of a Builder inventing a file, and the Architect rules on it --
+  which makes a false one expensive. One side is prose from a `## Files
+  Modified` bullet, the other is the raw argument `filesystem_write` recorded,
+  and they disagree over decoration rather than substance: backticks, bold,
+  `*`/`1.` markers, `./` or an absolute prefix, and above all an annotation
+  (`- test_spectral_graph.py (new file)`), which is what filed a written,
+  executed, passing file under "not written". The normalizer errs one way on
+  purpose -- over-stripping only hides a real accusation, under-stripping
+  invents one -- so it also drops "None"/"N/A" answers and prose sentences,
+  and its trailing-parenthesis strip is a whitelist of annotation words
+  because real filenames here carry parentheses
+  (`examples/filter_band_pass_(40_60_hz).png`).
 - **`state["files_changed"]` accumulates across passes; the local list does
   not.** Inside `builder_node` the local `files_changed` is what *this* pass
   wrote, and the verification logic depends on that: `carried` uses it to tell

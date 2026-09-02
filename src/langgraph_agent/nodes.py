@@ -405,6 +405,62 @@ def _parse_researcher_output(content: str) -> dict[str, Any]:
     return result
 
 
+# A `## Files Modified` line is prose, and the paths in `files_changed` are raw
+# `filesystem_write` arguments. The "Described but not written" check compares
+# the two, so every way the model can spell a path it really did write turns
+# into a false accusation -- and it is the worst one the report makes: the
+# mirror of a Builder claiming a file it never wrote, pointing the other way,
+# read by an Architect that rules on the report. The model decorates the line
+# in all the ordinary ways -- `- \`test_spectral_graph.py\``, `- **file.py**`,
+# `- ./file.py`, an absolute path, `* file.py`, `1. file.py` -- and above all
+# it annotates: `- test_spectral_graph.py (new file)`, which put a written,
+# executed, passing file under "Described but not written".
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+_MARKDOWN_WRAP = re.compile(r"^(?:\*\*|__|`|\*|_)+|(?:\*\*|__|`|\*|_)+$")
+# A whitelist rather than "strip any trailing parenthetical": this project has
+# real filenames that carry parentheses (examples/filter_band_pass_(40_60_hz).png),
+# and mangling one of those would reintroduce the same false accusation.
+_PATH_ANNOTATION = re.compile(
+    r"\s+\((?:new|newly|created|create|added|modified|updated|edited|changed|"
+    r"rewritten|rewrote|overwritten|existing|unchanged|deleted|removed)\b[^()]*\)$",
+    re.IGNORECASE,
+)
+# Lines that are an answer of "nothing", not a path. Without these a Builder
+# that honestly reported writing no files was accused of not writing "None".
+_NOT_A_PATH = {"", ".", "-", "none", "n/a", "na", "(none)", "nothing", "no files"}
+
+
+def _report_path_key(text: str) -> str:
+    """Normalize one `## Files Modified` entry for comparison against tool records.
+
+    Returns "" for a line that is not naming a file at all. Normalization is
+    deliberately one-directional in its risk: over-stripping could only ever
+    hide a real accusation, while under-stripping invents one, and an invented
+    one is what reaches the Architect as evidence.
+    """
+    path = _LIST_MARKER.sub("", text).strip()
+    path = _MARKDOWN_WRAP.sub("", path).strip()
+    path = _PATH_ANNOTATION.sub("", path).strip()
+    path = _MARKDOWN_WRAP.sub("", path).strip().rstrip(":,;").strip()
+
+    if not path or path.lower() in _NOT_A_PATH:
+        return ""
+    # Prose, not a path: a sentence in place of a bullet list. Five words is
+    # well clear of any real filename, and missing one costs a warning we did
+    # not print rather than one we made up.
+    if len(path.split()) >= 5:
+        return ""
+
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.relative_to(Path.cwd())
+        except ValueError:
+            # Outside the project; keep it absolute and let it compare as-is.
+            pass
+    return os.path.normpath(str(candidate))
+
+
 def _parse_builder_output(content: str) -> dict[str, Any]:
     """Parse Builder output into structured format.
 
@@ -431,9 +487,17 @@ def _parse_builder_output(content: str) -> dict[str, Any]:
         r"## Files Modified\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE
     )
     if files_match:
-        # Extract file paths from bullet list
-        lines = files_match.group(1).strip().split("\n")
-        result["files_modified"] = [line.lstrip("- ").strip() for line in lines if line.strip()]
+        # Extract file paths from bullet list, normalized: the raw line carries
+        # list markers, markdown and "(new file)"-style annotations that no
+        # recorded tool path will ever match.
+        seen: set[str] = set()
+        paths: list[str] = []
+        for line in files_match.group(1).strip().split("\n"):
+            key = _report_path_key(line)
+            if key and key not in seen:
+                seen.add(key)
+                paths.append(key)
+        result["files_modified"] = paths
 
     blockers_match = re.search(
         r"## Next Steps / Blockers\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE
@@ -1542,11 +1606,12 @@ def builder_node(state: AgentState) -> AgentState:
     # Checked against the run's whole record rather than this pass: a file an
     # earlier pass wrote did come from a successful write call, so naming it
     # again is not a claim about work that never happened.
-    claimed = [
-        path
-        for path in parsed.get("files_modified", [])
-        if path not in all_files_changed
-    ]
+    # Both sides go through the same normalizer before they are compared. The
+    # tool side needs it as much as the prose side: `filesystem_write` records
+    # whatever argument the model passed, so a pass that wrote `./foo.py` and a
+    # report naming `foo.py` are the same file and must not read as a lie.
+    written = {_report_path_key(path) for path in all_files_changed}
+    claimed = [path for path in parsed.get("files_modified", []) if path not in written]
     if claimed:
         builder_report += (
             "\n\nDescribed but not written (no successful write call): "

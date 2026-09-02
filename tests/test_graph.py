@@ -9,6 +9,7 @@ Verifies:
 - Graph loops on the Architect's verdict and stops at the step limit
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1722,3 +1723,74 @@ def test_stopping_nothing_is_refused_not_faked():
 
     assert RUN_CONTROL.stop() is False
     assert RUN_CONTROL.stopped() is False
+
+
+def test_an_annotated_path_is_not_an_unwritten_file():
+    """`- file.py (new file)` names a file the Builder wrote, and must match.
+
+    The "Described but not written" line is the report's harshest claim -- the
+    mirror of a Builder inventing a file -- and the Architect rules on it. A
+    written, executed, passing file was landing under it because the model
+    annotated the bullet and nothing normalized the two sides.
+    """
+    from langgraph_agent.nodes import _parse_builder_output, _report_path_key
+
+    parsed = _parse_builder_output(
+        "## Files Modified\n- test_spectral_graph.py (new file)\n"
+    )
+    assert parsed["files_modified"] == ["test_spectral_graph.py"]
+
+    written = {_report_path_key(p) for p in ["test_spectral_graph.py"]}
+    assert [p for p in parsed["files_modified"] if p not in written] == []
+
+
+def test_prose_spellings_of_a_written_path_all_match_the_tool_record():
+    """Markdown, list markers and path form are decoration, not a different file."""
+    from langgraph_agent.nodes import _parse_builder_output, _report_path_key
+
+    section = "## Files Modified\n" + "\n".join(
+        [
+            "- `spectral_graph/operations.py`",
+            "* **spectral_graph/operations.py** (modified)",
+            "1. ./spectral_graph/operations.py",
+            f"- {Path.cwd() / 'spectral_graph' / 'operations.py'}",
+        ]
+    )
+    parsed = _parse_builder_output(section)
+    # Every line names one and the same file.
+    assert parsed["files_modified"] == ["spectral_graph/operations.py"]
+
+    written = {_report_path_key("./spectral_graph/operations.py")}
+    assert [p for p in parsed["files_modified"] if p not in written] == []
+
+
+def test_a_report_of_nothing_is_not_a_file_called_none():
+    """A Builder that honestly wrote nothing must not be accused over the word."""
+    from langgraph_agent.nodes import _parse_builder_output
+
+    for answer in ["None", "N/A", "-", "No files were modified in this pass."]:
+        parsed = _parse_builder_output(f"## Files Modified\n{answer}\n")
+        assert parsed["files_modified"] == [], answer
+
+
+def test_a_file_that_was_never_written_is_still_named():
+    """Normalizing must not blunt the check it exists to keep honest."""
+    from langgraph_agent.nodes import _parse_builder_output, _report_path_key
+
+    parsed = _parse_builder_output(
+        "## Files Modified\n- `spectral_graph/imaginary.py` (new file)\n"
+    )
+    written = {_report_path_key("spectral_graph/operations.py")}
+    assert [p for p in parsed["files_modified"] if p not in written] == [
+        "spectral_graph/imaginary.py"
+    ]
+
+
+def test_a_parenthesised_filename_survives_normalization():
+    """This project really has files like filter_band_pass_(40_60_hz).png."""
+    from langgraph_agent.nodes import _report_path_key
+
+    assert (
+        _report_path_key("- examples/filter_band_pass_(40_60_hz).png")
+        == "examples/filter_band_pass_(40_60_hz).png"
+    )
