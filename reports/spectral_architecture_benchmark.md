@@ -284,8 +284,9 @@ and A3 (bottleneck detection — the strongest measured advantage, on the
 architecture that matches the knowledge graph). It weakens A2's implied
 reliance on the eigengap to pick k: choose k another way, or bound it.
 
-> **Resolved since.** All three are now implemented in `graphrag_server.py`
-> (`connectivity()`, `topics()`, `bottleneck()`). A2's k problem is handled by
+> **Resolved since.** All five applications are now implemented in
+> `graphrag_server.py` (`connectivity()`, `topics()`, `bottleneck()`,
+> `neighborhood(split=True)`, `duplicate_entities()`). A2's k problem is handled by
 > gating the eigengap's answer on how decisively it won — measured across 18
 > corpora with a planted topic count the heuristic was right every time at
 > 5.1–23.4×, while a grid, a small-world ring, an expander and a single dense

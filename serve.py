@@ -163,6 +163,9 @@ def rpc_query_graph(params: dict[str, Any]) -> dict[str, Any]:
         node_id,
         max_depth=int(params.get("max_depth", 2)),
         min_degree=int(params.get("min_degree", 2)),
+        # Off unless asked for: it triples the cost of a call the console makes
+        # on every click, and only a caller drawing the division wants it.
+        split=bool(params.get("split", False)),
     )
 
 
@@ -257,6 +260,25 @@ def rpc_topics(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"There is no corpus to cluster. {NO_CORPUS_NOTE}")
     raw_k = params.get("k")
     return kb_or_none.topics(k=int(raw_k) if raw_k not in (None, "") else None)
+
+
+def rpc_duplicate_entities(params: dict[str, Any]) -> dict[str, Any]:
+    """Entities playing the same structural role: candidates to merge.
+
+    Read-only and off the poll, like `topics` and `bottleneck`. It proposes; it
+    never merges. `add_document` mints an entity per capitalised token, so the
+    duplicates are a property of the corpus rather than a fault to be repaired
+    behind the operator's back, and merging one is a decision about meaning
+    that the graph alone cannot make.
+    """
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        raise ValueError(f"There is no corpus to scan. {NO_CORPUS_NOTE}")
+    raw = params.get("distance")
+    return kb_or_none.duplicate_entities(
+        limit=int(params.get("limit", 20)),
+        distance=float(raw) if raw not in (None, "") else None,
+    )
 
 
 def rpc_export_corpus(_: dict[str, Any]) -> dict[str, Any]:
@@ -748,6 +770,7 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "rag_stats": rpc_rag_stats,
     "bottleneck": rpc_bottleneck,
     "topics": rpc_topics,
+    "duplicate_entities": rpc_duplicate_entities,
     "list_documents": rpc_list_documents,
     "query_graph": rpc_query_graph,
     "search_documents": rpc_search_documents,

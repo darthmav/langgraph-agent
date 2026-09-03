@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -66,6 +67,17 @@ EIGENGAP_DECISIVENESS = 3.0
 # in the benchmark were all at the top of its range (k = 10 for a barbell whose
 # answer is 2), so the ceiling is also where the bad answers live.
 MAX_AUTO_CLUSTERS = 12
+
+# How close two entities' spectral embedding rows must be to be worth offering
+# as a merge candidate. Measured on a corpus seeded with known duplicates: an
+# entity mentioned by exactly the documents another is mentioned by sits at
+# distance 0.0000, one differing by a single document at 0.19, and the nearest
+# unrelated pair at 0.59 against a median of 1.47. 0.25 sits in that gap.
+DUPLICATE_DISTANCE = 0.25
+
+# Dimensions of the embedding the comparison runs in. Enough to separate
+# structural roles, few enough that the rows stay dense and comparable.
+DUPLICATE_EMBEDDING_DIM = 10
 
 
 class GraphRAGKnowledgeBase:
@@ -328,8 +340,85 @@ class GraphRAGKnowledgeBase:
         documents.sort(key=lambda doc: str(doc["title"]))
         return {"documents": documents}
 
+    def _sign_split(self, keep: set[Any], centre: str) -> dict[str, Any]:
+        """Fiedler sign bipartition of a swept neighbourhood, oriented on the centre.
+
+        The A4 application from `reports/spectral_applicability.md`, and the
+        cheapest technique in it: one eigenvector, 1.7-3.3ms on subgraphs of
+        43-291 nodes, against the 1.0ms `neighborhood()` itself costs. That is
+        why it is a flag rather than always-on -- it triples the cost of a call
+        the console makes on every click, and a caller who only wants the node
+        list should not pay it.
+
+        Sides are named `center` and `other` rather than by the sign of the
+        eigenvector, whose direction is arbitrary: an eigenvector and its
+        negation are equally valid, so a raw sign would swap the two halves
+        between runs for no reason. Orienting on the centre also makes the
+        answer the one the caller asked for -- "what clusters with the node I
+        looked up, and what is peripheral to it".
+
+        `mu_2` is returned because the split is always *available* and only
+        sometimes *meaningful*. A sign cut exists for any connected graph; what
+        says whether it corresponds to a real division is how small `mu_2` is,
+        and on these subgraphs it ranges from 0.134 (a two-hop sweep, barely
+        divided) to 0.006 (a five-hop sweep spanning two topic areas). The
+        caller is given the number rather than a bare verdict because the
+        threshold that matters depends on what the split is being used for --
+        here, whether it is worth drawing.
+
+        Runs on the largest component: `min_degree` pruning can disconnect the
+        swept subgraph -- measured at depth 3, min_degree 3, which left one
+        node isolated -- and on a disconnected graph the Fiedler vector is a
+        component indicator, so the "split" would just be that stray node
+        against everything else. Nodes outside the largest component are
+        reported as `detached` and given no side, which is the truth: they were
+        not part of the division.
+        """
+        undirected = self.graph.to_undirected(as_view=True)
+        subgraph = undirected.subgraph(keep)
+
+        if subgraph.number_of_nodes() < 4:
+            return {"available": False,
+                    "note": "Too few nodes to split.", "sides": {}}
+
+        component = subgraph.subgraph(max(nx.connected_components(subgraph), key=len))
+        if component.number_of_nodes() < 4 or centre not in component:
+            return {"available": False,
+                    "note": "The centre's component is too small to split.", "sides": {}}
+
+        try:
+            import numpy as np
+
+            from spectral_graph import compute_spectrum, fiedler_vector
+
+            vector = fiedler_vector(component, normalized=True)
+            mu_2 = float(max(compute_spectrum(component, k=2, normalized=True, which="SM")[1], 0.0))
+        except ImportError:
+            return {"available": False,
+                    "note": "spectral_graph is not on sys.path.", "sides": {}}
+        except Exception as exc:  # pragma: no cover - solver-dependent
+            return {"available": False, "note": f"{type(exc).__name__}: {exc}", "sides": {}}
+
+        nodes = list(component.nodes())
+        centre_positive = bool(vector[nodes.index(centre)] >= 0)
+        sides = {
+            node: ("center" if (bool(value >= 0) == centre_positive) else "other")
+            for node, value in zip(nodes, np.asarray(vector), strict=True)
+        }
+
+        with_centre = sum(1 for side in sides.values() if side == "center")
+        return {
+            "available": True,
+            "mu_2": mu_2,
+            "center_side": with_centre,
+            "other_side": len(sides) - with_centre,
+            "detached": subgraph.number_of_nodes() - component.number_of_nodes(),
+            "sides": sides,
+        }
+
     def neighborhood(
-        self, node_id: str, max_depth: int = 2, min_degree: int = 1
+        self, node_id: str, max_depth: int = 2, min_degree: int = 1,
+        split: bool = False,
     ) -> dict[str, Any]:
         """Return a node's neighbourhood as drawable nodes and edges.
 
@@ -344,9 +433,14 @@ class GraphRAGKnowledgeBase:
                 capitalised word and the one-document ones bury the structure
                 worth looking at. A single trace passes 1, so a node the user
                 asked for by name never has its neighbours hidden.
+            split: Also compute the Fiedler sign bipartition, tagging every
+                node `center` or `other`. Off by default: it triples the cost
+                of this call, and only a caller that is going to draw the
+                division wants it. See `_sign_split`.
 
         Returns:
-            center_node, related_nodes (excluding the centre), edges, and totals.
+            center_node, related_nodes (excluding the centre), edges, and
+            totals; plus `split` when asked for.
         """
         centre = self._resolve_node(node_id)
         if centre is None:
@@ -389,13 +483,25 @@ class GraphRAGKnowledgeBase:
 
         related = [self._node_record(found) for found in keep if found != centre]
 
-        return {
+        result = {
             "center_node": centre,
             "related_nodes": related,
             "edges": edges,
             "total_nodes": len(related),
             "total_edges": len(edges),
         }
+
+        if split:
+            division = self._sign_split(keep, centre)
+            # `sides` is folded onto the node records and dropped from the
+            # summary: the console draws nodes, not a lookup table, and
+            # shipping both would let the two disagree.
+            sides = division.pop("sides", {})
+            for record in related:
+                record["side"] = sides.get(record["id"])
+            result["split"] = division
+
+        return result
 
     def topics(
         self, k: int | None = None, max_entities: int = 6, max_documents: int = 4
@@ -564,6 +670,132 @@ class GraphRAGKnowledgeBase:
             "threshold": EIGENGAP_DECISIVENESS,
             "component_size": n,
             "clusters": clusters,
+        }
+
+    def duplicate_entities(
+        self, limit: int = 20, distance: float | None = None
+    ) -> dict[str, Any]:
+        """Entities that play the same structural role, as merge candidates.
+
+        The A5 application from `reports/spectral_applicability.md`.
+        `add_document` mints an entity for every capitalised token, so
+        "Builder" and "Builders" become two nodes with the same meaning and
+        nearly the same neighbours. Two entities close together in the spectral
+        embedding are mentioned by nearly the same documents, which is what
+        makes them candidates to merge.
+
+        **The report's caveat about cospectral twins points the wrong way, and
+        the measurement says so.** It notes that two nodes with identical
+        neighbourhoods are indistinguishable to any spectral method -- the
+        `C^2` / Weisfeiler-Lehman limit -- and concludes this therefore finds
+        near-duplicates but not exact ones. That conflates two different
+        questions. You cannot tell an exact twin *apart from* its twin, which
+        is true and irrelevant here; what you can do is *find the pair*, and an
+        exact twin is the easiest possible case, sitting at distance exactly
+        0.0000 and ranking first. Measured: an exact structural twin 0.0000, a
+        twin differing by one document 0.19, the nearest unrelated pair 0.59,
+        median 1.47. Nothing about the limit obstructs this use.
+
+        **Structure beats names at this, and names actively mislead.** The
+        obvious alternative is string similarity on the entity names. On a
+        corpus seeded with three known cases it ranked its own false positive
+        first -- two similarly-named entities with different neighbourhoods --
+        put the same-name duplicate at rank 33, and the differently-named one
+        ("LanguageModel" for an entity already called something else) at rank
+        503. The spectral ranking put the two real duplicates at ranks 0 and 1.
+        `name_similarity` is still reported per pair, because a pair that is
+        close *both* ways is nearly certain, but it is reported and never
+        filtered on.
+
+        The evidence a human merges on is `shared_documents`, not the distance:
+        two entities mentioned by exactly the same six documents is a fact
+        anyone can check, while an embedding distance has to be trusted. The
+        distance finds the pair; the shared-document count justifies it.
+
+        Pairs come from a KD-tree rather than an all-pairs scan -- 17x faster
+        on 1036 entities and, more to the point, allocating nothing quadratic,
+        so a corpus that grows does not start building a distance matrix in
+        memory.
+        """
+        undirected = self.graph.to_undirected(as_view=True)
+        if undirected.number_of_nodes() == 0:
+            return {"verdict": "no_graph", "note": "The graph is empty.", "pairs": []}
+
+        largest = max(nx.connected_components(undirected), key=len)
+        component = undirected.subgraph(largest)
+        n = component.number_of_nodes()
+        radius = DUPLICATE_DISTANCE if distance is None else float(distance)
+
+        entities = [
+            node for node in component
+            if self.graph.nodes[node].get("type") == "entity"
+        ]
+        if n < DUPLICATE_EMBEDDING_DIM + 2 or len(entities) < 2:
+            return {
+                "verdict": "no_graph",
+                "note": "Too few connected entities to compare.",
+                "pairs": [],
+            }
+
+        try:
+            import numpy as np
+            from scipy.spatial import cKDTree
+
+            from spectral_graph import spectral_embedding
+
+            embedding = spectral_embedding(
+                component, dim=DUPLICATE_EMBEDDING_DIM, normalized=True, use_fiedler=True
+            )
+            # Row-normalized, as in Ng-Jordan-Weiss: what matters is the
+            # direction of a node's embedding row, not how far out it sits.
+            # Without this, two entities with the same role but different
+            # degrees are pushed apart by magnitude alone.
+            rows = embedding / np.maximum(
+                np.linalg.norm(embedding, axis=1, keepdims=True), 1e-12
+            )
+        except ImportError:
+            return {"verdict": "unavailable",
+                    "note": "spectral_graph is not on sys.path.", "pairs": []}
+        except Exception as exc:  # pragma: no cover - solver-dependent
+            return {"verdict": "unavailable",
+                    "note": f"{type(exc).__name__}: {exc}", "pairs": []}
+
+        order = {node: i for i, node in enumerate(component.nodes())}
+        points = rows[[order[entity] for entity in entities]]
+        close = cKDTree(points).query_pairs(r=radius)
+
+        pairs = []
+        for left, right in close:
+            a, b = entities[left], entities[right]
+            neighbours_a = set(component.neighbors(a))
+            neighbours_b = set(component.neighbors(b))
+            shared = neighbours_a & neighbours_b
+            pairs.append(
+                {
+                    "entities": sorted([str(a), str(b)]),
+                    "distance": float(np.linalg.norm(points[left] - points[right])),
+                    "shared_documents": len(shared),
+                    "degrees": [component.degree(a), component.degree(b)],
+                    # Jaccard on the neighbourhoods: 1.0 means the two are
+                    # mentioned by exactly the same documents, which is the
+                    # strongest merge evidence there is and is checkable
+                    # without trusting the embedding at all.
+                    "neighbourhood_overlap": (
+                        len(shared) / len(neighbours_a | neighbours_b)
+                        if (neighbours_a | neighbours_b) else 0.0
+                    ),
+                    "name_similarity": SequenceMatcher(None, str(a), str(b)).ratio(),
+                }
+            )
+
+        pairs.sort(key=lambda pair: (pair["distance"], pair["entities"]))
+        return {
+            "verdict": "scanned",
+            "pairs": pairs[:limit],
+            "total_pairs": len(pairs),
+            "entities_compared": len(entities),
+            "distance": radius,
+            "embedding_dim": DUPLICATE_EMBEDDING_DIM,
         }
 
     def bottleneck(self, limit: int = 12) -> dict[str, Any]:
