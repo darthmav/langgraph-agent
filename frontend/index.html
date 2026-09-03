@@ -225,6 +225,7 @@ button.go:disabled{opacity:.5;cursor:not-allowed}
 #impact{background:#3a161822;border:1px solid #f8717144;border-radius:8px;
   padding:9px 12px;margin-bottom:9px;font:11px var(--mono);color:#ffb4b4;display:none}
 .muted{color:var(--ink-3);font:11px var(--mono);padding:6px 0}
+.splitlbl{display:flex;align-items:center;gap:5px;font:11px var(--mono);color:var(--ink-3);cursor:pointer}
 /* Bridge verdicts. The colour carries the same three-way distinction the
    backend does -- found / certified-absent / could-not-tell -- because the
    difference between "there is no bottleneck" and "I could not find one" is
@@ -302,6 +303,9 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
       <input id="gdepth" type="number" value="2" min="1" max="5" style="width:78px" title="max depth">
       <button class="go" id="gbtn">Trace</button>
       <button class="go ghost" id="gall">Sweep all</button>
+      <label class="splitlbl" title="Split the traced neighbourhood in two along the Fiedler vector: what clusters with the node you looked up, and what is peripheral to it. Trace only — a sweep has no centre to orient on.">
+        <input type="checkbox" id="gsplit"> split</label>
+      <span class="muted" id="gstat"></span>
     </div>
     <div id="gwrap"><svg id="g"></svg><div class="gempty" id="gempty">Loading graph&hellip;</div></div>
   </section>
@@ -331,6 +335,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
               title="Download the whole corpus as one JSON file — the graph plus every chunk and its metadata. Embeddings are left out; a reindex regenerates them locally.">Export</button>
       <button class="go ghost" id="bnbtn"
               title="Find the narrowest cut in the knowledge graph and name the entities that bridge it — the terms a search should expand on when a query straddles two topic areas. Read-only; allowed while a run is in flight.">Find bridges</button>
+      <button class="go ghost" id="dupbtn"
+              title="Entities that play the same structural role — mentioned by nearly the same documents — and are therefore candidates to merge. Proposes only; it never merges anything.">Duplicates</button>
       <button class="go ghost" id="tpbtn"
               title="Group the corpus into topic communities — documents together with the entities that define them. The number of topics is chosen from the eigengap, and the answer is 'no clear structure' rather than a made-up map when the corpus has none.">Topics</button>
       <button class="go danger" id="clrbtn"
@@ -339,6 +345,7 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
     </div>
     <div id="bridges"></div>
     <div id="topics"></div>
+    <div id="dupes"></div>
     <h2>Documents</h2>
     <div class="scroll" id="docs"><div class="muted">nothing indexed</div></div>
   </section>
@@ -536,11 +543,27 @@ const dedupe = es => {
 async function trace(){
   const id = $("#gnode").value.trim();
   if(!id) return sweep();
+  const wantSplit = $("#gsplit").checked;
   // min_degree 1: a node asked for by name should not have neighbours hidden.
-  const g = await rpc("query_graph", {node_id:id, max_depth:+$("#gdepth").value || 2, min_degree:1});
+  const g = await rpc("query_graph", {node_id:id, max_depth:+$("#gdepth").value || 2,
+                                      min_degree:1, split:wantSplit});
   const ns = [...(g.related_nodes || [])];
   if(g.center_node && !ns.some(n => n.id === g.center_node))
-    ns.unshift({id:g.center_node, label:g.center_node, node_type:"document"});
+    // The centre is on its own side by definition; it is what the split is
+    // oriented on.
+    ns.unshift({id:g.center_node, label:g.center_node, node_type:"document", side:"center"});
+  // mu_2 is shown rather than hidden behind a verdict: a sign cut exists for
+  // any connected subgraph, and this number is the only thing that says
+  // whether the division drawn corresponds to anything. A trace that stays
+  // inside one topic area splits it arbitrarily and reads ~0.2 here; one that
+  // spans two reads an order of magnitude lower.
+  const sp = g.split;
+  $("#gstat").textContent = !wantSplit ? ""
+    : !sp ? ""
+    : !sp.available ? `no split — ${sp.note}`
+    : `split ${sp.center_side}/${sp.other_side}`
+      + (sp.detached ? ` · ${sp.detached} detached` : "")
+      + ` · mu_2 ${sp.mu_2.toFixed(4)}${sp.mu_2 > 0.1 ? " (weak — no real division here)" : ""}`;
   draw(ns, dedupe(g.edges || []));
 }
 
@@ -576,7 +599,13 @@ function draw(ns, es){
     const c = mk("circle");
     c.setAttribute("r", isDoc ? 9 : 6);
     c.setAttribute("fill", isDoc ? "#76d13a" : "#4ea3ff");
-    c.setAttribute("fill-opacity", ".85");
+    // The side rides on opacity rather than on colour: colour already carries
+    // document-vs-entity, and overloading it would cost the distinction the
+    // graph is mostly read for. Dimming says "peripheral to what you asked
+    // about" without saying anything else. `side` is absent unless a split was
+    // requested, and null for a node the pruning detached, and neither is a
+    // reason to dim.
+    c.setAttribute("fill-opacity", n.side === "other" ? ".18" : ".85");
     c.setAttribute("stroke", isDoc ? "#76d13a" : "#4ea3ff");
     c.setAttribute("stroke-opacity", ".35");
     c.setAttribute("stroke-width", "6");
@@ -781,6 +810,43 @@ const TOPIC_VERDICTS = {
     + "decisively enough to believe. Ask for a specific k to cluster anyway."],
   no_graph: ["muted", "Nothing to cluster."],
   unavailable: ["warn", "Could not measure — which is not the same as finding no topics."],
+};
+
+// A5 near-duplicate entities. The distance is what found the pair; the
+// overlap is what justifies merging it, and it is checkable without trusting
+// the embedding at all -- "these two are mentioned by exactly the same six
+// documents" is a fact, an embedding distance is not. Name similarity is
+// shown and never filtered on: the pair worth having this tool for is the one
+// whose names look nothing alike.
+$("#dupbtn").onclick = async () => {
+  const b = $("#dupbtn"); b.disabled = true; b.textContent = "Scanning…";
+  $("#restat").textContent = ""; $("#dupes").innerHTML = "";
+  try{
+    const r = await rpc("duplicate_entities", {});
+    const rows = (r.pairs || []).map(p =>
+      `<tr><td>${esc(p.entities[0])}</td><td>${esc(p.entities[1])}</td>`
+      + `<td>${p.distance.toFixed(4)}</td>`
+      + `<td>${(p.neighbourhood_overlap*100).toFixed(0)}%</td>`
+      + `<td class="muted">${p.shared_documents} of ${p.degrees[0]}/${p.degrees[1]}</td>`
+      + `<td class="muted">${(p.name_similarity*100).toFixed(0)}%</td></tr>`).join("");
+    $("#dupes").innerHTML = `<h2>Duplicate entities</h2>`
+      + (r.verdict !== "scanned"
+          ? `<div class="verdict muted">${esc(r.note || r.verdict)}</div>`
+          : rows
+            ? `<div class="verdict ok">Candidates to merge — proposed, never merged. `
+              + `Judge on shared documents, not on the distance.</div>`
+              + `<div class="muted">${r.total_pairs} within ${r.distance} `
+              + `of ${r.entities_compared} entities`
+              + (r.total_pairs > r.pairs.length ? `, showing ${r.pairs.length}` : "")
+              + `</div>`
+              + `<table class="bridges"><tr><th>entity</th><th>entity</th>`
+              + `<th>distance</th><th>overlap</th><th>shared docs</th>`
+              + `<th>name</th></tr>${rows}</table>`
+            : `<div class="verdict muted">No entities are close enough to be `
+              + `duplicates of each other.</div>`);
+    $("#restat").textContent = `duplicates: ${r.total_pairs ?? 0}`;
+  }catch(e){ $("#restat").textContent = "duplicate scan failed: " + e.message; }
+  finally{ b.disabled = false; b.textContent = "Duplicates"; }
 };
 
 $("#tpbtn").onclick = async () => {

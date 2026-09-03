@@ -808,3 +808,223 @@ def test_rpc_topics_is_registered_read_only_and_serialisable(kb, monkeypatch):
     monkeypatch.setattr(serve, "kb", None)
     with pytest.raises(ValueError, match="no corpus"):
         serve.rpc_topics({})
+
+
+# ---------------------------------------------------------------------------
+# neighborhood split (A4) and duplicate entities (A5)
+# ---------------------------------------------------------------------------
+
+
+def test_neighborhood_is_unchanged_unless_the_split_is_asked_for(kb):
+    """Off by default: it triples the cost of a call the console makes per click."""
+    kb.graph = _topic_corpus(topics=2, docs=30)
+
+    plain = kb.neighborhood("BRIDGE0", max_depth=3)
+
+    assert "split" not in plain
+    assert all("side" not in record for record in plain["related_nodes"])
+
+
+def test_the_sign_split_separates_the_topic_areas(kb):
+    """One eigenvector, and it recovers the division the corpus was built with."""
+    kb.graph = _topic_corpus(topics=2, docs=30)
+
+    result = kb.neighborhood("BRIDGE0", max_depth=4, split=True)
+
+    assert result["split"]["available"] is True
+    sides = {r["id"]: r["side"] for r in result["related_nodes"] if r["side"]}
+    # Each planted topic lands wholly on one side. BRIDGE* is shared by
+    # construction and may fall either way.
+    for prefix in ("d0_", "e0_", "d1_", "e1_"):
+        members = {side for node, side in sides.items() if node.startswith(prefix)}
+        if members:
+            assert len(members) == 1, f"{prefix} split across both sides"
+    assert {"center", "other"} == set(sides.values())
+
+
+def test_the_split_is_oriented_on_the_centre_not_on_a_sign(kb):
+    """An eigenvector and its negation are equally valid; a raw sign would swap.
+
+    So the halves are named for the centre, and the same nodes come back as
+    `center` on every run. Naming them this way also answers the question the
+    caller actually asked -- what clusters with the node they looked up.
+    """
+    kb.graph = _topic_corpus(topics=2, docs=30)
+
+    labelled = set()
+    for _ in range(4):
+        result = kb.neighborhood("BRIDGE0", max_depth=4, split=True)
+        labelled.add(
+            frozenset(r["id"] for r in result["related_nodes"] if r["side"] == "center")
+        )
+    assert len(labelled) == 1, "the centre's side is not stable between runs"
+
+
+def test_the_split_reports_how_real_the_division_is(kb):
+    """A sign cut always exists; `mu_2` is what says whether it means anything.
+
+    A sweep that stays inside one topic area has no boundary to find and the
+    split divides it arbitrarily -- which is honest, and visible in `mu_2`. A
+    sweep that spans two topic areas has a genuine one. The caller gets the
+    number rather than a verdict, because the line worth drawing depends on
+    what the split is for.
+    """
+    kb.graph = _topic_corpus(topics=2, docs=30)
+
+    within_topic = kb.neighborhood("d0_1", max_depth=3, split=True)["split"]
+    across_topics = kb.neighborhood("BRIDGE0", max_depth=5, split=True)["split"]
+
+    assert within_topic["mu_2"] > 10 * across_topics["mu_2"]
+
+
+def test_a_pruned_neighbourhood_that_disconnects_reports_detached_nodes(kb):
+    """`min_degree` can disconnect the sweep, and then a stray node is not a split.
+
+    On a disconnected graph the Fiedler vector is a component indicator, so the
+    "division" would be that orphan against everything else.
+    """
+    kb.graph = _topic_corpus(topics=2, docs=30)
+    kb.graph.add_node("stray", type="entity")
+    kb.graph.add_edge("d0_0", "stray", relation="mentions")
+
+    result = kb.neighborhood("BRIDGE0", max_depth=6, min_degree=3, split=True)
+
+    if result["split"]["available"]:
+        detached = [r for r in result["related_nodes"] if r["side"] is None]
+        assert len(detached) == result["split"]["detached"]
+
+
+def test_the_split_declines_on_a_subgraph_too_small_to_divide(kb):
+    kb.graph = nx.DiGraph()
+    kb.graph.add_node("a", type="document")
+    kb.graph.add_node("b", type="entity")
+    kb.graph.add_edge("a", "b", relation="mentions")
+
+    result = kb.neighborhood("a", split=True)
+
+    assert result["split"]["available"] is False
+    assert "too few" in result["split"]["note"].lower()
+
+
+def _corpus_with_known_duplicates() -> nx.DiGraph:
+    """Three seeded cases, one of which string similarity gets exactly wrong."""
+    rng = np.random.default_rng(1)
+    G = nx.DiGraph()
+    docs = [f"doc{i}" for i in range(50)]
+    for d in docs:
+        G.add_node(d, type="document")
+    for e in range(30):
+        G.add_node(f"Ent{e}", type="entity")
+    for d in docs:
+        for e in rng.choice(30, size=5, replace=False):
+            G.add_edge(d, f"Ent{e}", relation="mentions")
+
+    mentions = {e: list(G.predecessors(e)) for e in [f"Ent{i}" for i in range(30)]}
+    # (A) same name, same structure -- "Builder" / "Builders".
+    G.add_node("Ent3s", type="entity")
+    for d in mentions["Ent3"]:
+        G.add_edge(d, "Ent3s", relation="mentions")
+    # (B) different name, same structure -- the case names cannot reach.
+    G.add_node("LanguageModel", type="entity")
+    for d in mentions["Ent7"]:
+        G.add_edge(d, "LanguageModel", relation="mentions")
+    # (C) similar name, different structure -- a string-similarity false positive.
+    G.add_node("Ent11x", type="entity")
+    for d in rng.choice(docs, size=6, replace=False):
+        G.add_edge(str(d), "Ent11x", relation="mentions")
+    return G
+
+
+def test_duplicate_entities_finds_exact_structural_twins_first(kb):
+    """The report's cospectral caveat points the wrong way, and this pins it.
+
+    You cannot tell an exact twin *apart from* its twin. You can find the pair,
+    and it is the easiest case there is: distance exactly 0.
+    """
+    kb.graph = _corpus_with_known_duplicates()
+
+    result = kb.duplicate_entities()
+
+    assert result["verdict"] == "scanned"
+    found = {frozenset(pair["entities"]) for pair in result["pairs"]}
+    assert frozenset({"Ent3", "Ent3s"}) in found
+    for pair in result["pairs"]:
+        assert pair["distance"] < 1e-6
+        assert pair["neighbourhood_overlap"] == pytest.approx(1.0)
+
+
+def test_duplicate_entities_finds_the_pair_no_name_comparison_could(kb):
+    """"LanguageModel" and "Ent7" share every document and no characters.
+
+    This is the case that justifies the structural signal over string
+    similarity, which ranked this pair 503rd.
+    """
+    kb.graph = _corpus_with_known_duplicates()
+
+    result = kb.duplicate_entities()
+
+    pair = next(
+        p for p in result["pairs"] if set(p["entities"]) == {"Ent7", "LanguageModel"}
+    )
+    assert pair["neighbourhood_overlap"] == pytest.approx(1.0)
+    # Reported, never filtered on: by name alone these look unrelated.
+    assert pair["name_similarity"] < 0.3
+
+
+def test_duplicate_entities_excludes_the_string_similarity_false_positive(kb):
+    """Similar names, different neighbourhoods. Names rank it first; structure does not."""
+    kb.graph = _corpus_with_known_duplicates()
+
+    result = kb.duplicate_entities()
+
+    assert not any(
+        set(pair["entities"]) == {"Ent11", "Ent11x"} for pair in result["pairs"]
+    )
+
+
+def test_duplicate_entities_only_proposes(kb):
+    """It never merges. The graph is left exactly as it was found."""
+    kb.graph = _corpus_with_known_duplicates()
+    before = (kb.graph.number_of_nodes(), kb.graph.number_of_edges())
+
+    kb.duplicate_entities()
+
+    assert (kb.graph.number_of_nodes(), kb.graph.number_of_edges()) == before
+
+
+def test_duplicate_entities_on_a_corpus_too_small_to_compare(kb):
+    kb.graph = nx.DiGraph()
+    assert kb.duplicate_entities()["verdict"] == "no_graph"
+
+    kb.graph = nx.DiGraph()
+    kb.graph.add_node("d", type="document")
+    kb.graph.add_node("a", type="entity")
+    kb.graph.add_edge("d", "a", relation="mentions")
+    assert kb.duplicate_entities()["verdict"] == "no_graph"
+
+
+def test_rpc_surface_for_the_split_and_the_duplicate_scan(kb, monkeypatch):
+    assert serve.RPC_METHODS["duplicate_entities"] is serve.rpc_duplicate_entities
+    assert "duplicate_entities" not in serve.QUIET_METHODS
+
+    kb.graph = _corpus_with_known_duplicates()
+    monkeypatch.setattr(serve, "kb", None)
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: kb)
+
+    json.dumps(serve.rpc_duplicate_entities({}))
+    assert len(serve.rpc_duplicate_entities({"limit": 1})["pairs"]) == 1
+    # A blank distance means "use the default", not "distance 0".
+    assert serve.rpc_duplicate_entities({"distance": ""})["distance"] > 0
+    assert serve.rpc_duplicate_entities({"distance": 0.7})["distance"] == 0.7
+
+    kb.graph = _topic_corpus(topics=2, docs=30)
+    assert "split" not in serve.rpc_query_graph({"node_id": "BRIDGE0"})
+    split = serve.rpc_query_graph({"node_id": "BRIDGE0", "max_depth": 4,
+                                  "min_degree": 1, "split": True})
+    assert split["split"]["available"] is True
+    json.dumps(split)
+
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "kb", None)
+    with pytest.raises(ValueError, match="no corpus"):
+        serve.rpc_duplicate_entities({})

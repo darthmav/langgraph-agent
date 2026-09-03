@@ -573,6 +573,52 @@ deliver the reply.
   `connectivity()` and `bottleneck()` -- components are already clusters, so on
   a disconnected graph the eigenvectors would spend themselves rediscovering
   the orphans `connectivity()` has already counted.
+- **`neighborhood(split=True)` names the sides for the centre, and the flag is
+  off by default.** The A4 application: one eigenvector, the cheapest technique
+  in `reports/spectral_applicability.md`, splitting a traced neighbourhood into
+  what clusters with the node you looked up and what is peripheral to it. Off
+  by default because it costs 1.7-3.3ms against the 1.0ms `neighborhood()`
+  itself takes -- it triples a call the console makes on every click, and a
+  caller who only wants the node list should not pay for a division it will not
+  draw. The sides are `center` / `other` rather than the sign of the
+  eigenvector, which is arbitrary: an eigenvector and its negation are equally
+  valid, so a raw sign swaps the halves between runs for nothing. `mu_2` is
+  returned because the split is always *available* and only sometimes
+  *meaningful* -- a sign cut exists for any connected graph. A trace that stays
+  inside one topic area reads ~0.2 and has divided it arbitrarily; one spanning
+  two reads an order of magnitude lower. The caller gets the number, not a
+  verdict, because the line worth drawing depends on the use. Runs on the
+  centre's component: `min_degree` pruning **can** disconnect the sweep
+  (measured at depth 3, min_degree 3), and on a disconnected graph the Fiedler
+  vector is a component indicator, so the "split" would be that stray node
+  against everything else. Detached nodes get `side: None`. In the console the
+  side rides on opacity, never colour -- colour already carries
+  document-vs-entity and that is what the graph is mostly read for.
+- **`duplicate_entities()` proposes merges and never makes one, and the
+  report's cospectral caveat points the wrong way.** The A5 application:
+  `add_document` mints an entity per capitalised token, so "Builder" and
+  "Builders" become two nodes with one meaning. Entities close together in the
+  spectral embedding are mentioned by nearly the same documents.
+  `reports/spectral_applicability.md` warns that exact structural twins are
+  indistinguishable to any spectral method -- the `C^2` / Weisfeiler-Lehman
+  limit -- and concludes this finds near-duplicates but not exact ones. That
+  conflates two questions: you cannot tell a twin *apart from* its twin, which
+  is true and irrelevant, but *finding the pair* is the easiest case there is.
+  Measured: an exact twin sits at distance 0.0000 and ranks first, one
+  differing by a single document at 0.19, the nearest unrelated pair at 0.59
+  against a median of 1.47 -- hence `DUPLICATE_DISTANCE = 0.25`.
+  **Structure beats names here and names actively mislead**: on a corpus with
+  three seeded cases, string similarity ranked its own false positive first
+  (similar names, different neighbourhoods), the same-name duplicate 33rd and
+  the differently-named one 503rd, while the spectral ranking put the two real
+  duplicates at 0 and 1. `name_similarity` is reported per pair and never
+  filtered on. The evidence to merge on is `neighbourhood_overlap`, not the
+  distance: "these two are mentioned by exactly the same six documents" is
+  checkable, an embedding distance has to be trusted. Pairs come from a KD-tree
+  rather than an all-pairs scan -- 17x faster on 1036 entities, and allocating
+  nothing quadratic, so a growing corpus does not start building a distance
+  matrix. It only ever proposes: which entities mean the same thing is a
+  decision about meaning that the graph cannot make.
 - **The embedding model loads on first use, not on construction.**
   `GraphRAGKnowledgeBase.embedder` is a lazy property and
   `sentence_transformers` is imported inside it. Only `add_document` and
