@@ -52,6 +52,9 @@ python example_usage.py
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
 │   ├── mcp_client.py          # MCP client / local tool bindings
 │   ├── exceptions.py          # Public error surface (re-exports _internal/)
+│   ├── self_healing/          # Opt-in retry / circuit-breaker decorators (see note below)
+│   │   ├── logger.py          # SelfHealingLogger: structured, severity-leveled healing log
+│   │   └── decorators.py      # retry_with_backoff, circuit_breaker, self_healing_wrapper
 │   └── _internal/
 │       └── exceptions.py      # LangGraphAgentError and its five subclasses
 ├── prompts/
@@ -67,6 +70,7 @@ python example_usage.py
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
 │   ├── test_mcp_tools.py      # Builder tool belt
 │   ├── test_imports.py        # Pins the package's public surface
+│   ├── test_self_healing.py   # self_healing: logger, retry, circuit breaker
 │   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── reindex.py             # Re-index files into GraphRAG
@@ -113,6 +117,21 @@ python example_usage.py
   - Researcher → GraphRAG read-only tools only.
   - Builder → filesystem, git, terminal, test tools only.
 
+- **`self_healing` is a standalone utility, not wired into any node.** It gives
+  `retry_with_backoff`, `circuit_breaker` and `self_healing_wrapper` decorators
+  (tenacity + pybreaker) plus a structured `SelfHealingLogger`, for a caller
+  that wants in-process retry/circuit-breaker resilience around its own
+  function calls. It is deliberately **not** applied to the LLM seat calls or
+  MCP tool calls: those already have a resilience design of their own —
+  `LLM_TIMEOUT_SECONDS` / `NODE_DEADLINE_SECONDS` / `BUILDER_DEADLINE_SECONDS`,
+  and the rule that work run under a deadline must never write to state (see
+  Important Notes below). Adding a retry loop underneath an abandoned,
+  still-running worker would violate that rule outright, and a circuit breaker
+  keyed on a seat's exceptions would interact with `_seat_failures`
+  (`get_agent_status()`) in ways nobody has designed for. Reach for it for a
+  *new*, independent integration point (e.g. a future external API call a
+  Builder tool makes) rather than retrofitting it onto the existing node/seat
+  call paths.
 ## State Schema
 
 Every node reads/writes `AgentState`:

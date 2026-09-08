@@ -31,6 +31,9 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "networkx>=3.0",
     "faiss-cpu>=1.8.0",
+    # Self-healing (retry / circuit breaker)
+    "tenacity>=8.2.0",
+    "pybreaker>=1.2.0",
 ]
 
 [project.optional-dependencies]
