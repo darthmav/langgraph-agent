@@ -270,14 +270,20 @@ def rpc_duplicate_entities(params: dict[str, Any]) -> dict[str, Any]:
     duplicates are a property of the corpus rather than a fault to be repaired
     behind the operator's back, and merging one is a decision about meaning
     that the graph alone cannot make.
+
+    Candidates are generated from the names and the structure is the evidence,
+    not the other way round -- see `duplicate_entities` for the measurement
+    that settled which way that runs.
     """
     kb_or_none = _open_kb()
     if kb_or_none is None:
         raise ValueError(f"There is no corpus to scan. {NO_CORPUS_NOTE}")
-    raw = params.get("distance")
+    raw_name = params.get("name_similarity")
+    raw_containment = params.get("containment")
     return kb_or_none.duplicate_entities(
         limit=int(params.get("limit", 20)),
-        distance=float(raw) if raw not in (None, "") else None,
+        name_similarity=float(raw_name) if raw_name not in (None, "") else None,
+        containment=float(raw_containment) if raw_containment not in (None, "") else None,
     )
 
 

@@ -63,6 +63,7 @@ python example_usage.py
 │   ├── test_graph.py          # Pytest suite
 │   ├── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
 │   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
+│   ├── test_chunking.py       # Document chunking, chunk ids, search collapse
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
 │   ├── test_mcp_tools.py      # Builder tool belt
 │   ├── test_imports.py        # Pins the package's public surface
@@ -456,6 +457,100 @@ deliver the reply.
   node put under a deadline. The worker is a bare daemon thread on purpose:
   `ThreadPoolExecutor`'s atexit hook joins its non-daemon threads, so one
   abandoned worker would hold up interpreter shutdown.
+- **A document is embedded in chunks, because the model's window is 256
+  tokens and silence is how it says so.** `add_document` used to embed a whole
+  file in one `encode()` call while `MAX_INDEXABLE_BYTES` allowed 100 KB, so
+  everything past roughly the first thousand characters was discarded --
+  without an error, a warning, or a counter that moved. Measured before the
+  fix: **73 of 77 documents truncated, 224,809 tokens present and 19,147
+  embedded, 91.5% of the corpus unreachable by search**, with the vector for
+  all 46,094 characters of `CLAUDE.md` bit-identical (cosine 1.000000) to the
+  vector for its first 1,000. Two failures followed and neither announces
+  itself. Retrieval acquired a **length bias**: a short file is fully
+  represented while a long one is represented by its preamble, so the file that
+  answers the query loses to a shorter one that merely mentions it -- *"how
+  does connectivity report isolated nodes and lambda_2"* returned an examples
+  script rather than the `graphrag_server.py` holding that exact docstring. And
+  scores sat low enough that plan-shaped queries fell under the `> 0.3` gate in
+  `_gather_research`, discarding retrieval and sending the run to the
+  Researcher's model -- the loop *"A silent Researcher is not research"*
+  already describes. After chunking, the same ten queries average **+0.162**
+  and none falls under the gate.
+  Four decisions in it are not interchangeable with the obvious alternatives.
+  *`CHUNK_MAX_TOKENS` is 254, not 256*, because the model adds two special
+  tokens. *Boundaries are not snapped to line breaks*: snapping must either
+  shorten a chunk, dropping tokens the model could have read, or lengthen it
+  past the window, which truncates again -- so the cut stays where the
+  arithmetic puts it and `CHUNK_OVERLAP_TOKENS` absorbs the cosmetic cost.
+  *Chunks are re-encoded and trimmed by `_fit_chunks`* rather than the constant
+  being padded by the drift observed once: slicing on the parent's token
+  boundaries does not bound the slice, because a word-piece tokenizer decides
+  on context, and 16 of 1,052 full-size chunks came back a token longer
+  standalone -- 257 against a 256 window, handed straight back to the bug. Which
+  end is trimmed is load-bearing: a chunk's tail is covered by the next chunk's
+  overlap and its head by the previous one's, so the **last** chunk is trimmed
+  at the head and every other at the tail. Trimming the last one's tail would
+  drop the final tokens of the file silently, which is the original bug in
+  miniature. *And `search` collapses chunks back onto documents*, keeping each
+  document's best chunk, so `id` stays the path callers index the graph with
+  and print as a filename while `content` becomes the passage that matched --
+  the 300 characters the Researcher forwards to the Builder used to be 300
+  characters of whichever file's *header* scored best. It widens the query once
+  (`SEARCH_ESCALATION`) when one large file monopolises the first window of
+  hits, since answering a request for five sources with one is narrower than
+  what chunking replaced. Rows are keyed `path#0007`; `_document_id_of` resolves
+  one back to its document and deliberately still resolves a bare, unsuffixed
+  id, because that is what a store written before chunking holds and reading it
+  as a stranger would prune it.
+- **A document's previous chunks are deleted before its new ones land.** Not
+  left to `upsert`: a file that shrank between reindexes -- ten chunks down to
+  three -- overwrites 0..2 and leaves 3..9 in the store, still matching queries
+  with text the file no longer contains. That is the same "a reindex rebuilds
+  rather than accumulates" rule `index_project_files` follows for whole
+  documents, one level down. For the same reason its stale-pruning compares the
+  *document* a row belongs to and never the row's own id: `CLAUDE.md#0007` is
+  not in `wanted` and never will be, so an id-to-id comparison finds every
+  chunk stale and deletes the corpus on every reindex. It happens to end in the
+  same place while everything is re-added in the same pass, which is exactly
+  why it would sit there unnoticed until something indexed a subset.
+- **A capital is not evidence of an entity, and `ENTITY_STOPWORDS` is a list
+  rather than a rule.** `add_document` mints an entity for every capitalised
+  token over four characters. Across prose and numpy-style docstrings that
+  fires constantly on words whose capital comes from where they sit rather
+  than what they mean: a sentence opener (`Every`, `Nothing`), a docstring
+  heading (`Returns`, `Parameters`, `Raises`), a report heading (`Files`,
+  `Status`), a Python literal (`False`, `None`). Before the list, `False` was
+  the **4th** best-connected node in the graph and `Returns` the **6th**, above
+  `Fiedler`, `Planner` and `Cheeger` -- 21 documents joined through `Returns`,
+  which records only that all 21 contain a docstring. Those edges are read as
+  evidence by `neighborhood()`, by `top_entities`, and by
+  `duplicate_entities()`. After the list the twenty best-connected entities are
+  all real terms and no stopword token remains in the graph.
+  **The obvious alternative was built, measured and rejected.** Dropping a
+  token that only ever appears where a capital is forced (line start, after a
+  full stop) removes the same noise and severs real edges doing it: `Planner`
+  fell from 18 documents to 15, `Spectral` 19 to 15, `ValueError` 14 to 11,
+  because a term introduced in a bulleted list (`- **Planner** -- interprets
+  goals`) appears nowhere else in that document. A hand-audited list costs no
+  meaningful term a single edge, and its failures are visible on the page
+  rather than buried in a heuristic. The list is matched case-insensitively
+  against the **whole** token, never as a prefix, so `Returns` is stopped while
+  `Researcher` is not.
+  **It does not make `topics()` decisive, and was never going to.** That was
+  the first hypothesis and the measurement refused it: removing every one of
+  the 97 entities that bridge this corpus's two topic areas -- the most any
+  such filter could achieve -- moves the eigengap decisiveness from 1.12x to
+  1.09x, and the list itself moves it to 1.22x against a 3.0x threshold. The
+  corpus's normalized spectrum is a smooth continuum (0, 0.105, 0.125, 0.145,
+  0.175, ...) because it genuinely has no decisive k, not because boilerplate
+  is gluing it together; the same extractor recovers planted topics at 14-25x
+  on a synthetic corpus that does have them. `no_clear_structure` on this
+  corpus is the correct answer, and tuning the extractor until the number rose
+  would have manufactured the finding `topics()` exists to refuse.
+  What the list does not touch either is the **degree-1 majority**: 60% of
+  entities are mentioned by exactly one document, contribute no relation, and
+  are what floods `duplicate_entities()` with structurally identical pendants.
+  That is a separate defect with a separate fix.
 - **No corpus exists until someone indexes one, and reading is not indexing.**
   `GraphRAGKnowledgeBase.__init__` *creates* the store -- `mkdir`, plus
   Chroma's files -- so the two doors are kept apart: `get_knowledge_base()`
@@ -594,31 +689,55 @@ deliver the reply.
   against everything else. Detached nodes get `side: None`. In the console the
   side rides on opacity, never colour -- colour already carries
   document-vs-entity and that is what the graph is mostly read for.
-- **`duplicate_entities()` proposes merges and never makes one, and the
-  report's cospectral caveat points the wrong way.** The A5 application:
-  `add_document` mints an entity per capitalised token, so "Builder" and
-  "Builders" become two nodes with one meaning. Entities close together in the
-  spectral embedding are mentioned by nearly the same documents.
-  `reports/spectral_applicability.md` warns that exact structural twins are
-  indistinguishable to any spectral method -- the `C^2` / Weisfeiler-Lehman
-  limit -- and concludes this finds near-duplicates but not exact ones. That
-  conflates two questions: you cannot tell a twin *apart from* its twin, which
-  is true and irrelevant, but *finding the pair* is the easiest case there is.
-  Measured: an exact twin sits at distance 0.0000 and ranks first, one
-  differing by a single document at 0.19, the nearest unrelated pair at 0.59
-  against a median of 1.47 -- hence `DUPLICATE_DISTANCE = 0.25`.
-  **Structure beats names here and names actively mislead**: on a corpus with
-  three seeded cases, string similarity ranked its own false positive first
-  (similar names, different neighbourhoods), the same-name duplicate 33rd and
-  the differently-named one 503rd, while the spectral ranking put the two real
-  duplicates at 0 and 1. `name_similarity` is reported per pair and never
-  filtered on. The evidence to merge on is `neighbourhood_overlap`, not the
-  distance: "these two are mentioned by exactly the same six documents" is
-  checkable, an embedding distance has to be trusted. Pairs come from a KD-tree
-  rather than an all-pairs scan -- 17x faster on 1036 entities, and allocating
-  nothing quadratic, so a growing corpus does not start building a distance
-  matrix. It only ever proposes: which entities mean the same thing is a
-  decision about meaning that the graph cannot make.
+- **`duplicate_entities()` proposes merges and never makes one, and names
+  generate the candidates while structure is only the evidence.** The A5
+  application: `add_document` mints an entity per capitalised token, so one
+  thing arrives under several names -- `Builder` and `BUILDER` from a heading,
+  `Entity` and `Entities` from a plural.
+  **This used to rank by distance in a spectral embedding, and the measurement
+  retired that.** On this corpus it returned 33,060 candidates of which **67%
+  sat at distance exactly 0.0000 with neighbourhood overlap 1.00** -- its own
+  "strongest merge evidence there is" -- topped by `['LEGAL', 'Virginia']` and
+  `['Consequences', 'PIPEDA']`. Those are pendant collisions: two entities each
+  mentioned by one document, the same one, are structurally identical by
+  construction, and 60% of this corpus's entities have degree 1. The true
+  duplicates -- `Builder`/`Builders` and all thirty case variants -- were **not
+  candidates at any rank**. Graded against ground truth, spectral distance
+  scored 0% precision and 0% recall; so did Jaccard, and so did containment as
+  a ranker. Name similarity scored **100% precision on its top 20**.
+  Two separate things were wrong. *A real duplicate is asymmetric*: `Builder`
+  has 29 documents to `Builders`' 4, a subset that reads containment 1.00 and
+  Jaccard 0.14, so every symmetric measure ranks the true pair below thousands
+  of unrelated ones -- which is why the evidence here is **containment**, with
+  Jaccard kept beside it precisely so the disagreement stays visible. *And
+  structure cannot generate candidates on a real corpus at all*: tightened as
+  far as it goes -- Jaccard 1.00 with at least three shared documents -- the
+  survivors are `Oppenheim`/`Schafer` (two authors cited in the same three
+  papers), `Nyquist`/`Frequency`, and
+  `BUILDER_DEADLINE_SECONDS`/`NODE_DEADLINE_SECONDS`. All collocations. The
+  synthetic fixture that once justified the structural signal assigns entities
+  to documents **at random**, which makes an identical neighbourhood
+  astronomically improbable and therefore real evidence; a corpus is the
+  opposite, since entities of one topic are mentioned in the same documents --
+  that is what a topic *is*. The property the test depended on is the property
+  real data lacks. So the old note's "structure beats names here and names
+  actively mislead" was true of the fixture and false of the corpus.
+  **What this gives up, on purpose: two names for one thing sharing no
+  characters.** `LanguageModel` for an entity already called something else is
+  not found and cannot be. That is pinned by a test, because it was *measured*
+  rather than merely unimplemented -- anyone reinstating a structural generator
+  should re-run that measurement first.
+  Pairs come in two kinds and they differ in how much they must prove. `case`
+  (the same token bar capitalisation) is certain on the name alone and carries
+  **no** structural floor -- these are the most asymmetric pairs in the corpus
+  (`BUILDER` in one document against `Builder` in 29) and any evidence
+  threshold would drop every one of the thirty. `lexical` is a likeness, so it
+  must also clear `DUPLICATE_CONTAINMENT`; that is what separates
+  `Builder`/`Builders` from two similar names for different things.
+  Comparison is blocked on a case-folded four-character prefix: 1,528
+  comparisons instead of 948,753, which took the scan from 33,060 pairs in
+  1.34s to 95 in 0.016s. It only ever proposes: which entities mean the same
+  thing is a decision about meaning that the graph cannot make.
 - **The embedding model loads on first use, not on construction.**
   `GraphRAGKnowledgeBase.embedder` is a lazy property and
   `sentence_transformers` is imported inside it. Only `add_document` and
