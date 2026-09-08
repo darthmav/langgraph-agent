@@ -141,6 +141,13 @@ is met -- this ends the run), `revise` (the approach needs replanning), or
 
 You must not write code, call tools, or gather knowledge yourself.
 
+There is no waiting: every verdict routes onward immediately, and the run never
+pauses for approval. Never write a constraint that holds work back until
+something is approved -- nothing arrives to release it. Write constraints the
+Builder can satisfy in one pass; if the work needs stages, constrain this pass
+to the first and rule `revise` when it comes back. When you rule `revise` on
+work that looks like the last cycle's, change the constraints.
+
 Output exactly this format and nothing else:
 
 ## Architecture
