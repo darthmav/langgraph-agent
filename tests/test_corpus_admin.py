@@ -1075,3 +1075,71 @@ def test_rpc_surface_for_the_split_and_the_duplicate_scan(kb, monkeypatch):
     monkeypatch.setattr(serve, "kb", None)
     with pytest.raises(ValueError, match="no corpus"):
         serve.rpc_duplicate_entities({})
+
+
+# --------------------------------------------------------------------------
+# What a reindex is allowed to see
+# --------------------------------------------------------------------------
+
+def test_the_excludes_are_substrings_that_actually_match_what_they_name():
+    """Both directions of the same defect, and neither one raises.
+
+    `PROJECT_INDEX_EXCLUDES` is matched with `in`, never as globs. A pattern
+    written glob-style therefore matches nothing at all, and a bare directory
+    name matches every path that merely contains it. Two scripts kept their own
+    drifted copy of this list and had both bugs at once: `"*.egg-info"`
+    excluded nothing, so four build artifacts were indexed, while a bare
+    `"build"` matched `prompts/builder.txt` and kept the Builder's own system
+    prompt out of the corpus. The file count was simply wrong, in both
+    directions, with nothing raised and no counter to show it.
+    """
+    from langgraph_agent.graphrag_server import PROJECT_INDEX_EXCLUDES
+
+    assert not any("*" in pattern for pattern in PROJECT_INDEX_EXCLUDES), (
+        "a glob-shaped pattern is matched as a literal substring, so it "
+        "excludes nothing"
+    )
+
+    def excluded(path: str) -> bool:
+        return any(pattern in path for pattern in PROJECT_INDEX_EXCLUDES)
+
+    assert excluded("src/langgraph_agent.egg-info/SOURCES.txt")
+    assert excluded("build/lib/thing.py")
+    assert not excluded("prompts/builder.txt"), (
+        "'builder' contains 'build'; that exclude needs its trailing slash"
+    )
+    assert not excluded("src/langgraph_agent/graphrag_server.py")
+
+
+def test_the_index_script_selects_the_same_files_as_the_canonical_walk():
+    """`get_project_files` delegates rather than reimplementing.
+
+    Behavioural rather than source inspection: the failure was a *duplicate
+    that disagreed*, so what has to hold is that the two agree on this repo.
+    """
+    import sys
+
+    sys.path.insert(0, "scripts")
+    try:
+        from index_knowledge import get_project_files
+    finally:
+        sys.path.pop(0)
+    from langgraph_agent.graphrag_server import iter_project_files
+
+    assert get_project_files(".") == iter_project_files(".")
+
+
+def test_the_setup_script_reindexes_through_the_canonical_path():
+    """A reindex rebuilds; `full_setup` used to accumulate.
+
+    It walked the tree itself and called `add_document` in a loop, so nothing
+    cleared the graph or pruned Chroma rows that no longer qualify -- a file
+    renamed, deleted or newly excluded went on answering searches. Delegating
+    to `index_project_files` is what makes it a reindex rather than an append.
+    """
+    from pathlib import Path
+
+    source = Path("scripts/full_setup.py").read_text(encoding="utf-8")
+
+    assert "index_project_files" in source
+    assert "__pycache__" not in source, "it is re-listing the excludes again"

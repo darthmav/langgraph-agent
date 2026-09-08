@@ -48,42 +48,36 @@ def test_graphrag_import():
 
 
 def reindex_knowledge():
-    """Re-index all project files."""
+    """Re-index all project files.
+
+    Delegates to `index_project_files` rather than walking the tree itself.
+    The copy this used to keep had drifted from the canonical one in three
+    ways, none of which raises anything. Its excludes are matched as plain
+    substrings, so `"*.egg-info"` matched nothing and indexed four build
+    artifacts, while a bare `"build"` matched `prompts/builder.txt` and kept
+    the Builder's own system prompt out of the corpus. And it *accumulated*
+    where a reindex is supposed to rebuild: nothing cleared the graph or
+    pruned Chroma rows that no longer qualify, so a file that was renamed,
+    deleted or newly excluded went on answering searches.
+    """
     print("\nIndexing project files into GraphRAG...")
 
-    from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+    from langgraph_agent.graphrag_server import (
+        get_knowledge_base,
+        index_project_files,
+    )
 
-    kb = GraphRAGKnowledgeBase()
-
-    # Get project files
+    kb = get_knowledge_base()
     root = Path(__file__).parent.parent
-    exclude_dirs = ["__pycache__", ".git", ".venv", "node_modules",
-                    ".pytest_cache", ".mypy_cache", "build", "dist",
-                    "*.egg-info", "knowledge/", ".qwen/"]
 
-    files = []
-    for pattern in ["**/*.py", "**/*.md", "**/*.txt"]:
-        for f in root.glob(pattern):
-            if any(excl in str(f) for excl in exclude_dirs):
-                continue
-            files.append(f)
+    report = index_project_files(kb, str(root))
 
-    print(f"  Found {len(files)} files")
-
-    # Index files
-    indexed = 0
-    for f in files:
-        try:
-            content = f.read_text(encoding="utf-8")
-            if len(content) > 100_000:
-                continue
-            kb.add_document(str(f), content, {"path": str(f), "type": f.suffix})
-            indexed += 1
-        except Exception:
-            pass
-
-    print(f"  ✓ Indexed {indexed} files")
-    return indexed > 0
+    for error in report["errors"]:
+        print(f"  ! {error}")
+    if report["skipped"]:
+        print(f"  Skipped {report['skipped']} file(s) over the size limit")
+    print(f"  ✓ Indexed {report['indexed']} files")
+    return report["indexed"] > 0
 
 
 def test_search():

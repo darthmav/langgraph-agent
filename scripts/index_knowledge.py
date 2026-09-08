@@ -14,36 +14,32 @@ The embedding model runs on-device for GraphRAG and does not require an API key.
 
 from pathlib import Path
 
-from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+from langgraph_agent.graphrag_server import (
+    GraphRAGKnowledgeBase,
+    iter_project_files,
+)
 
 
 def get_project_files(root: str = ".", exclude_dirs: list[str] | None = None) -> list[Path]:
     """Get all relevant project files.
 
+    Delegates to `iter_project_files` rather than keeping its own copy of the
+    patterns and the exclude list. The copy it used to keep had drifted, and
+    both directions of drift are silent: excludes here are matched as plain
+    substrings, so `"*.egg-info"` matched nothing and indexed four build
+    artifacts, while a bare `"build"` matched `prompts/builder.txt` and kept
+    the Builder's own system prompt out of the corpus. Neither shows up as an
+    error -- the count is simply wrong, in both directions at once.
+
     Args:
         root: Project root directory
-        exclude_dirs: Directories to exclude
+        exclude_dirs: Directories to exclude, defaulting to
+            PROJECT_INDEX_EXCLUDES
 
     Returns:
         List of file paths
     """
-    if exclude_dirs is None:
-        exclude_dirs = [
-            "__pycache__", ".git", ".venv", "venv", "node_modules",
-            ".pytest_cache", ".mypy_cache", "build", "dist", "*.egg-info"
-        ]
-
-    files = []
-    root_path = Path(root)
-
-    for pattern in ["**/*.py", "**/*.md", "**/*.txt", "**/*.rst"]:
-        for file_path in root_path.glob(pattern):
-            # Check if any exclude dir is in path
-            if any(excl in str(file_path) for excl in exclude_dirs):
-                continue
-            files.append(file_path)
-
-    return files
+    return iter_project_files(root, exclude_dirs)
 
 
 def index_file(kb: GraphRAGKnowledgeBase, file_path: Path) -> None:
