@@ -825,8 +825,8 @@ $("#dupbtn").onclick = async () => {
     const r = await rpc("duplicate_entities", {});
     const rows = (r.pairs || []).map(p =>
       `<tr><td>${esc(p.entities[0])}</td><td>${esc(p.entities[1])}</td>`
-      + `<td>${p.distance.toFixed(4)}</td>`
-      + `<td>${(p.neighbourhood_overlap*100).toFixed(0)}%</td>`
+      + `<td>${esc(p.kind)}</td>`
+      + `<td>${(p.containment*100).toFixed(0)}%</td>`
       + `<td class="muted">${p.shared_documents} of ${p.degrees[0]}/${p.degrees[1]}</td>`
       + `<td class="muted">${(p.name_similarity*100).toFixed(0)}%</td></tr>`).join("");
     $("#dupes").innerHTML = `<h2>Duplicate entities</h2>`
@@ -834,15 +834,15 @@ $("#dupbtn").onclick = async () => {
           ? `<div class="verdict muted">${esc(r.note || r.verdict)}</div>`
           : rows
             ? `<div class="verdict ok">Candidates to merge — proposed, never merged. `
-              + `Judge on shared documents, not on the distance.</div>`
-              + `<div class="muted">${r.total_pairs} within ${r.distance} `
-              + `of ${r.entities_compared} entities`
+              + `Judge on shared documents. A “case” pair is the same token bar `
+              + `capitalisation; a “lexical” pair is a likeness with structural backing.</div>`
+              + `<div class="muted">${r.total_pairs} among ${r.entities_compared} entities`
               + (r.total_pairs > r.pairs.length ? `, showing ${r.pairs.length}` : "")
               + `</div>`
               + `<table class="bridges"><tr><th>entity</th><th>entity</th>`
-              + `<th>distance</th><th>overlap</th><th>shared docs</th>`
+              + `<th>kind</th><th>containment</th><th>shared docs</th>`
               + `<th>name</th></tr>${rows}</table>`
-            : `<div class="verdict muted">No entities are close enough to be `
+            : `<div class="verdict muted">No entity names are alike enough to be `
               + `duplicates of each other.</div>`);
     $("#restat").textContent = `duplicates: ${r.total_pairs ?? 0}`;
   }catch(e){ $("#restat").textContent = "duplicate scan failed: " + e.message; }

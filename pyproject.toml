@@ -1,8 +1,23 @@
+# Declared explicitly rather than left to pip's legacy fallback. Without this
+# section pip infers a setuptools build; that works today and is an implicit
+# default nobody chose. Naming it also lets the discovery config below be read
+# as the deliberate thing it is.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "langgraph-agent"
 version = "0.2.0"
 description = "4-Agent AI System: Architect, Planner, Researcher, Builder"
-requires-python = ">=3.10"
+# 3.12, not the 3.10 this claimed. Nothing tested 3.10, and the stack this
+# actually resolves against cannot run there: numpy 2.5.2 and scipy 1.18.1 both
+# require >= 3.12, and networkx 3.6.1 requires >= 3.11. A 3.10 install would
+# have to fall back to an older scientific stack than anyone here runs, which
+# is a configuration that has never been exercised. Declaring support for a
+# version nothing checks is the same kind of claim as a report that says a
+# thing works without having run it.
+requires-python = ">=3.12"
 dependencies = [
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
@@ -27,3 +42,13 @@ dev = [
     "mypy>=1.10",
     "langsmith>=0.1.0",
 ]
+
+# Discovery is pinned to src/ rather than inferred. The repo has
+# `spectral_graph`, `tests` and `scripts` sitting at the root next to `src/`,
+# and setuptools' auto-discovery reads that as an ambiguous multi-package
+# layout. Naming the one place packages live keeps those root directories out
+# of the distribution -- which is what they have always been: `spectral_graph`
+# is imported by project-root scripts, never installed, and `graphrag_server`
+# imports it inside a function for exactly that reason.
+[tool.setuptools.packages.find]
+where = ["src"]

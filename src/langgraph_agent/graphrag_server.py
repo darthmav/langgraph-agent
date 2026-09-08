@@ -12,8 +12,10 @@ Or with stdio transport for MCP:
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -68,16 +70,191 @@ EIGENGAP_DECISIVENESS = 3.0
 # answer is 2), so the ceiling is also where the bad answers live.
 MAX_AUTO_CLUSTERS = 12
 
-# How close two entities' spectral embedding rows must be to be worth offering
-# as a merge candidate. Measured on a corpus seeded with known duplicates: an
-# entity mentioned by exactly the documents another is mentioned by sits at
-# distance 0.0000, one differing by a single document at 0.19, and the nearest
-# unrelated pair at 0.59 against a median of 1.47. 0.25 sits in that gap.
-DUPLICATE_DISTANCE = 0.25
+# How alike two entity names must read before the pair is worth proposing as a
+# merge. Only pairs that are *not* already identical bar their case are held to
+# it: `Builder` / `Builders` scores 0.93, `Entity` / `Entities` 0.92, and the
+# false positive the old synthetic fixture was built around, `Ent11` / `Ent11x`,
+# scores 0.91 -- which is why a lexical pair must clear
+# `DUPLICATE_CONTAINMENT` as well, and that is what excludes it.
+DUPLICATE_NAME_SIMILARITY = 0.85
 
-# Dimensions of the embedding the comparison runs in. Enough to separate
-# structural roles, few enough that the rows stay dense and comparable.
-DUPLICATE_EMBEDDING_DIM = 10
+# How much of the rarer entity's neighbourhood the commoner one must cover
+# before a lexically similar pair is offered. **Containment, not Jaccard**, and
+# the difference is the whole reason the old design found nothing: a real
+# duplicate is *asymmetric*. `Builder` is mentioned by 29 documents and
+# `Builders` by 4, a subset relation that scores containment 1.00 and Jaccard
+# 0.14 -- so Jaccard, and the embedding distance built on the same symmetry
+# assumption, both rank the true duplicate below thousands of unrelated pairs.
+DUPLICATE_CONTAINMENT = 0.5
+
+# Entities are compared only against others sharing this many leading
+# characters, case-folded. On this corpus that is 1,528 comparisons instead of
+# 948,753 -- 620x fewer -- and it costs nothing this method could otherwise
+# find, because a pair that agrees on no prefix cannot clear
+# `DUPLICATE_NAME_SIMILARITY` on names of the length the extractor mints.
+DUPLICATE_BLOCK_PREFIX = 4
+
+# Capitalised tokens that are not entities. `add_document` mints an entity for
+# every capitalised word over four characters, and in a corpus of prose and
+# numpy-style docstrings that rule fires constantly on words whose capital is
+# an artefact of where they sit rather than of what they mean: a sentence
+# opener (`Every`, `Nothing`, `Without`), a docstring section header
+# (`Returns`, `Parameters`, `Raises`), a report heading (`Files`, `Status`), or
+# a Python literal (`False`, `None`). Measured before this list, `False` was
+# the 4th best-connected node in the graph and `Returns` the 6th, above
+# `Fiedler`, `Planner` and `Cheeger`: 21 documents share an edge through
+# `Returns`, which says only that all 21 contain a docstring.
+#
+# **This list does not exist to make `topics()` decisive, and it does not.**
+# That was the first hypothesis and the measurement refused it: removing every
+# one of the 97 entities that bridge this corpus's two topic areas -- the
+# theoretical maximum any such filter could achieve -- moves the eigengap
+# decisiveness from 1.12x to 1.09x. The corpus's spectrum is a smooth
+# continuum because the corpus genuinely has no decisive k, not because
+# boilerplate is gluing it together. What the list is for is the graph itself:
+# an edge through `Returns` is a false claim that two documents are related,
+# and `neighborhood()`, `top_entities` and `duplicate_entities` all read those
+# edges as evidence.
+#
+# Matched case-insensitively against the whole token, never as a prefix. A
+# **stopword list, not a heuristic**, on purpose: the obvious alternative is to
+# drop a token that only ever appears where a capital is forced (line start,
+# after a full stop), and it was built and measured. It removes the same noise
+# and severs real edges doing it -- `Planner` 18 documents down to 15,
+# `Spectral` 19 to 15, `ValueError` 14 to 11 -- because a term introduced in a
+# bulleted list (`- **Planner** -- interprets goals`) never appears anywhere
+# else in that document. Silently dropping a true relation to catch a false one
+# is the wrong trade here, and a list a reader can audit line by line beats a
+# rule whose failures are invisible. Measured on this corpus, this list removes
+# 84 entities and 437 edges and costs **no** meaningful term a single edge.
+ENTITY_STOPWORDS = frozenset(
+    word.lower()
+    for word in """
+    Returns Return Parameters Parameter Example Examples Provides Raises Notes
+    Args Arguments Attributes Yields Warns Usage Summary Description Overview
+
+    Where Which There These Those Their Because Without Within While Since
+    Should Would Could Might Cannot Every Nothing Never Always Something
+    Anything Everything Instead Otherwise Rather Before After During Between
+    Against About Almost Already Still Another Other First Second Third Above
+    Below Under Twice Several Given Using Used Uses Value Values Result
+    Results Input Inputs Output Outputs Simple Basic Total Default Defaults
+
+    Check Checks Create Creates Compute Computes Number Numbers Optional
+    Reading Reads Writes Written Files Status Makes Taken Keeps Change Changed
+    Changes Adding Added Running Choose Chooses Verify Verifies Found Finds
+    Being Doing Ensure Ensures Consider Include Includes Including Following
+    Follows Contains Containing
+
+    False None Import Class Print Assert Except Finally Raise Elif Return
+    """.split()
+)
+
+# The embedder's context window, minus the two special tokens it adds. This is
+# a property of `EMBEDDING_MODEL_NAME` (`max_seq_length` is 256 on
+# all-MiniLM-L6-v2), not a tuning knob: a passage longer than this is not
+# embedded badly, it is **silently truncated and the tail discarded**.
+#
+# That is what this constant exists to stop. A document used to be embedded
+# whole, in one `encode()` call, with `MAX_INDEXABLE_BYTES` allowing 100 KB --
+# so the vector for a 46 KB file was computed from its first ~1,000 characters
+# and nothing else. Measured on this project's own corpus before chunking: 73
+# of 77 documents over the limit, 224,809 tokens present and 19,147 embedded,
+# **91.5% of the corpus unreachable by search**. The embedding of all 46,094
+# characters of CLAUDE.md was bit-identical (cosine 1.000000) to the embedding
+# of its first 1,000. Two failures came out of that, and neither announces
+# itself: retrieval acquired a *length bias*, because a short file is fully
+# represented while a long one is represented by its preamble -- so the file
+# that actually answers the query loses to a shorter one that merely mentions
+# it -- and scores sat low enough that plan-shaped queries fell under the 0.3
+# gate in `nodes.py`, discarding retrieval and sending the run to the
+# Researcher's model, which is the loop this project already knows is fragile.
+CHUNK_MAX_TOKENS = 254
+
+# Tokens carried from the end of one chunk into the start of the next. Chunk
+# boundaries are cut on token counts, not on sentences, so a passage can be
+# split down the middle; the overlap is what keeps such a passage whole in at
+# least one chunk, and it is why boundaries are *not* snapped to line breaks.
+# Snapping would have to either shorten a chunk (dropping tokens the model
+# could have seen) or lengthen it past the window (truncating again, which is
+# the bug), so the cut stays where the arithmetic puts it and the overlap
+# absorbs the cosmetic cost.
+CHUNK_OVERLAP_TOKENS = 48
+
+# Separates a document id from its chunk number: `CLAUDE.md#0003`. The document
+# id is a project-relative path, which cannot contain "#" on any filesystem
+# this runs on, so the split back to a document is unambiguous.
+CHUNK_ID_SEPARATOR = "#"
+
+# How many chunks to pull per requested result before collapsing them onto
+# their documents. A query that matches one document strongly can match several
+# of its chunks, and `search` returns documents, so without oversampling a
+# top_k of 5 could collapse to 1. Four is enough for the shapes measured here
+# without making Chroma do meaningfully more work.
+SEARCH_CHUNK_OVERSAMPLE = 4
+
+# The second and last rung of the ladder in `search`, taken only when the first
+# window of hits collapsed to fewer documents than the caller asked for. A
+# focused query really can match a dozen passages of one large file before it
+# matches anything else, and answering a request for five sources with one is
+# narrower than the behaviour chunking replaced.
+SEARCH_ESCALATION = 8
+
+
+def _chunk_windows(
+    n_tokens: int, max_tokens: int, overlap: int
+) -> list[tuple[int, int]]:
+    """Token index windows `[start, end)` covering `n_tokens`, with overlap.
+
+    Pure arithmetic, kept out of `chunk_text` so the packing can be tested
+    without loading the embedding model -- the thing every other test in this
+    project goes out of its way to avoid.
+
+    Every token lands in at least one window and no window is longer than
+    `max_tokens`, which together are the whole contract: the first is what
+    stops the truncation this exists to fix, and the second is what stops each
+    chunk from being truncated in turn.
+    """
+    if n_tokens <= max_tokens:
+        return [(0, n_tokens)] if n_tokens else []
+
+    # A stride at or below zero would never advance and the loop would not
+    # terminate. Clamped rather than raised on: an overlap wider than the
+    # window is a caller's misconfiguration, and degrading to "no overlap" is
+    # better than refusing to index at all.
+    stride = max(max_tokens - overlap, 1)
+
+    windows: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        end = min(start + max_tokens, n_tokens)
+        windows.append((start, end))
+        if end >= n_tokens:
+            return windows
+        start += stride
+
+
+def _document_id_of(
+    chunk_id: str, metadata: "Mapping[str, Any] | None" = None
+) -> str:
+    """The document a stored row belongs to.
+
+    Prefers the `doc_id` the chunk carries in its metadata and falls back to
+    parsing the id, because both shapes exist in a live store: rows written
+    before chunking are keyed by the bare document path and carry no `doc_id`,
+    and they must keep resolving to themselves rather than being read as
+    strangers and pruned. The suffix is only stripped when it is actually a
+    chunk number, so a path that happens to contain "#" is left alone.
+    """
+    if metadata:
+        doc_id = metadata.get("doc_id")
+        if isinstance(doc_id, str) and doc_id:
+            return doc_id
+
+    head, sep, tail = chunk_id.rpartition(CHUNK_ID_SEPARATOR)
+    if sep and head and tail.isdigit():
+        return head
+    return chunk_id
 
 
 class GraphRAGKnowledgeBase:
@@ -148,24 +325,152 @@ class GraphRAGKnowledgeBase:
         node_link_data = nx.readwrite.json_graph.node_link_data(self.graph)
         json.dump(node_link_data, open(graph_path, "w"))
 
+    def chunk_text(self, content: str) -> list[str]:
+        """Split a document into passages the embedder can actually read whole.
+
+        One tokenizer pass with an offset mapping, then `_chunk_windows` over
+        the token indices; each window's character span runs from the start of
+        its first token to the end of its last, so the text between tokens --
+        whitespace, indentation, blank lines -- is carried rather than dropped.
+        Concatenating the chunks therefore reproduces the document apart from
+        the deliberate overlap, and the join is checked in the tests.
+
+        `verbose=False` suppresses the tokenizer's own "sequence longer than
+        the maximum" warning. It is silenced only because this function is the
+        thing that answers it: the sequence *is* longer than the window, that
+        is why it is being cut up, and the warning would otherwise fire once
+        per document on every reindex.
+        """
+        if not content:
+            return []
+
+        tokenizer = self.embedder.tokenizer
+        encoded = tokenizer(
+            content,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+            truncation=False,
+            verbose=False,
+        )
+        offsets = encoded["offset_mapping"]
+        if not offsets:
+            # Content the tokenizer maps to nothing -- whitespace, or a run of
+            # characters with no token of their own. There is no passage to
+            # embed, and returning the raw text would put a vector of noise in
+            # the store under the document's name.
+            return []
+
+        chunks = [
+            content[offsets[start][0] : offsets[end - 1][1]]
+            for start, end in _chunk_windows(
+                len(offsets), CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS
+            )
+        ]
+        return self._fit_chunks(chunks)
+
+    def _fit_chunks(self, chunks: list[str]) -> list[str]:
+        """Trim any chunk that re-tokenizes past the window, and say which end.
+
+        Slicing on the parent document's token boundaries does **not**
+        guarantee the slice re-tokenizes to the same length. A word-piece
+        tokenizer decides on context, so a fragment cut mid-word encodes
+        differently standalone than it did inside the document -- measured on
+        this corpus, 16 of 1,052 full-size chunks came back one token longer,
+        which put them at 257 against a 256 window and handed them straight
+        back to the truncation this whole change exists to remove.
+
+        Measuring the drift and padding the constant would be guessing with an
+        extra step: +1 is what this corpus does today, not a bound anybody can
+        prove for the next document. So the chunks are re-encoded and the
+        overflow is cut, which makes the window a fact rather than an estimate.
+        Only the overflowing chunks are touched, and the batched encode of the
+        rest is a few tens of milliseconds per reindex.
+
+        **Which end is trimmed is the part that matters.** A chunk's tail is
+        covered by the next chunk's overlap and its head by the previous one's,
+        so trimming into a neighbour's overlap loses nothing from the corpus --
+        except at the two ends of the document, which have no neighbour. The
+        last chunk is therefore trimmed at the *head* and every other at the
+        tail; trimming the last one's tail would drop the final tokens of the
+        file, silently, which is the original bug in miniature.
+        """
+        if len(chunks) < 2:
+            # A lone chunk is the whole document, un-sliced, so it re-tokenizes
+            # to exactly what it was measured as and cannot overflow.
+            return chunks
+
+        encoded = self.embedder.tokenizer(
+            chunks,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+            truncation=False,
+            verbose=False,
+        )
+
+        fitted: list[str] = []
+        for i, (chunk, offsets) in enumerate(zip(chunks, encoded["offset_mapping"], strict=True)):
+            if len(offsets) <= CHUNK_MAX_TOKENS:
+                fitted.append(chunk)
+            elif i == len(chunks) - 1:
+                fitted.append(chunk[offsets[-CHUNK_MAX_TOKENS][0] :])
+            else:
+                fitted.append(chunk[: offsets[CHUNK_MAX_TOKENS - 1][1]])
+        return fitted
+
     def add_document(self, doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         """Add a document to the knowledge base.
+
+        The document is embedded as several chunks and stored as several rows,
+        keyed `doc_id#0000`, `doc_id#0001`, ... -- see `CHUNK_MAX_TOKENS` for
+        what embedding it as one row cost. The graph is unaffected: it still
+        gets exactly one node per document, with entities drawn from the whole
+        text, so chunking changes what search can find and not what the corpus
+        is shaped like.
 
         Args:
             doc_id: Unique document identifier
             content: Document text content
             metadata: Optional metadata (path, type, etc.)
         """
-        # Generate embedding
-        embedding = self.embedder.encode(content).tolist()
+        chunks = self.chunk_text(content)
 
-        # Add to vector store
-        self.collection.upsert(
-            ids=[doc_id],
-            embeddings=[embedding],
-            documents=[content],
-            metadatas=[metadata or {}]
-        )
+        # A document's previous chunks are deleted before the new ones land,
+        # rather than left to be overwritten by `upsert`. A file that shrank
+        # between reindexes -- 10 chunks down to 3 -- overwrites 0..2 and
+        # leaves 3..9 in the store, still matching queries with text the file
+        # no longer contains. That is the same "a reindex rebuilds rather than
+        # accumulates" rule `index_project_files` follows for whole documents,
+        # applied one level down.
+        #
+        # Keyed on the `doc_id` metadata, so it also sweeps up the single
+        # unsuffixed row a pre-chunking store holds for this document.
+        try:
+            self.collection.delete(where={"doc_id": doc_id})
+        except Exception:
+            # A collection that cannot filter by metadata (an older store, or
+            # the fakes the corpus tests build) still gets a correct insert
+            # below; what is lost is the sweep of rows this call is replacing.
+            pass
+        self.collection.delete(ids=[doc_id])
+
+        if chunks:
+            base = dict(metadata or {})
+            # Chunks are embedded in one batched call rather than one per
+            # chunk: the model is the expensive thing on this machine and
+            # batching is most of what makes a reindex of ~1,100 chunks
+            # finish in the time a reindex of 77 documents used to take.
+            embeddings = self.embedder.encode(chunks).tolist()
+            self.collection.upsert(
+                ids=[
+                    f"{doc_id}{CHUNK_ID_SEPARATOR}{i:04d}" for i in range(len(chunks))
+                ],
+                embeddings=embeddings,
+                documents=chunks,
+                metadatas=[
+                    {**base, "doc_id": doc_id, "chunk_index": i, "chunk_count": len(chunks)}
+                    for i in range(len(chunks))
+                ],
+            )
 
         # Add to graph as a node.
         # `type` on a node is structural -- document vs entity -- and drives how
@@ -187,10 +492,23 @@ class GraphRAGKnowledgeBase:
         # The strip set has to cover code punctuation as well as prose: over a
         # corpus that is mostly source files, a prose-only `.,!?;:` leaves
         # entities like `Builder")` standing as graph nodes.
+        #
+        # `ENTITY_STOPWORDS` is what stops the capital rule firing on words
+        # whose capital comes from where they sit rather than what they mean --
+        # a sentence opener, a docstring heading, a Python literal. Without it
+        # `False` and `Returns` are the 4th and 6th best-connected nodes in
+        # this corpus's graph, ahead of `Fiedler` and `Cheeger`, and every
+        # document carrying a docstring is joined to every other one through a
+        # relation that means nothing.
         entities = []
         for word in content.split():
             token = word.strip("\"'`()[]{}<>.,!?;:*=+-/\\|")
-            if len(token) > 4 and token[0].isupper() and token.replace("_", "").isalnum():
+            if (
+                len(token) > 4
+                and token[0].isupper()
+                and token.replace("_", "").isalnum()
+                and token.lower() not in ENTITY_STOPWORDS
+            ):
                 entities.append(token)
 
         # Add entities and relationships
@@ -203,40 +521,99 @@ class GraphRAGKnowledgeBase:
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Search the knowledge base.
 
+        Matches on chunks and answers in documents. `id` stays the document's
+        path -- the thing callers index the graph with, print as a filename and
+        derive an entity from -- while `content` becomes the passage that
+        actually matched rather than the document's first 200 characters. That
+        is the half of chunking the Researcher feels: it forwards
+        `content[:300]` to the Builder, which used to be 300 characters of
+        whichever file's *header* scored best.
+
+        Chunks are oversampled and then collapsed onto their documents, keeping
+        each document's best-scoring chunk. Collapsing is what makes `top_k`
+        mean what every caller already assumed it meant: without it a query
+        that matches six passages of one file would return that file six times
+        and crowd out five other sources, which is worse than the pre-chunking
+        behaviour rather than better.
+
         Args:
             query: Search query
-            top_k: Number of results to return
+            top_k: Number of documents to return
 
         Returns:
             List of results with content, metadata, and graph context
         """
+        if top_k <= 0:
+            return []
+
         # Generate query embedding
         query_embedding = self.embedder.encode(query).tolist()
 
-        # Search vector store
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"]
-        )
+        # Widen once if one document monopolised the first window of hits.
+        # A focused query genuinely can match a dozen passages of the same
+        # large file before it matches anything else, and collapsing those
+        # onto one document would answer a request for five sources with one
+        # -- narrower than the behaviour chunking replaced. The ladder is two
+        # rungs and stops early: there is no point asking a third time, and an
+        # unbounded search for breadth would let one query walk the corpus.
+        results: list[dict[str, Any]] = []
+        wanted = top_k * SEARCH_CHUNK_OVERSAMPLE
+        for n_results in (wanted, wanted * SEARCH_ESCALATION):
+            raw = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"]
+            )
+            results = self._collapse_chunk_hits(raw, top_k)
+            hits = len((raw.get("ids") or [[]])[0] or [])
+            if len(results) >= top_k or hits < n_results:
+                # Either the caller has what it asked for, or the collection
+                # returned fewer chunks than requested and has no more to give.
+                break
 
-        ids = results.get("ids") or [[]]
-        documents = results.get("documents") or [[]]
-        metadatas = results.get("metadatas") or [[]]
-        distances = results.get("distances") or [[]]
+        return results
+
+    def _collapse_chunk_hits(
+        self, raw: "Mapping[str, Any]", top_k: int
+    ) -> list[dict[str, Any]]:
+        """Fold chunk hits onto the documents they came from, best chunk first.
+
+        Chroma returns hits best-first, so the first chunk seen for a document
+        is its best one and every later chunk of it only adds to the count.
+        """
+        ids = raw.get("ids") or [[]]
+        documents = raw.get("documents") or [[]]
+        metadatas = raw.get("metadatas") or [[]]
+        distances = raw.get("distances") or [[]]
 
         # Guard against empty collections / no hits
         if not ids or not ids[0]:
             return []
 
-        # Enrich with graph context
-        enriched_results = []
-        for i, doc_id in enumerate(ids[0]):
-            result = {
+        collapsed: list[dict[str, Any]] = []
+        by_document: dict[str, dict[str, Any]] = {}
+
+        for i, chunk_id in enumerate(ids[0]):
+            metadata = metadatas[0][i] if metadatas[0] else {}
+            doc_id = _document_id_of(chunk_id, metadata)
+
+            if doc_id in by_document:
+                by_document[doc_id]["chunks_matched"] += 1
+                continue
+
+            if len(collapsed) == top_k:
+                # Full. Keep draining the hits already paid for so
+                # `chunks_matched` counts every match, but admit no new
+                # documents.
+                continue
+
+            result: dict[str, Any] = {
                 "id": doc_id,
+                "chunk_id": chunk_id,
                 "content": documents[0][i] if documents[0] else "",
-                "metadata": metadatas[0][i] if metadatas[0] else {},
+                "metadata": metadata,
                 "score": 1 - distances[0][i] if distances[0] else 0.0,
+                "chunks_matched": 1,
             }
 
             # Add graph neighbors
@@ -244,9 +621,10 @@ class GraphRAGKnowledgeBase:
                 neighbors = list(self.graph.neighbors(doc_id))[:5]
                 result["related_entities"] = neighbors
 
-            enriched_results.append(result)
+            by_document[doc_id] = result
+            collapsed.append(result)
 
-        return enriched_results
+        return collapsed
 
     def query_graph(self, entity: str, hops: int = 2) -> dict[str, Any]:
         """Query the knowledge graph for entity relationships.
@@ -673,129 +1051,179 @@ class GraphRAGKnowledgeBase:
         }
 
     def duplicate_entities(
-        self, limit: int = 20, distance: float | None = None
+        self,
+        limit: int = 20,
+        name_similarity: float | None = None,
+        containment: float | None = None,
     ) -> dict[str, Any]:
-        """Entities that play the same structural role, as merge candidates.
+        """Entities that are two spellings of one name, as merge candidates.
 
-        The A5 application from `reports/spectral_applicability.md`.
-        `add_document` mints an entity for every capitalised token, so
-        "Builder" and "Builders" become two nodes with the same meaning and
-        nearly the same neighbours. Two entities close together in the spectral
-        embedding are mentioned by nearly the same documents, which is what
-        makes them candidates to merge.
+        `add_document` mints an entity per capitalised token, so the same thing
+        arrives under several names: `Builder` and `BUILDER` from a heading,
+        `Entity` and `Entities` from a plural, `Builder` and `Builders`. This
+        proposes those pairs and reports the structural evidence for each. It
+        never merges -- which entities mean the same thing is a decision about
+        meaning that the graph cannot make.
 
-        **The report's caveat about cospectral twins points the wrong way, and
-        the measurement says so.** It notes that two nodes with identical
-        neighbourhoods are indistinguishable to any spectral method -- the
-        `C^2` / Weisfeiler-Lehman limit -- and concludes this therefore finds
-        near-duplicates but not exact ones. That conflates two different
-        questions. You cannot tell an exact twin *apart from* its twin, which
-        is true and irrelevant here; what you can do is *find the pair*, and an
-        exact twin is the easiest possible case, sitting at distance exactly
-        0.0000 and ranking first. Measured: an exact structural twin 0.0000, a
-        twin differing by one document 0.19, the nearest unrelated pair 0.59,
-        median 1.47. Nothing about the limit obstructs this use.
+        **This used to rank candidates by distance in a spectral embedding, and
+        the measurement retired that outright.** On this project's own corpus
+        it produced 33,060 candidates of which **67% sat at distance exactly
+        0.0000 with a neighbourhood overlap of 1.00** -- the docstring's own
+        "strongest merge evidence there is" -- and the top of the list read
+        `['LEGAL', 'Virginia']`, `['Canada', 'Professional']`,
+        `['Consequences', 'PIPEDA']`. Those are pendant collisions: two
+        entities each mentioned by exactly one document, the same one, are
+        structurally identical by construction, and 60% of this corpus's
+        entities have degree 1. Meanwhile the true duplicates -- `Builder` /
+        `Builders`, `Entity` / `Entities`, and all thirty case variants --
+        were **not candidates at any rank**. Graded against ground truth the
+        spectral ranking scored 0% precision and 0% recall; so did Jaccard, and
+        so did containment used as a ranker. Name similarity scored 100%
+        precision on its top 20.
 
-        **Structure beats names at this, and names actively mislead.** The
-        obvious alternative is string similarity on the entity names. On a
-        corpus seeded with three known cases it ranked its own false positive
-        first -- two similarly-named entities with different neighbourhoods --
-        put the same-name duplicate at rank 33, and the differently-named one
-        ("LanguageModel" for an entity already called something else) at rank
-        503. The spectral ranking put the two real duplicates at ranks 0 and 1.
-        `name_similarity` is still reported per pair, because a pair that is
-        close *both* ways is nearly certain, but it is reported and never
-        filtered on.
+        Two things went wrong and only one of them is the pendants.
 
-        The evidence a human merges on is `shared_documents`, not the distance:
-        two entities mentioned by exactly the same six documents is a fact
-        anyone can check, while an embedding distance has to be trusted. The
-        distance finds the pair; the shared-document count justifies it.
+        *A real duplicate is asymmetric.* `Builder` is mentioned by 29
+        documents and `Builders` by 4. That is a subset, not a match, and both
+        the embedding distance and the Jaccard overlap are built on symmetry --
+        they score the pair 0.14 and rank it below thousands of unrelated ones.
+        Containment (`shared / min(degree)`) reads 1.00 on the same pair, and
+        is what the evidence here is measured with.
 
-        Pairs come from a KD-tree rather than an all-pairs scan -- 17x faster
-        on 1036 entities and, more to the point, allocating nothing quadratic,
-        so a corpus that grows does not start building a distance matrix in
-        memory.
+        *And structure cannot generate candidates on a real corpus at all.*
+        Tightening it does not help: at Jaccard 1.00 with at least three shared
+        documents, the survivors on this corpus are `Oppenheim` / `Schafer`
+        (two authors cited in the same three papers), `Nyquist` / `Frequency`,
+        and `BUILDER_DEADLINE_SECONDS` / `NODE_DEADLINE_SECONDS`. Every one is
+        co-occurrence, not duplication. The synthetic corpus that once
+        justified the structural signal assigned entities to documents **at
+        random**, which makes an identical neighbourhood astronomically
+        improbable and therefore strong evidence. Real corpora are the opposite:
+        entities belonging to one topic are mentioned in the same documents --
+        that is what a topic *is* -- so identical neighbourhoods are ordinary
+        and mean "discussed together". The property the structural test depended
+        on is precisely the property a real corpus does not have.
+
+        So names generate the candidates and structure is the evidence, which
+        inverts the old docstring's "structure beats names here and names
+        actively mislead". That claim was true of the fixture and false of the
+        corpus.
+
+        **What this gives up, explicitly: two names for one thing that share no
+        characters.** `LanguageModel` for an entity already called something
+        else is not found and cannot be, and nothing here should be read as
+        looking for it. That case is not merely unimplemented -- it was
+        measured, and on real data every method that reaches for it returns
+        collocations instead. Anyone reinstating a structural generator should
+        re-run that measurement first.
+
+        Pairs come in two kinds, and the difference is how much they need to
+        prove. `case` -- the two names are the same token bar capitalisation --
+        is certain on the name alone and carries no structural requirement,
+        which matters because these are the most asymmetric pairs in the corpus
+        (`BUILDER` appears in one document, `Builder` in 29) and any evidence
+        floor would drop every one of them. `lexical` is a likeness rather than
+        a certainty, so it must also clear `DUPLICATE_CONTAINMENT`; that is
+        what separates `Builder` / `Builders` from two merely similar names for
+        different things.
         """
         undirected = self.graph.to_undirected(as_view=True)
         if undirected.number_of_nodes() == 0:
             return {"verdict": "no_graph", "note": "The graph is empty.", "pairs": []}
 
-        largest = max(nx.connected_components(undirected), key=len)
-        component = undirected.subgraph(largest)
-        n = component.number_of_nodes()
-        radius = DUPLICATE_DISTANCE if distance is None else float(distance)
-
         entities = [
-            node for node in component
-            if self.graph.nodes[node].get("type") == "entity"
+            node for node, attrs in self.graph.nodes(data=True)
+            if attrs.get("type") == "entity"
         ]
-        if n < DUPLICATE_EMBEDDING_DIM + 2 or len(entities) < 2:
+        if len(entities) < 2:
             return {
                 "verdict": "no_graph",
-                "note": "Too few connected entities to compare.",
+                "note": "Too few entities to compare.",
                 "pairs": [],
             }
 
-        try:
-            import numpy as np
-            from scipy.spatial import cKDTree
+        min_name = (
+            DUPLICATE_NAME_SIMILARITY if name_similarity is None else float(name_similarity)
+        )
+        min_containment = (
+            DUPLICATE_CONTAINMENT if containment is None else float(containment)
+        )
 
-            from spectral_graph import spectral_embedding
-
-            embedding = spectral_embedding(
-                component, dim=DUPLICATE_EMBEDDING_DIM, normalized=True, use_fiedler=True
-            )
-            # Row-normalized, as in Ng-Jordan-Weiss: what matters is the
-            # direction of a node's embedding row, not how far out it sits.
-            # Without this, two entities with the same role but different
-            # degrees are pushed apart by magnitude alone.
-            rows = embedding / np.maximum(
-                np.linalg.norm(embedding, axis=1, keepdims=True), 1e-12
-            )
-        except ImportError:
-            return {"verdict": "unavailable",
-                    "note": "spectral_graph is not on sys.path.", "pairs": []}
-        except Exception as exc:  # pragma: no cover - solver-dependent
-            return {"verdict": "unavailable",
-                    "note": f"{type(exc).__name__}: {exc}", "pairs": []}
-
-        order = {node: i for i, node in enumerate(component.nodes())}
-        points = rows[[order[entity] for entity in entities]]
-        close = cKDTree(points).query_pairs(r=radius)
-
-        pairs = []
-        for left, right in close:
-            a, b = entities[left], entities[right]
-            neighbours_a = set(component.neighbors(a))
-            neighbours_b = set(component.neighbors(b))
-            shared = neighbours_a & neighbours_b
-            pairs.append(
-                {
-                    "entities": sorted([str(a), str(b)]),
-                    "distance": float(np.linalg.norm(points[left] - points[right])),
-                    "shared_documents": len(shared),
-                    "degrees": [component.degree(a), component.degree(b)],
-                    # Jaccard on the neighbourhoods: 1.0 means the two are
-                    # mentioned by exactly the same documents, which is the
-                    # strongest merge evidence there is and is checkable
-                    # without trusting the embedding at all.
-                    "neighbourhood_overlap": (
-                        len(shared) / len(neighbours_a | neighbours_b)
-                        if (neighbours_a | neighbours_b) else 0.0
-                    ),
-                    "name_similarity": SequenceMatcher(None, str(a), str(b)).ratio(),
-                }
+        # Blocked by a case-folded prefix so this stays linear in practice. An
+        # all-pairs scan is 948,753 comparisons on this corpus against 1,528
+        # here, and allocates nothing quadratic as the corpus grows.
+        blocks: dict[str, list[str]] = {}
+        for entity in entities:
+            blocks.setdefault(str(entity).lower()[:DUPLICATE_BLOCK_PREFIX], []).append(
+                str(entity)
             )
 
-        pairs.sort(key=lambda pair: (pair["distance"], pair["entities"]))
+        neighbours = {
+            entity: set(undirected.neighbors(entity)) for entity in entities
+        }
+
+        pairs: list[dict[str, Any]] = []
+        comparisons = 0
+        for block in blocks.values():
+            for left, right in combinations(sorted(block), 2):
+                comparisons += 1
+                same_token = left.lower() == right.lower()
+                similarity = (
+                    1.0 if same_token
+                    else SequenceMatcher(None, left.lower(), right.lower()).ratio()
+                )
+                if similarity < min_name:
+                    continue
+
+                here, there = neighbours[left], neighbours[right]
+                if not here or not there:
+                    continue
+                shared = here & there
+                overlap = len(shared) / min(len(here), len(there))
+
+                # A case variant is the same token and needs no corroboration;
+                # a mere likeness does. Holding both to the same floor would
+                # drop every case variant in this corpus, since the shouted
+                # form is typically a single heading in a single document.
+                if not same_token and overlap < min_containment:
+                    continue
+
+                pairs.append(
+                    {
+                        "entities": sorted([left, right]),
+                        "kind": "case" if same_token else "lexical",
+                        "name_similarity": similarity,
+                        "shared_documents": len(shared),
+                        "containment": overlap,
+                        # Jaccard, kept beside containment rather than instead
+                        # of it: it is the number that reads low on a real
+                        # duplicate, and seeing the two disagree is what shows
+                        # the asymmetry rather than hiding it.
+                        "neighbourhood_overlap": (
+                            len(shared) / len(here | there) if (here | there) else 0.0
+                        ),
+                        "degrees": [len(here), len(there)],
+                    }
+                )
+
+        # Certain before likely, then by how alike the names read, then by how
+        # much evidence stands behind the pair.
+        pairs.sort(
+            key=lambda pair: (
+                pair["kind"] != "case",
+                -pair["name_similarity"],
+                -pair["shared_documents"],
+                pair["entities"],
+            )
+        )
         return {
             "verdict": "scanned",
             "pairs": pairs[:limit],
             "total_pairs": len(pairs),
             "entities_compared": len(entities),
-            "distance": radius,
-            "embedding_dim": DUPLICATE_EMBEDDING_DIM,
+            "comparisons": comparisons,
+            "name_similarity": min_name,
+            "containment": min_containment,
         }
 
     def bottleneck(self, limit: int = 12) -> dict[str, Any]:
@@ -1135,11 +1563,18 @@ class GraphRAGKnowledgeBase:
             metadatas = stored.get("metadatas") or []
             chunks = [
                 {
-                    "id": doc_id,
+                    "id": chunk_id,
+                    # The document this passage came from, lifted out of the
+                    # metadata so the export stands on its own: a row's id is
+                    # `path#0007`, and a reader should not have to know how to
+                    # parse that to group the file back together.
+                    "doc_id": _document_id_of(
+                        chunk_id, metadatas[i] if i < len(metadatas) else None
+                    ),
                     "content": documents[i] if i < len(documents) else "",
                     "metadata": metadatas[i] if i < len(metadatas) else {},
                 }
-                for i, doc_id in enumerate(ids)
+                for i, chunk_id in enumerate(ids)
             ]
         except Exception as exc:
             # Same posture as `stats()`: a Chroma failure must not cost us the
@@ -1209,9 +1644,26 @@ def index_project_files(
     # qualifies -- renamed, deleted, or newly excluded -- has to leave the
     # corpus, or it keeps answering searches and keeps its graph node long
     # after it stops existing.
+    #
+    # Stored rows are chunks, so staleness is a question about the *document*
+    # a row belongs to, not about the row's own id: `CLAUDE.md#0007` is not in
+    # `wanted` and never will be. Comparing ids directly would delete the
+    # entire corpus on every reindex and rebuild it from scratch -- which
+    # ends in the same place here, but would quietly become a full re-embed of
+    # every document the moment anything reindexed a subset.
     try:
-        existing = kb.collection.get(include=[]).get("ids", [])
-        stale = [doc_id for doc_id in existing if doc_id not in wanted]
+        existing = kb.collection.get(include=["metadatas"])
+        existing_ids = existing.get("ids") or []
+        existing_metadatas = existing.get("metadatas") or []
+        stale = [
+            chunk_id
+            for i, chunk_id in enumerate(existing_ids)
+            if _document_id_of(
+                chunk_id,
+                existing_metadatas[i] if i < len(existing_metadatas) else None,
+            )
+            not in wanted
+        ]
         if stale:
             kb.collection.delete(ids=stale)
     except Exception as exc:  # pragma: no cover - Chroma unavailable

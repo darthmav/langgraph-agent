@@ -932,15 +932,17 @@ def _corpus_with_known_duplicates() -> nx.DiGraph:
     G.add_node("Ent11x", type="entity")
     for d in rng.choice(docs, size=6, replace=False):
         G.add_edge(str(d), "Ent11x", relation="mentions")
+    # (D) the same token, shouted -- a heading in one document against an entity
+    # mentioned across many. This is the commonest real duplicate in this
+    # project's own corpus (thirty of them) and the most asymmetric: `BUILDER`
+    # appears in one document and `Builder` in twenty-nine.
+    G.add_node("ENT5", type="entity")
+    G.add_edge(mentions["Ent5"][0], "ENT5", relation="mentions")
     return G
 
 
-def test_duplicate_entities_finds_exact_structural_twins_first(kb):
-    """The report's cospectral caveat points the wrong way, and this pins it.
-
-    You cannot tell an exact twin *apart from* its twin. You can find the pair,
-    and it is the easiest case there is: distance exactly 0.
-    """
+def test_duplicate_entities_finds_a_plural_against_its_singular(kb):
+    """`Ent3` / `Ent3s` -- the same name and the same documents."""
     kb.graph = _corpus_with_known_duplicates()
 
     result = kb.duplicate_entities()
@@ -948,27 +950,69 @@ def test_duplicate_entities_finds_exact_structural_twins_first(kb):
     assert result["verdict"] == "scanned"
     found = {frozenset(pair["entities"]) for pair in result["pairs"]}
     assert frozenset({"Ent3", "Ent3s"}) in found
-    for pair in result["pairs"]:
-        assert pair["distance"] < 1e-6
-        assert pair["neighbourhood_overlap"] == pytest.approx(1.0)
 
 
-def test_duplicate_entities_finds_the_pair_no_name_comparison_could(kb):
-    """"LanguageModel" and "Ent7" share every document and no characters.
+def test_a_case_variant_is_proposed_however_lopsided_it_is(kb):
+    """`ENT5` is one heading in one document; `Ent5` is mentioned across many.
 
-    This is the case that justifies the structural signal over string
-    similarity, which ranked this pair 503rd.
+    The commonest real duplicate in this project's corpus is exactly this
+    shape -- thirty of them, `BUILDER` against `Builder` -- and it is the one
+    the old ranking could never reach, because a pair sharing one document out
+    of twenty-nine is nowhere near any symmetric measure of closeness. A case
+    variant is the same token, so it is certain on the name alone and is held
+    to no structural floor; any evidence threshold would drop every one.
     """
     kb.graph = _corpus_with_known_duplicates()
 
     result = kb.duplicate_entities()
 
-    pair = next(
-        p for p in result["pairs"] if set(p["entities"]) == {"Ent7", "LanguageModel"}
+    pair = next(p for p in result["pairs"] if set(p["entities"]) == {"ENT5", "Ent5"})
+    assert pair["kind"] == "case"
+    assert pair["name_similarity"] == 1.0
+    assert min(pair["degrees"]) == 1, "the shouted form appears once"
+    # Certain pairs are offered before merely likely ones.
+    assert result["pairs"][0]["kind"] == "case"
+
+
+def test_two_names_for_one_thing_sharing_no_characters_are_not_found(kb):
+    """A capability given up on purpose, pinned so it is not re-added by accident.
+
+    `LanguageModel` shares every document with `Ent7` and no characters, and
+    the old design found it -- on this fixture, whose entities are assigned to
+    documents **at random**, which makes an identical neighbourhood
+    astronomically improbable and therefore real evidence. A corpus is not
+    random: entities of one topic are mentioned in the same documents, which is
+    what a topic is. Measured on this project's own corpus, structure tightened
+    as far as it goes -- Jaccard 1.00 with at least three shared documents --
+    returns `Oppenheim` / `Schafer`, `Nyquist` / `Frequency` and
+    `BUILDER_DEADLINE_SECONDS` / `NODE_DEADLINE_SECONDS`. All collocations, no
+    duplicates, 0% precision. So this pair is not found, and a structural
+    generator should not be reinstated without re-running that measurement.
+    """
+    kb.graph = _corpus_with_known_duplicates()
+
+    result = kb.duplicate_entities()
+
+    assert not any(
+        set(p["entities"]) == {"Ent7", "LanguageModel"} for p in result["pairs"]
     )
-    assert pair["neighbourhood_overlap"] == pytest.approx(1.0)
-    # Reported, never filtered on: by name alone these look unrelated.
-    assert pair["name_similarity"] < 0.3
+
+
+def test_containment_is_reported_and_jaccard_disagrees_with_it(kb):
+    """The asymmetry is the finding, so both numbers are carried.
+
+    A real duplicate is a subset, not a match: on the live corpus `Builder`
+    has 29 documents to `Builders`' 4, which reads containment 1.00 and
+    Jaccard 0.14. Ranking on the symmetric number is what buried every true
+    duplicate under thousands of unrelated pairs.
+    """
+    kb.graph = _corpus_with_known_duplicates()
+
+    result = kb.duplicate_entities()
+
+    pair = next(p for p in result["pairs"] if set(p["entities"]) == {"ENT5", "Ent5"})
+    assert pair["containment"] == pytest.approx(1.0)
+    assert pair["neighbourhood_overlap"] < 0.2, "Jaccard punishes the asymmetry"
 
 
 def test_duplicate_entities_excludes_the_string_similarity_false_positive(kb):
@@ -1013,9 +1057,12 @@ def test_rpc_surface_for_the_split_and_the_duplicate_scan(kb, monkeypatch):
 
     json.dumps(serve.rpc_duplicate_entities({}))
     assert len(serve.rpc_duplicate_entities({"limit": 1})["pairs"]) == 1
-    # A blank distance means "use the default", not "distance 0".
-    assert serve.rpc_duplicate_entities({"distance": ""})["distance"] > 0
-    assert serve.rpc_duplicate_entities({"distance": 0.7})["distance"] == 0.7
+    # A blank threshold means "use the default", not "threshold 0".
+    assert serve.rpc_duplicate_entities({"name_similarity": ""})["name_similarity"] > 0
+    assert serve.rpc_duplicate_entities({"containment": ""})["containment"] > 0
+    assert serve.rpc_duplicate_entities(
+        {"name_similarity": 0.7})["name_similarity"] == 0.7
+    assert serve.rpc_duplicate_entities({"containment": 0.9})["containment"] == 0.9
 
     kb.graph = _topic_corpus(topics=2, docs=30)
     assert "split" not in serve.rpc_query_graph({"node_id": "BRIDGE0"})
