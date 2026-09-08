@@ -838,8 +838,16 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
         )
         results = search_response.get("results", [])
 
+        # Imported here rather than at module scope for the reason
+        # `mcp_client` does the same: `graphrag_server` pulls in chromadb, and
+        # the tool call above has already paid for that by the time we rule on
+        # what it returned. The floor is a property of the embedding model, so
+        # it is read from where the model is named -- see
+        # RETRIEVAL_RELEVANCE_FLOOR for the measurement behind the number.
+        from langgraph_agent.graphrag_server import RETRIEVAL_RELEVANCE_FLOOR
+
         # Check if we got real results
-        if results and len(results) > 0 and results[0].get("score", 0) > 0.3:
+        if results and results[0].get("score", 0) > RETRIEVAL_RELEVANCE_FLOOR:
             graphrag_results = {"results": results, "source": "local_graphrag"}
 
             # Try to get graph info too via the MCP query tool

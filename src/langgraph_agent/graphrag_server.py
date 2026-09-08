@@ -23,6 +23,12 @@ import chromadb
 import networkx as nx
 from mcp.server import MCPServer
 
+from langgraph_agent.lexical import (
+    BM25Index,
+    lexical_order,
+    reciprocal_rank_fusion,
+)
+
 # Force CPU for sentence-transformers (GPU 1060 3GB not compatible). Set at
 # import rather than beside the model load below, because it has to be in the
 # environment before torch is imported, and that import is now deferred.
@@ -36,6 +42,37 @@ if TYPE_CHECKING:  # pragma: no cover - import cost is the whole point
 # that reports it without loading it, and the export that records which model
 # produced the corpus it is dumping.
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# The score at or below which retrieval is treated as having answered nothing,
+# and the run falls through to the Researcher's model. It is a property of
+# EMBEDDING_MODEL_NAME and meaningless apart from it -- a cosine similarity has
+# no absolute meaning across models -- so it lives here rather than beside the
+# comparison in `nodes.py`, where a model swap would leave it behind and
+# silently redefine "relevant".
+#
+# It was 0.3, and 0.3 is inside the off-corpus population rather than below it.
+# Measured through `search` on this corpus, twelve questions it answers against
+# twelve it cannot:
+#
+#     on-corpus    min 0.442   median 0.564   max 0.685
+#     off-corpus   min 0.144   median 0.208   max 0.306
+#
+# Those separate with an empty band from 0.306 to 0.442, and 0.3 sat at the top
+# of the wrong one. The single question that crossed it is this project's own
+# off-corpus probe -- the `offcorpus` exercise in `scripts/diagnose_seats.py`,
+# on PostgreSQL vacuum -- which scored 0.306 and was therefore formatted
+# straight into the findings as though the corpus had answered it. That
+# exercise exists because it is the only team run where the Researcher's model
+# is the variable, and the gate was quietly denying it that.
+#
+# 0.37 is the midpoint of the empty band, picked the way EIGENGAP_DECISIVENESS
+# was: a value in open space rather than on an observed boundary. The band is
+# narrower than it first measured, and deliberately re-centred since -- the
+# hybrid re-rank in `search` promotes the chunk the *lexical* half also likes,
+# which is often a better answer carrying a slightly lower cosine, so the
+# on-corpus minimum fell from 0.492 to 0.442 as retrieval improved. A floor
+# calibrated against dense-only ordering describes code that no longer runs.
+RETRIEVAL_RELEVANCE_FLOOR = 0.37
 
 # What every caller says when asked to search a corpus nobody has built. One
 # string because three doors report it -- the MCP tools, the Builder's tool
@@ -280,6 +317,12 @@ class GraphRAGKnowledgeBase:
     # `__init__`.
     _connectivity_cache: "tuple[tuple[int, int], dict[str, Any]] | None" = None
 
+    # The lexical half of search, built on first use from what the store holds
+    # and dropped whenever the store changes. Declared on the class for the
+    # same reason as the two above: an instance assembled field by field
+    # around a fake collection still reads as "not built yet".
+    _lexical_index: "BM25Index | None" = None
+
     def __init__(self, persist_dir: str = "./knowledge"):
         self.persist_dir = Path(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
@@ -516,6 +559,12 @@ class GraphRAGKnowledgeBase:
             self.graph.add_node(entity, type="entity")
             self.graph.add_edge(doc_id, entity, relation="mentions")
 
+        # The lexical index describes a corpus that no longer exists. Dropped
+        # rather than amended: the next search rebuilds it from the store in
+        # milliseconds, and an index maintained in parallel with Chroma is a
+        # second account of the same corpus, free to disagree with it.
+        self._lexical_index = None
+
         self._save_graph()
 
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
@@ -535,6 +584,25 @@ class GraphRAGKnowledgeBase:
         that matches six passages of one file would return that file six times
         and crowd out five other sources, which is worse than the pre-chunking
         behaviour rather than better.
+
+        The retrieval is **hybrid**: the dense window is re-ranked against BM25
+        before it is collapsed. Dense similarity is a poor instrument for "this
+        passage contains this exact rare identifier", which is what a plan
+        naming `BUILDER_DEADLINE_SECONDS` is really asking. Measured through
+        this method against the real store, on 541 identifiers each defined in
+        exactly one project file, the defining file came first 53.4% of the
+        time on dense alone and 65.1% with the re-rank (McNemar p < 0.001, 85
+        fixed against 22 broken). The prose case improved too -- 66.0% to 68.2%
+        on 400 held-out passages -- so this is not a code-search special case
+        bought at the expense of ordinary questions. See `lexical.py` for why
+        it re-ranks rather than retrieving in parallel, and why ranks are fused
+        rather than scores.
+
+        `score` therefore stays exactly what it was: the dense cosine of the
+        chunk that matched. Every candidate comes from the dense window, so
+        there is no result whose score had to be invented -- which matters
+        because `RETRIEVAL_RELEVANCE_FLOOR` is read off the first one to decide
+        whether the corpus answered at all.
 
         Args:
             query: Search query
@@ -564,7 +632,9 @@ class GraphRAGKnowledgeBase:
                 n_results=n_results,
                 include=["documents", "metadatas", "distances"]
             )
-            results = self._collapse_chunk_hits(raw, top_k)
+            results = self._collapse_chunk_hits(
+                raw, top_k, order=self._rerank_lexically(query, raw)
+            )
             hits = len((raw.get("ids") or [[]])[0] or [])
             if len(results) >= top_k or hits < n_results:
                 # Either the caller has what it asked for, or the collection
@@ -573,13 +643,69 @@ class GraphRAGKnowledgeBase:
 
         return results
 
+    @property
+    def lexical_index(self) -> "BM25Index | None":
+        """The BM25 index over the stored chunks, built on first use.
+
+        Built from the store rather than kept alongside it, so it cannot drift:
+        whatever `search` re-ranks is what `search` retrieved. `add_document`
+        and `clear` drop it instead of updating it -- rebuilding over this
+        corpus's ~1,200 chunks is milliseconds, and an index that edits itself
+        in place is a second thing that can disagree with Chroma.
+
+        Returns `None` rather than raising if the store cannot produce its
+        documents. A collection too old or too foreign to answer `get` is a
+        reason to fall back to dense-only retrieval, not a reason for search to
+        stop working -- the lexical half is an improvement to the ranking, and
+        the dense half is still a correct answer without it.
+        """
+        if self._lexical_index is None:
+            try:
+                stored = self.collection.get(include=["documents"])
+                ids = list(stored.get("ids") or [])
+                documents = list(stored.get("documents") or [])
+            except Exception:
+                return None
+            if len(ids) != len(documents):
+                return None
+            self._lexical_index = BM25Index(ids, [d or "" for d in documents])
+        return self._lexical_index
+
+    def _rerank_lexically(
+        self, query: str, raw: "Mapping[str, Any]"
+    ) -> list[str] | None:
+        """Fuse the dense window's order with BM25's, or leave it alone.
+
+        Returns `None` -- meaning "use the order Chroma gave" -- when there is
+        no index or fewer than two candidates to reorder. A single hit has no
+        ranking to improve, and paying for an index build to discover that is
+        the sort of cost that lands on the console's five-second poll.
+        """
+        chunk_ids = [str(c) for c in ((raw.get("ids") or [[]])[0] or [])]
+        if len(chunk_ids) < 2:
+            return None
+
+        index = self.lexical_index
+        if index is None:
+            return None
+
+        by_lexical = lexical_order(query, chunk_ids, index)
+        if by_lexical == chunk_ids:
+            # The lexical half agrees, or had nothing to say. Either way the
+            # fusion would return the order we already have.
+            return None
+        return reciprocal_rank_fusion(chunk_ids, by_lexical)
+
     def _collapse_chunk_hits(
-        self, raw: "Mapping[str, Any]", top_k: int
+        self, raw: "Mapping[str, Any]", top_k: int, order: list[str] | None = None
     ) -> list[dict[str, Any]]:
         """Fold chunk hits onto the documents they came from, best chunk first.
 
         Chroma returns hits best-first, so the first chunk seen for a document
         is its best one and every later chunk of it only adds to the count.
+        `order`, when given, replaces that ordering with the hybrid one --
+        the same hits, re-ranked, so "best chunk first" still holds and every
+        result still carries the dense score its chunk was retrieved with.
         """
         ids = raw.get("ids") or [[]]
         documents = raw.get("documents") or [[]]
@@ -593,7 +719,19 @@ class GraphRAGKnowledgeBase:
         collapsed: list[dict[str, Any]] = []
         by_document: dict[str, dict[str, Any]] = {}
 
-        for i, chunk_id in enumerate(ids[0]):
+        # Walk the hits in the hybrid order when there is one, and in Chroma's
+        # otherwise. A chunk id `order` names that this response does not hold
+        # is skipped rather than trusted: the two come from the same query, but
+        # the collapse reads `documents`/`distances` positionally and an id
+        # without a row here would index the wrong one.
+        position = {str(c): i for i, c in enumerate(ids[0])}
+        walk = (
+            [(position[c], c) for c in order if c in position]
+            if order is not None
+            else list(enumerate(ids[0]))
+        )
+
+        for i, chunk_id in walk:
             metadata = metadatas[0][i] if metadatas[0] else {}
             doc_id = _document_id_of(chunk_id, metadata)
 
@@ -1530,6 +1668,7 @@ class GraphRAGKnowledgeBase:
             self.collection.delete(ids=existing)
 
         self.graph.clear()
+        self._lexical_index = None
         # Without this the clear lives only in memory: the next process start
         # reloads the old graph off disk and the corpus comes back.
         self._save_graph()
