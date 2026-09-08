@@ -246,10 +246,12 @@ EXERCISES: dict[str, Exercise] = {
         expect_files=False,
         what_it_tests="Retrieval against the real corpus, and whether the "
                       "gate can end a run with no files to point at. Note it "
-                      "does NOT test the Researcher's model: a hit over 0.3 "
-                      "is formatted straight into the findings without the "
-                      "seat being called, so two Researchers score alike "
-                      "here. Use `offcorpus` for the model.",
+                      "does NOT test the Researcher's model: a hit over "
+                      "RETRIEVAL_RELEVANCE_FLOOR is formatted straight into "
+                      "the findings without the seat being called, so two "
+                      "Researchers score alike here (this query measures "
+                      "0.605 against a floor of 0.40). Use `offcorpus` for "
+                      "the model.",
     ),
     "offcorpus": Exercise(
         "offcorpus",
@@ -259,10 +261,14 @@ EXERCISES: dict[str, Exercise] = {
         expect_files=False,
         what_it_tests="The Researcher's *model*, which the `research` exercise "
                       "cannot reach. `_gather_research` formats retrieval "
-                      "straight into the output whenever the top hit scores "
-                      "over 0.3 and only calls the seat below that, so a "
-                      "question this corpus cannot answer is the only team "
-                      "exercise where the Researcher's model is the variable.",
+                      "straight into the output whenever the top hit clears "
+                      "RETRIEVAL_RELEVANCE_FLOOR and only calls the seat "
+                      "below it, so a question this corpus cannot answer is "
+                      "the only team exercise where the Researcher's model is "
+                      "the variable. This query measures 0.306 -- it cleared "
+                      "the old hard-coded 0.3 by six thousandths, which meant "
+                      "the exercise was silently testing retrieval, not the "
+                      "seat, for as long as that number stood.",
     ),
     "plan": Exercise(
         "plan",

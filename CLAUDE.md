@@ -51,7 +51,11 @@ python example_usage.py
 │   ├── control.py             # RUN_CONTROL: the emergency stop signal
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
 │   ├── mcp_client.py          # MCP client / local tool bindings
+│   ├── lexical.py             # BM25 + rank fusion: the lexical half of search
 │   ├── exceptions.py          # Public error surface (re-exports _internal/)
+│   ├── self_healing/          # Opt-in retry / circuit-breaker decorators (see note below)
+│   │   ├── logger.py          # SelfHealingLogger: structured, severity-leveled healing log
+│   │   └── decorators.py      # retry_with_backoff, circuit_breaker, self_healing_wrapper
 │   └── _internal/
 │       └── exceptions.py      # LangGraphAgentError and its five subclasses
 ├── prompts/
@@ -67,6 +71,8 @@ python example_usage.py
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
 │   ├── test_mcp_tools.py      # Builder tool belt
 │   ├── test_imports.py        # Pins the package's public surface
+│   ├── test_lexical.py        # BM25, rank fusion, the relevance floor
+│   ├── test_self_healing.py   # self_healing: logger, retry, circuit breaker
 │   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── reindex.py             # Re-index files into GraphRAG
@@ -112,6 +118,21 @@ python example_usage.py
   - Planner → no tools.
   - Researcher → GraphRAG read-only tools only.
   - Builder → filesystem, git, terminal, test tools only.
+- **`self_healing` is a standalone utility, not wired into any node.** It gives
+  `retry_with_backoff`, `circuit_breaker` and `self_healing_wrapper` decorators
+  (tenacity + pybreaker) plus a structured `SelfHealingLogger`, for a caller
+  that wants in-process retry/circuit-breaker resilience around its own
+  function calls. It is deliberately **not** applied to the LLM seat calls or
+  MCP tool calls: those already have a resilience design of their own —
+  `LLM_TIMEOUT_SECONDS` / `NODE_DEADLINE_SECONDS` / `BUILDER_DEADLINE_SECONDS`,
+  and the rule that work run under a deadline must never write to state (see
+  Important Notes below). Adding a retry loop underneath an abandoned,
+  still-running worker would violate that rule outright, and a circuit breaker
+  keyed on a seat's exceptions would interact with `_seat_failures`
+  (`get_agent_status()`) in ways nobody has designed for. Reach for it for a
+  *new*, independent integration point (e.g. a future external API call a
+  Builder tool makes) rather than retrofitting it onto the existing node/seat
+  call paths.
 
 ## State Schema
 
@@ -302,9 +323,9 @@ deliver the reply.
   answer in full. Re-run it before changing the seat rather than trusting that
   list, which is one machine on one day.
 - **The Researcher's model is only consulted when retrieval is thin.**
-  `_gather_research` calls GraphRAG first and, whenever the top hit scores
-  above `0.3`, formats those chunks straight into the findings and returns
-  without invoking the seat at all. So on a question the corpus answers well,
+  `_gather_research` calls GraphRAG first and, whenever the top hit clears
+  `RETRIEVAL_RELEVANCE_FLOOR`, formats those chunks straight into the findings
+  and returns without invoking the seat at all. So on a question the corpus answers well,
   the Researcher's model is not a variable: two different models produce
   byte-identical `research`, in ~0.0s. This is worth knowing before blaming or
   crediting a Researcher seat for a run's quality, and it is why the seat's
@@ -313,6 +334,73 @@ deliver the reply.
   run round the loop. `scripts/diagnose_seats.py` keeps the two apart: the
   `research` exercise measures retrieval, `offcorpus` is the one that reaches
   the model, and the phase 1 probes stub retrieval out entirely.
+- **`RETRIEVAL_RELEVANCE_FLOOR` is a property of the embedding model, and the
+  number it replaced was inside the wrong population.** The floor is what
+  `_gather_research` reads off `results[0]["score"]` to decide whether the
+  corpus answered at all. It was `0.3`, hard-coded beside the comparison in
+  `nodes.py`, and a cosine similarity has no absolute meaning -- so it now
+  lives beside `EMBEDDING_MODEL_NAME` in `graphrag_server.py`, where a model
+  swap cannot step over it. Measured on this corpus, twelve questions it
+  answers against twelve it cannot:
+
+  | population | min | median | max |
+  |---|---|---|---|
+  | on-corpus | **0.442** | 0.564 | 0.685 |
+  | off-corpus | 0.144 | 0.208 | **0.306** |
+
+  Those separate with an empty band from 0.306 to 0.442, and `0.3` sat at the
+  top of the wrong one. The single question that crossed it is this project's
+  own off-corpus probe -- the `offcorpus` exercise on PostgreSQL vacuum, which
+  scored **0.306** and was therefore served to the Builder as though the corpus
+  had answered it. That exercise exists because it is *"the only team exercise
+  where the Researcher's model is the variable"*, and the gate had been quietly
+  denying it that for as long as the number stood: it was measuring retrieval
+  and reporting on the seat. `0.37` is the midpoint of the empty band, chosen
+  the way `EIGENGAP_DECISIVENESS` was -- a value in open space rather than on
+  an observed boundary. The table above is measured through `search` **as it
+  now ships**, hybrid re-rank included, and that matters: the re-rank promotes
+  the chunk the lexical half also likes, which is often a better answer
+  carrying a slightly lower cosine, so the on-corpus minimum fell from 0.492 to
+  0.442 as retrieval got better. A floor left calibrated against dense-only
+  ordering would describe code that no longer runs. The test pins it against the two measured populations
+  rather than against the literal number, because sliding it back under 0.306
+  would show up nowhere else: the run completes and the findings look like
+  findings.
+- **Search is hybrid, and BM25 re-ranks the dense window rather than
+  retrieving beside it.** A dense embedding is a poor instrument for "this
+  passage contains this exact rare identifier", which is what a plan naming
+  `BUILDER_DEADLINE_SECONDS` is really asking -- the model was trained to put
+  *similar* passages together, and every seat-timeout constant here is similar
+  to every other one. Measured through `search` against the real store, on 541
+  identifiers each defined in exactly one project file: the defining file came
+  first **53.4%** of the time on dense alone and **65.1%** with the re-rank
+  (McNemar p < 0.001, 85 fixed against 22 broken). Recall at 5 moved 93.0% to
+  95.4%, which says where the gain is -- the right file was nearly always
+  retrieved and simply not ranked first. Prose improved too, 66.0% to 68.2% on
+  400 held-out passages, so this is not a code-search special case bought at
+  the expense of ordinary questions.
+  Three decisions in `lexical.py` are not interchangeable with the obvious
+  alternatives. *It re-ranks rather than retrieving in parallel*: full fusion
+  over the whole corpus measured 67.3% against 66.2%, six queries in 541 and
+  inside the noise, and it costs the thing that matters -- a document only the
+  lexical side found has no dense score, and the relevance floor is read off
+  exactly that field. Every result therefore still comes from the dense window
+  and still carries the cosine that window gave it, so the floor's calibration
+  survives. *Identifiers are indexed whole **and** in pieces*, because emitting
+  only the pieces makes `NODE_DEADLINE_SECONDS` and `BUILDER_DEADLINE_SECONDS`
+  near-identical -- the confusion the lexical half exists to resolve. The
+  acronym seam is part of that: without it `GraphRAGKnowledgeBase` splits to
+  `graph` + `ragknowledge` + `base`, and the word `knowledge` is absent from
+  the index entirely. *And ranks are fused, not scores*: a BM25 score is
+  unbounded and corpus-relative while a cosine sits in [-1, 1], so any weighted
+  sum needs a scaling constant that is really a third hyperparameter, tuned on
+  one corpus and wrong on the next.
+  The index is built from the store on first use and **dropped** by
+  `add_document` and `clear` rather than amended -- rebuilding over ~1,200
+  chunks takes 0.17s, and an index maintained in parallel with Chroma is a
+  second account of the same corpus, free to disagree with it. A store that
+  cannot answer `get` falls back to dense-only instead of raising: the lexical
+  half improves an ordering that is already correct without it.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step
@@ -471,7 +559,7 @@ deliver the reply.
   answers the query loses to a shorter one that merely mentions it -- *"how
   does connectivity report isolated nodes and lambda_2"* returned an examples
   script rather than the `graphrag_server.py` holding that exact docstring. And
-  scores sat low enough that plan-shaped queries fell under the `> 0.3` gate in
+  scores sat low enough that plan-shaped queries fell under the relevance gate in
   `_gather_research`, discarding retrieval and sending the run to the
   Researcher's model -- the loop *"A silent Researcher is not research"*
   already describes. After chunking, the same ten queries average **+0.162**
