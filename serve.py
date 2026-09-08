@@ -57,6 +57,7 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     get_knowledge_base,
     index_project_files,
     open_knowledge_base,
+    store_uploaded_document,
 )
 
 # Initialize graph. The knowledge base is deliberately *not* initialized here.
@@ -85,10 +86,13 @@ def _open_kb() -> GraphRAGKnowledgeBase | None:
 
 
 def _kb_for_indexing() -> GraphRAGKnowledgeBase:
-    """The corpus, **created if it does not exist**. Only `rpc_reindex` may call it.
+    """The corpus, **created if it does not exist**. Two callers, both writers.
 
-    Indexing is the one act that is allowed to bring a corpus into being,
-    because it is the one act that is a request for one.
+    Indexing is the act that is allowed to bring a corpus into being, because
+    it is the act that is a request for one -- and so is uploading a document,
+    which is a request for a corpus to hold it. Every *read* goes through
+    `_open_kb()` instead: a corpus that appeared because something looked at it
+    is a corpus nobody asked for.
     """
     global kb
     if kb is None:
@@ -230,6 +234,34 @@ def rpc_reindex(_: dict[str, Any]) -> dict[str, Any]:
     """
     _refuse_while_a_run_is_in_flight("rebuilt")
     return index_project_files(_kb_for_indexing())
+
+
+def rpc_upload_document(params: dict[str, Any]) -> dict[str, Any]:
+    """Embed one document the operator uploaded, from either upload control.
+
+    One method behind both of them -- the Engineer tab's attach button and the
+    Corpus tab's -- so the two entry points cannot come to mean different
+    things. The file is written under `uploads/` before it is embedded, which
+    is what puts it inside the next reindex rather than underneath it; see
+    `store_uploaded_document`.
+
+    Refused mid-run, like the other two writers, but for a different reason
+    than theirs. An upload only ever adds, so a Researcher would see more
+    rather than less -- what it cannot do is add while a search is reading the
+    graph, since `add_document` mutates the same networkx object
+    `neighborhood` and the lexical index iterate. And a run should be answered
+    by the corpus it started against either way.
+
+    One document per call. The console loops for a multi-file drop, so one
+    file that the corpus cannot take -- a PDF among the markdown -- fails on
+    its own and says so, instead of taking the batch down with it.
+    """
+    _refuse_while_a_run_is_in_flight("added to")
+    name = params.get("name", "")
+    content = params.get("content", "")
+    if not isinstance(name, str) or not isinstance(content, str):
+        raise ValueError("An upload is a filename and its text; both must be strings.")
+    return store_uploaded_document(_kb_for_indexing(), name, content)
 
 
 def rpc_bottleneck(params: dict[str, Any]) -> dict[str, Any]:
@@ -781,6 +813,7 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "query_graph": rpc_query_graph,
     "search_documents": rpc_search_documents,
     "reindex": rpc_reindex,
+    "upload_document": rpc_upload_document,
     "export_corpus": rpc_export_corpus,
     "clear_corpus": rpc_clear_corpus,
     "list_seats": rpc_list_seats,

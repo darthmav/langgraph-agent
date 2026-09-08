@@ -154,6 +154,16 @@ button.go.ghost{background:#ffffff12;color:var(--ink-2)}
 button.go.danger{background:#b3413a;color:#fff}
 button.go.mini{font-size:10px;padding:4px 9px}
 button.go:disabled{opacity:.5;cursor:not-allowed}
+/* A file picker cannot be a <button>: it has to be a <label> wrapping a hidden
+   <input type=file>, or the click never reaches the picker. So the button
+   styling is repeated for that one shape rather than the rule being widened to
+   every .go, which would restyle nothing else and hide why this exists. */
+label.go{
+  appearance:none;background:#ffffff12;border:0;color:var(--ink-2);cursor:pointer;
+  font:600 11px var(--sans);padding:7px 14px;border-radius:7px;transition:.15s;
+  display:inline-flex;align-items:center;
+}
+label.go:hover{filter:brightness(1.4)}
 
 /* ---- graph ---- */
 #gwrap{flex:1;position:relative;border:1px solid var(--line);border-radius:10px;
@@ -206,8 +216,13 @@ button.go:disabled{opacity:.5;cursor:not-allowed}
 .doc span{color:var(--ink-3)}
 
 /* ---- engineer ---- */
-#eng-input{display:flex;gap:8px;flex:none;margin-top:10px}
+#eng-input{display:flex;gap:8px;flex:none;margin-top:10px;flex-wrap:wrap}
 #eng-prompt{flex:1;resize:none;font:12px var(--mono);min-height:38px}
+/* The transcript is also the drop target, so the outline goes on the pane the
+   files are being dropped into rather than on a separate zone that would have
+   to be found first. */
+#director{border-radius:10px;transition:box-shadow .12s,background .12s}
+#director.dropping{box-shadow:inset 0 0 0 2px var(--accent);background:#4ea3ff0d}
 .optout{display:flex;align-items:center;gap:5px;font:11px var(--mono);color:var(--ink-2);white-space:nowrap;cursor:pointer}
 .optout input{cursor:pointer}
 .msg{border-radius:10px;padding:9px 12px;margin-bottom:8px;font:12px/1.6 var(--sans);white-space:pre-wrap}
@@ -276,12 +291,14 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
     <div class="split">
       <div class="col">
         <h2>Director</h2>
-        <div class="scroll" id="director"><div class="muted">Give the Architect a goal. It sets the direction, the Planner breaks it down, and it rules on the result.</div></div>
+        <div class="scroll" id="director"><div class="muted">Give the Architect a goal. It sets the direction, the Planner breaks it down, and it rules on the result. Attach a document — or drop one here — to put it in the corpus the Researcher searches.</div></div>
         <div id="eng-input">
           <textarea id="eng-prompt" rows="1" placeholder="Tell the Architect what you want done&hellip;"></textarea>
           <label class="optout" title="A file that does not run is still executed and still reported — it just stops blocking the Architect's approval. For goals whose product is a failing file.">
             <input type="checkbox" id="eng-expect-fail"> expect failures
           </label>
+          <label class="go" title="Embed a document into the corpus, so the Researcher can retrieve it on this run and every one after. It is written under uploads/ and indexed from there, which is what makes it survive a reindex. Text only — .md, .py, .rst, .txt. You can also drop files straight onto the transcript.">
+            <input type="file" id="eng-upload" multiple accept=".md,.txt,.py,.rst" hidden><span>Attach</span></label>
           <button class="go" id="eng-send">Run</button>
           <button class="go danger" id="eng-stop" disabled
                   title="Halt the run at its next safe boundary. Work already in flight — a file write, a test run, a model call — finishes first, so this can take up to a minute. Everything the run produced is kept.">Stop</button>
@@ -330,6 +347,10 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
   <section class="panel" data-p="corpus">
     <div class="bar">
       <button class="go" id="rebtn">Reindex project</button>
+      <!-- The same upload the Engineer tab offers, reachable from where the
+           corpus is actually managed. One RPC behind both. -->
+      <label class="go" id="up-label" title="Embed documents into the corpus. They are written under uploads/ and indexed from there, so a reindex re-reads them rather than pruning them. Text only — .md, .py, .rst, .txt; there is no extractor for PDFs here.">
+        <input type="file" id="up-input" multiple accept=".md,.txt,.py,.rst" hidden><span>Upload documents</span></label>
       <button class="go ghost" id="rfbtn">Refresh</button>
       <button class="go ghost" id="exbtn"
               title="Download the whole corpus as one JSON file — the graph plus every chunk and its metadata. Embeddings are left out; a reindex regenerates them locally.">Export</button>
@@ -939,6 +960,137 @@ $("#clrbtn").onclick = async () => {
     await Promise.all([loadDocs(), poll(true)]);
   }catch(e){ $("#restat").textContent = "clear failed: " + e.message; }
   finally{ b.disabled = false; b.textContent = "Clear corpus"; }
+};
+
+/* ---------- uploads ---------- */
+
+// Two controls, one path: the Engineer tab's Attach — and a drop straight onto
+// the transcript — and the Corpus tab's Upload. They differ only in where the
+// answer is written.
+//
+// The file is read here and posted as text through the same POST /rpc as
+// everything else rather than getting a multipart route of its own, for the
+// reason `export_corpus` has no download route: a failure then lands on the
+// telemetry log and the tab's status line instead of replacing the page.
+
+// A browser-side backstop, and deliberately *not* the corpus's rule. What the
+// corpus will take — the suffix, the size limit a reindex applies, whether the
+// bytes are text at all — is the server's decision and is written down in one
+// place there. This only stops the tab reading something enormous into memory
+// before the server can answer, so it sits far above anything the corpus would
+// ever accept: everything realistic is refused with the server's own wording.
+const UPLOAD_READ_CEILING = 5 * 1024 * 1024;
+
+// Both controls show their busy state on a <span> *inside* the label. Writing
+// to the label's own text would delete the <input type=file> it wraps, and the
+// control would silently stop opening a picker from then on.
+//
+// One RPC per file. A batch would fail whole on the first PDF among the
+// markdown; this way each file is judged on its own and says so.
+async function uploadFiles(files){
+  const list = [...(files || [])];
+  if(!list.length) return null;
+  const ok = [], failed = [];
+  for(const file of list){
+    try{
+      if(file.size > UPLOAD_READ_CEILING)
+        throw new Error(`${(file.size / 1048576).toFixed(1)}MB — far past anything the corpus indexes`);
+      ok.push(await rpc("upload_document", {name: file.name, content: await file.text()}));
+    }catch(e){ failed.push({name: file.name, message: e.message}); }
+  }
+  if(ok.length){
+    NODES = [];                        // the graph gained documents
+    await Promise.all([loadDocs(), poll(true)]).catch(()=>{});
+  }
+  return {ok, failed};
+}
+
+// Where it went, and what it became. The path is what makes "this survives a
+// reindex" checkable rather than a promise, and the passage count is what tells
+// a document that landed whole from one the embedder read the first paragraph
+// of — the number nobody could see before.
+function uploadLines(r){
+  return [
+    ...r.ok.map(o => `${o.path} — ${o.chunks} passage(s)`
+      + (o.replaced ? ", replacing the version already there" : "")),
+    ...r.failed.map(f => `${f.name} — not stored: ${f.message}`),
+  ].join("\n");
+}
+
+// Uploading from the conversation answers in the conversation: the Researcher
+// searches this corpus, so what was added belongs in the transcript next to the
+// goal it is there to inform, not in a status line on another tab.
+async function attachToConversation(files){
+  const label = $("#eng-upload").parentElement.querySelector("span");
+  label.textContent = "Attaching…";
+  try{
+    const r = await uploadFiles(files);
+    if(!r) return;
+    const total = r.ok.length + r.failed.length;
+    const badge = !r.ok.length ? "bad" : r.failed.length ? "run" : "ok";
+    $("#director").innerHTML +=
+      `<div class="msg sys"><b>${r.ok.length ? "Added to the corpus" : "Nothing was added"}</b> `
+      + `<span class="badge ${badge}">${r.ok.length}/${total} EMBEDDED</span>\n\n`
+      + esc(uploadLines(r))
+      + (r.ok.length
+          ? "\n\nThe Researcher retrieves these from the next run onward, and a "
+            + "reindex re-reads them rather than pruning them."
+          : "")
+      + `</div>`;
+    $("#director").scrollTop = $("#director").scrollHeight;
+    setClearButton();
+  }finally{ label.textContent = "Attach"; }
+}
+
+// The list is copied before the input is reset, and the input is reset so that
+// re-picking the same filename fires `change` again — the ordinary way to push
+// a corrected version of a document you just edited. Copying first because
+// `files` is live: clearing the input empties the FileList the upload is
+// holding, and it only survives today by the order two microtasks happen to run
+// in.
+$("#eng-upload").onchange = e => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  attachToConversation(files).catch(()=>{});
+};
+
+// A file dropped anywhere in the window would otherwise navigate the tab to it,
+// replacing the console with the raw document. Cancelling `dragover` as well is
+// what makes the drop ours to cancel at all.
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", e => e.preventDefault());
+
+const DROP = $("#director");
+DROP.addEventListener("dragover", e => { e.preventDefault(); DROP.classList.add("dropping"); });
+// Tested against relatedTarget: dragleave also fires on the way *into* a child
+// element, so an unguarded handler flickers the outline for the whole drag.
+DROP.addEventListener("dragleave", e => {
+  if(!DROP.contains(e.relatedTarget)) DROP.classList.remove("dropping");
+});
+DROP.addEventListener("drop", e => {
+  e.preventDefault(); DROP.classList.remove("dropping");
+  attachToConversation(e.dataTransfer && e.dataTransfer.files).catch(()=>{});
+});
+
+// The same upload from the Corpus tab, reported the way every other button
+// there reports: into #restat, beside the reindex and export counts.
+$("#up-input").onchange = async e => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  const label = $("#up-label").querySelector("span");
+  label.textContent = "Uploading…";
+  $("#restat").textContent = "";
+  try{
+    const r = await uploadFiles(files);
+    if(!r) return;
+    const passages = r.ok.reduce((n, o) => n + o.chunks, 0);
+    $("#restat").textContent = `${r.ok.length} embedded · ${passages} passages`
+      + (r.failed.length
+          ? ` · ${r.failed.length} refused — `
+            + r.failed.map(f => `${f.name}: ${f.message}`).join(" · ")
+          : "");
+  }catch(err){ $("#restat").textContent = "upload failed: " + err.message; }
+  finally{ label.textContent = "Upload documents"; }
 };
 
 /* ---------- engineer ---------- */

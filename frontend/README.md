@@ -58,6 +58,12 @@ instead, Stop included.
 *expect failures* is unrelated to Stop and stays what it was: it excuses a file
 the run meant to fail, not one nobody executed.
 
+*Attach* puts a document of your own into the corpus the Researcher searches,
+and so does dropping files onto the transcript. The answer comes back in the
+transcript — where each file went, how many passages it became, and anything
+the corpus refused with the reason. The Corpus tab's *Upload documents* is the
+same thing from the other end; both call `upload_document`.
+
 The *×* in the top right ends the session: it shuts down `serve.py` itself, not
 just the page. With a run going it asks first, then stops the run and lets it
 save its state before the server exits.
@@ -75,8 +81,16 @@ asked for by name should not have neighbours hidden.
 **Retrieval** — semantic search with score bars, plus a rolling telemetry log of
 every non-quiet RPC (time, method, milliseconds; red on error).
 
-**Corpus** — the indexed documents, and a Reindex button. Clicking a document
-jumps to the Graph tab and traces it.
+**Corpus** — the indexed documents, and buttons to upload, reindex, export or
+clear them. Clicking a document jumps to the Graph tab and traces it.
+
+*Upload documents* writes each file under `uploads/` and indexes it from there.
+That is the point rather than an implementation detail: a reindex rebuilds the
+corpus from the files on disk and prunes everything else, so a document
+embedded only into the index would disappear at the next rebuild with nothing
+reporting it. Text only — `.md`, `.py`, `.rst`, `.txt`; a PDF is refused rather
+than embedded as whatever its bytes decode to. Re-uploading a name replaces
+that document rather than adding a second copy of it.
 
 **State** — the raw `AgentState` from the last run.
 
@@ -123,6 +137,7 @@ request, so both come back 200.
 | `query_graph` | `node_id`, `max_depth`, `min_degree` | `center_node`, `related_nodes`, `edges` |
 | `search_documents` | `query`, `top_k` | ranked results |
 | `reindex` | — | indexed / skipped / errors plus fresh stats |
+| `upload_document` | `name`, `content` | where it was stored, its passage count, fresh stats |
 | `list_seats` | — | the four seats and whether each can run |
 | `set_seat` | `agent`, `provider`, `model` | the updated seat |
 | `llm_options` | — | curated options plus installed Ollama tags |
