@@ -73,6 +73,7 @@ python example_usage.py
 │   ├── test_imports.py        # Pins the package's public surface
 │   ├── test_lexical.py        # BM25, rank fusion, the relevance floor
 │   ├── test_self_healing.py   # self_healing: logger, retry, circuit breaker
+│   ├── test_uploads.py        # Uploading a document into the corpus
 │   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── reindex.py             # Re-index files into GraphRAG
@@ -205,7 +206,11 @@ The console drives a single `POST /rpc` taking `{method, params}` and returning
 `RPC_METHODS` in `serve.py`. `export_corpus` and `clear_corpus` go through it
 like everything else rather than getting a file-download route: a failure then
 lands on the console's telemetry path instead of replacing the page with a JSON
-error, and the browser builds the file at the other end. The `/api/*` routes are compatibility wrappers over
+error, and the browser builds the file at the other end. `upload_document` goes
+the other way through the same door for the same reason -- the console reads
+the file and posts its text, rather than a multipart route being added -- and
+takes one document per call, so one PDF among the markdown fails on its own
+instead of taking the batch down. The `/api/*` routes are compatibility wrappers over
 the same functions — `launch_console.sh` polls `/api/status` as its readiness
 check, so it must keep working.
 
@@ -845,8 +850,42 @@ deliver the reply.
   load-bearing — `index_project_files` has exactly that hole today, where
   `graph.clear()` is persisted only as a side effect of indexing something
   afterwards, so a reindex matching zero files leaves the old graph on disk.
-- **Changing the corpus is refused while a run is in flight.** Both writers —
-  `clear_corpus` and `reindex` — go through
+- **An uploaded document is a file first and a document second, and that
+  ordering is the whole design.** `store_uploaded_document` writes the upload
+  under `uploads/` and only then calls `add_document`. The corpus is a function
+  of what is on disk: `index_project_files` clears the graph and prunes every
+  stored row whose document is not in the walk, so a document embedded straight
+  into the store and nowhere else survives exactly until the next reindex,
+  which then deletes it **silently**, in a pass that reports success and a file
+  count that looks right. Writing the file is what puts an upload *inside* the
+  rebuild instead of underneath it, which is why `uploads/` must stay out of
+  `PROJECT_INDEX_EXCLUDES` — a new entry that merely contains that string would
+  end every upload one reindex later, and `test_uploads.py` checks it through
+  `iter_project_files` rather than by reading the list, because that is the way
+  it breaks. Gitignoring the directory does not hide it: the walk is a glob,
+  not git.
+  Every refusal is a `ValueError` naming what was wrong, because each
+  alternative to refusing is worse than a failed upload and none of them
+  announces itself. A `.pdf` has no text extractor here, so accepting one
+  embeds whatever its bytes decode to under a real filename and it reads as a
+  source in the corpus from then on — the fabricated retrieval hit `search` was
+  fixed to stop returning. A file over `MAX_INDEXABLE_BYTES` is embedded now
+  and skipped at every rebuild after, so the limit is applied here character
+  for character against the walk's own test rather than approximated. A name
+  carrying a path writes outside the directory the walk looks at, which is the
+  same disappearance by another route, so only the last component is used and
+  `..` is refused by name (`PurePosixPath("..").name` is `".."`, not `""`).
+  `INDEXABLE_SUFFIXES` is derived from `PROJECT_INDEX_PATTERNS` rather than
+  restated beside it, and a suffix is *stored* lower-cased because the walk is
+  a glob and a glob is case-sensitive here — `NOTES.MD` written as given is a
+  file the reindex cannot see. `_document_metadata` is shared with
+  `index_project_files` for the same reason: two spellings of one document is
+  two documents, one of them orphaned in the graph at the next rebuild.
+  `add_document` returns its chunk count so the console can say what a document
+  became; that number is the only thing distinguishing a file that landed whole
+  from one the embedder read the header of.
+- **Changing the corpus is refused while a run is in flight.** All three
+  writers — `clear_corpus`, `reindex` and `upload_document` — go through
   `_refuse_while_a_run_is_in_flight()`. Not for consistency: because the
   failure would be silent. An emptied corpus does not break the Researcher's
   search, it returns no hits; a corpus midway through a rebuild returns
@@ -856,6 +895,11 @@ deliver the reply.
   the seat can never find out it was cut off and the operator is told instead.
   The refusal names the goal, the way `rpc_shutdown` does. `export_corpus` has
   no such guard: reading the corpus takes nothing away from the run using it.
+  The upload is guarded for a *different* reason than the other two, and it is
+  worth keeping straight: an upload only ever adds, so it could not manufacture
+  an absence. What it cannot do is add while a search is reading — it mutates
+  the same networkx graph `neighborhood` and the lexical index iterate — and a
+  run should be answered by the corpus it started against either way.
 - **The export omits embeddings, and says so in the file.** They are most of
   the bytes and the least portable part — a reader without the same model
   cannot use them — and the embedder runs locally, so a reindex regenerates

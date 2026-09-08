@@ -60,6 +60,12 @@ knowledge/knowledge_graph.json
 # across a page reload. Per-machine runtime state, not history.
 runs/
 
+# Documents uploaded through the console. Whatever the operator handed this
+# machine, not this project's source. Note that ignoring them here does not
+# hide them from the corpus: the reindex walks the tree with glob, not git, and
+# an upload is only durable because it is a file the walk finds.
+uploads/
+
 # Seat diagnostic output (scripts/diagnose_seats.py writes one timestamped
 # directory per sweep). Per-run measurements against non-deterministic models,
 # not history — the committed reports/*.md are written deliberately.

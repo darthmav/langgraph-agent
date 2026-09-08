@@ -27,8 +27,24 @@ python serve.py
 Five tabs: **Engineer** (give the Architect a goal, watch the stages),
 **Graph** (the knowledge graph as a force-directed map — press *Sweep all*),
 **Retrieval** (semantic search plus an RPC telemetry log), **Corpus**
-(the indexed documents, and buttons to reindex, export or clear them), and
-**State** (the raw `AgentState`).
+(the indexed documents, and buttons to upload, reindex, export or clear them),
+and **State** (the raw `AgentState`).
+
+*Attach* — in the Engineer tab, beside Run — puts a document of your own into
+the corpus, and so does *Upload documents* on the Corpus tab; they are the same
+thing reached from two places, and you can drop files straight onto the
+transcript instead. The Researcher retrieves what you add from the next run
+onward, and the reply says where each file went and how many passages it became.
+
+An upload is **written to `uploads/` and indexed from there**, rather than
+embedded directly into the store. That is what makes it survive: a reindex
+rebuilds the corpus from the files on disk and prunes everything else, so a
+document that lived only in the index would vanish at the next rebuild without
+anything saying so. Text only — `.md`, `.py`, `.rst`, `.txt`. There is no PDF
+extractor here, and one is refused rather than embedded as whatever its bytes
+decode to, which would look like a real source in the corpus afterwards. The
+same size limit a reindex applies is applied on the way in, for the same
+reason. Uploads are gitignored; that hides them from git, not from the corpus.
 
 *Export* downloads the whole corpus as one JSON file — the knowledge graph plus
 every chunk with its text and metadata. Embeddings are left out: they are most
@@ -50,12 +66,14 @@ disabled while it is absent; creating a store in order to empty it would leave
 behind the thing you were asking to be rid of. The local embedding model loads
 on the first index or search, not at startup.
 
-Both *Clear corpus* and *Reindex project* are refused while a run is in flight,
-and the refusal says which run. The Researcher searches this corpus, and
+*Clear corpus*, *Reindex project* and an upload are all refused while a run is
+in flight, and the refusal says which run. The Researcher searches this corpus, and
 changing it underneath a run does not fail its search — an emptied corpus
 answers "nothing found", and one midway through a rebuild answers from the part
 of itself that exists so far. The run would plan around an absence that was
-manufactured out from under it, without anything raising.
+manufactured out from under it, without anything raising. An upload cannot do
+that — it only adds — but it does mutate the graph a search may be reading, and
+a run is best answered by the corpus it started against.
 
 The left rail is the crew: one card per seat, each with its model, where the
 prompt goes (`REMOTE` / `LOCAL`), and a status chip when the seat cannot

@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from itertools import combinations
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import chromadb
@@ -460,7 +460,7 @@ class GraphRAGKnowledgeBase:
                 fitted.append(chunk[: offsets[CHUNK_MAX_TOKENS - 1][1]])
         return fitted
 
-    def add_document(self, doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> None:
+    def add_document(self, doc_id: str, content: str, metadata: dict[str, Any] | None = None) -> int:
         """Add a document to the knowledge base.
 
         The document is embedded as several chunks and stored as several rows,
@@ -474,6 +474,14 @@ class GraphRAGKnowledgeBase:
             doc_id: Unique document identifier
             content: Document text content
             metadata: Optional metadata (path, type, etc.)
+
+        Returns:
+            How many chunks this document became. Reported rather than
+            discarded because it is the one number that says whether a
+            document is *reachable*: chunking is what made a long file
+            searchable past its first thousand characters, and a caller adding
+            one document at a time -- an upload -- has no other way to see that
+            it landed as several passages rather than as a truncated header.
         """
         chunks = self.chunk_text(content)
 
@@ -566,6 +574,7 @@ class GraphRAGKnowledgeBase:
         self._lexical_index = None
 
         self._save_graph()
+        return len(chunks)
 
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Search the knowledge base.
@@ -1751,6 +1760,139 @@ PROJECT_INDEX_EXCLUDES = (
 # knowledge, and it would dominate the embedding budget.
 MAX_INDEXABLE_BYTES = 100_000
 
+# Where a document uploaded from the console lands, relative to the project
+# root. An upload is written to disk *before* it is embedded, and that ordering
+# is the design rather than a convenience: the corpus is a function of what is
+# on disk, and `index_project_files` rebuilds it from there -- clearing the
+# graph and pruning every stored row whose document is not in the walk. So a
+# document embedded straight into the store and nowhere else survives exactly
+# until the next reindex, which then deletes it silently, in a pass that
+# reports success and a file count that looks right. Writing the file first is
+# what makes an upload part of the corpus rather than a guest in it, and it is
+# why this directory must stay out of `PROJECT_INDEX_EXCLUDES`.
+UPLOADS_DIR = "uploads"
+
+# The suffixes an upload may carry, derived from the walk's own patterns rather
+# than restated beside them. The two have to agree exactly or an upload is
+# accepted, embedded, and then dropped at the next rebuild for a reason nobody
+# is told -- the same drift `PROJECT_INDEX_EXCLUDES` had while two scripts kept
+# their own copy of it. Compared case-insensitively but *stored* lower-cased,
+# because the walk is a glob and a glob is case-sensitive here: `NOTES.MD`
+# written as given is a file the reindex cannot see.
+INDEXABLE_SUFFIXES = tuple(sorted({Path(pattern).suffix for pattern in PROJECT_INDEX_PATTERNS}))
+
+
+def _document_metadata(path: Path) -> dict[str, str]:
+    """The metadata a document is stored under. One definition, two callers.
+
+    The reindex and an upload have to agree on this exactly: `path` is what the
+    graph node is keyed by and what `search` reports as a filename, and `type`
+    is what the console colours a node with. Two spellings of it would file the
+    same file twice under two descriptions.
+    """
+    return {
+        "path": str(path),
+        "type": "python" if path.suffix == ".py" else "markdown",
+    }
+
+
+def store_uploaded_document(
+    kb: "GraphRAGKnowledgeBase",
+    name: str,
+    content: str,
+    root: str = ".",
+) -> dict[str, Any]:
+    """Write an uploaded document under `uploads/` and embed it, in that order.
+
+    See `UPLOADS_DIR` for why the file comes first. What is left after this
+    call is a document indistinguishable from any other in the corpus: the same
+    id shape, the same metadata, and a place in the walk, so the next reindex
+    re-reads it instead of pruning it.
+
+    Every refusal below is a `ValueError` naming what was wrong, because each
+    alternative to refusing is worse than a failed upload and none of them
+    announces itself. A file the embedder cannot read becomes a vector of noise
+    filed under a real filename. A file over the walk's size limit is embedded
+    now and dropped at the next rebuild. A name with a path in it writes
+    outside the directory the reindex looks at, so the document is embedded and
+    then pruned by the very next pass.
+
+    Args:
+        kb: The corpus to add to. This is the *creating* door's knowledge base:
+            an upload is a request for a corpus to hold it.
+        name: The filename as the browser reported it. Only its last component
+            is used.
+        content: The document's text, already decoded.
+        root: Project root the walk runs from, so the id this stores under is
+            the id the walk will produce.
+
+    Returns:
+        What was stored -- the path, whether it replaced a document already
+        there, how many passages it became -- plus the corpus stats, so the
+        console can repaint its header from the same reply.
+
+    Raises:
+        ValueError: the name, the type, the size or the content is one the
+            corpus cannot take. The message says which, and why.
+    """
+    # Only the last component, so a name carrying a path cannot place the file
+    # outside `uploads/`. `..` survives that (`PurePosixPath("..").name` is
+    # `".."`), so it is refused by name rather than left to the suffix check.
+    safe = PurePosixPath(name.replace("\\", "/")).name
+    if safe in ("", ".", "..") or "\x00" in safe:
+        raise ValueError(f"{name!r} is not a filename this can store.")
+
+    suffix = PurePosixPath(safe).suffix.lower()
+    if suffix not in INDEXABLE_SUFFIXES:
+        accepted = ", ".join(INDEXABLE_SUFFIXES)
+        raise ValueError(
+            f"{safe!r} is not one of {accepted}. There is no text extractor "
+            "here, so a PDF, a .docx or an image would be embedded as whatever "
+            "its bytes happen to decode to rather than as what it says -- and "
+            "it would look like a document in the corpus afterwards. Convert "
+            "it to text first."
+        )
+    stored_name = PurePosixPath(safe).stem + suffix
+
+    if "\x00" in content:
+        raise ValueError(
+            f"{stored_name!r} contains null bytes, so it is not text however it "
+            "is named. Nothing was stored."
+        )
+    if not content.strip():
+        raise ValueError(f"{stored_name!r} has nothing in it to embed.")
+    # The walk's own test, character for character. Accepting a larger file
+    # here would embed it now and silently skip it at every reindex after.
+    if len(content) > MAX_INDEXABLE_BYTES:
+        raise ValueError(
+            f"{stored_name!r} is {len(content):,} characters and the limit is "
+            f"{MAX_INDEXABLE_BYTES:,} -- the same limit a reindex applies. "
+            "Accepting it would embed it now and drop it at the next rebuild. "
+            "Split it up."
+        )
+
+    directory = Path(root) / UPLOADS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / stored_name
+    # Read before the write, so "replaced" is a fact rather than a guess. An
+    # upload of a name already there is the ordinary way to correct a document,
+    # and `add_document` deletes that document's previous chunks before the new
+    # ones land, so nothing of the old version is left behind in the store.
+    replaced = path.exists()
+    path.write_text(content, encoding="utf-8")
+
+    chunks = kb.add_document(str(path), content, _document_metadata(path))
+
+    report: dict[str, Any] = {
+        "path": str(path),
+        "name": stored_name,
+        "replaced": replaced,
+        "chunks": chunks,
+        "characters": len(content),
+    }
+    report.update(kb.stats())
+    return report
+
 
 def iter_project_files(
     root: str = ".", exclude_dirs: tuple[str, ...] | list[str] | None = None
@@ -1821,14 +1963,7 @@ def index_project_files(
                 skipped += 1
                 continue
 
-            kb.add_document(
-                str(file_path),
-                content,
-                {
-                    "path": str(file_path),
-                    "type": "python" if file_path.suffix == ".py" else "markdown",
-                },
-            )
+            kb.add_document(str(file_path), content, _document_metadata(file_path))
             indexed += 1
         except Exception as exc:
             errors.append(f"{file_path}: {exc}")
