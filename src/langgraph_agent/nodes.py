@@ -1133,8 +1133,12 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
 BUILDER_TOOL_NAMES = {tool["function"]["name"] for tool in BUILDER_TOOLS}
 
 # How many times the Builder may think-and-call before the node gives up. Each
-# turn is a cloud round trip, and the Architect gate gets another cycle anyway.
-MAX_BUILDER_TOOL_TURNS = 8
+# turn is a cloud round trip. The default leans on the Architect gate getting
+# another cycle anyway -- which holds only when a pass finishes a unit of work.
+# On an open-ended goal it does not: the Builder is cut off mid-task every pass,
+# reports nothing the gate can approve, and the run circles to its budget. So
+# this is overridable, and a broad goal wants it raised.
+MAX_BUILDER_TOOL_TURNS = int(os.getenv("MAX_BUILDER_TOOL_TURNS", "8"))
 
 # Wall-clock ceiling for the whole Builder turn, larger than the Researcher's
 # because this node legitimately makes many calls: up to MAX_BUILDER_TOOL_TURNS
