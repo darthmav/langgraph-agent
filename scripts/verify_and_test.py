@@ -2,13 +2,17 @@
 """Automated verification and testing for the 4-Agent System.
 
 Usage:
-    python scripts/verify_and_test.py [--index] [--test-graphrag] [--run-example]
+    python scripts/verify_and_test.py                # read-only checks
+    python scripts/verify_and_test.py --all          # including the ones that write
 
-This script:
-1. Verifies all dependencies are installed
-2. Optionally indexes knowledge base
-3. Optionally tests GraphRAG search
-4. Optionally runs the example usage
+With no flags this runs only the steps that leave the project alone: the
+dependency and seat checks, a GraphRAG search, and the test suite.
+
+Two steps are held back from that default because they are not read-only.
+`--index` rebuilds the corpus, and `--run-example` is a live agent run that
+writes files into the repository -- so plain `verify_and_test.py` used to
+reindex the knowledge base and leave several new files behind, which is not
+what "verify" reads as. Ask for them by name, or with `--all`.
 """
 
 import argparse
@@ -74,19 +78,54 @@ def check_dependencies() -> bool:
     return True
 
 
-def check_cloud_llm() -> bool:
-    """Check whether a cloud LLM API key is configured."""
-    print_step("Checking cloud LLM configuration")
+def check_seats() -> bool:
+    """Report what each seat will actually run.
 
-    if os.getenv("ANTHROPIC_API_KEY"):
-        print("  ✓ Anthropic API key configured")
-        return True
-    if os.getenv("OPENAI_API_KEY"):
-        print("  ✓ OpenAI API key configured")
-        return True
+    This used to look for ANTHROPIC_API_KEY / OPENAI_API_KEY and warn when it
+    found neither -- a question nobody here asked. No seat uses either provider
+    by default, so a correctly configured machine was told live agent runs were
+    impossible while all four seats sat live on Ollama cloud.
 
-    print("  ⚠ No cloud API key configured. Live agent runs require ANTHROPIC_API_KEY or OPENAI_API_KEY.")
-    return False
+    `get_agent_status` is what it reads instead, because key presence is not
+    liveness: a key can authenticate and the seat still be unusable, and a seat
+    with no key at all silently becomes StubLLM while every static check keeps
+    reporting the configured model. It is also the only place `stubbed` and
+    `live` are kept apart, and they are different failures -- a stubbed seat
+    completes the run with canned text, a failing seat kills it.
+    """
+    print_step("Checking seats")
+
+    # Imported here, not at module scope: step 1 is what reports a missing
+    # dependency in readable form, and a top-level import would crash ahead of
+    # it with a traceback instead.
+    try:
+        from langgraph_agent.config import AGENTS, get_agent_status
+    except Exception as e:  # pragma: no cover - step 1 already reports this
+        print(f"  ✗ Could not read the seat configuration: {e}")
+        return False
+
+    all_live = True
+    for agent in AGENTS:
+        seat = get_agent_status(agent)
+        if seat["live"]:
+            mark, note = "✓", ""
+        else:
+            all_live = False
+            mark = "○" if seat["stubbed"] else "✗"
+            note = f"   !! {seat['badge']}: {seat['reason']}"
+        print(
+            f"  {mark} {agent:<11}{seat['model']:<24}"
+            f"{seat['provider']:<11}{seat['placement']}{note}"
+        )
+
+    if all_live:
+        print("\n✓ All seats live")
+    else:
+        print(
+            "\n  ⚠ Not every seat can run. A stubbed seat (○) completes the run "
+            "with canned text; a failing seat (✗) kills it."
+        )
+    return all_live
 
 
 def index_knowledge_base() -> bool:
@@ -204,6 +243,18 @@ def run_tests() -> bool:
     try:
         import pytest
 
+        # `serve` and `spectral_graph` sit at the project root and are not part
+        # of the installed distribution, so three test modules import them by
+        # name. `python -m pytest` works because it puts the working directory
+        # on sys.path first; pytest.main() from here does not -- sys.path[0] is
+        # scripts/ -- so those three failed to collect and this step reported
+        # "Some tests failed" against a tree where all 394 pass. A false failure
+        # from the verification runner is worse than none: it is the reading
+        # someone acts on.
+        root = str(Path(__file__).parent.parent)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+
         print_step("Running pytest")
         exit_code = pytest.main(
             [
@@ -227,7 +278,7 @@ def main():
     parser.add_argument(
         "--index",
         action="store_true",
-        help="Index knowledge base",
+        help="Rebuild the knowledge base (writes to knowledge/)",
     )
     parser.add_argument(
         "--test-graphrag",
@@ -237,7 +288,7 @@ def main():
     parser.add_argument(
         "--run-example",
         action="store_true",
-        help="Run example usage",
+        help="Run a live agent run (writes files into the repository)",
     )
     parser.add_argument(
         "--run-tests",
@@ -247,15 +298,24 @@ def main():
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run all steps",
+        help="Run every step, including the two that write",
     )
 
     args = parser.parse_args()
 
-    # Default to --all if no specific flags
-    run_all = args.all or not any(
+    # No flags runs the read-only steps. The two that write are reached only by
+    # naming them or by --all: a verification script that reindexes the corpus
+    # and commits a live agent run to the working tree on a bare invocation is
+    # a trap, and the caller has no way to find out before it happens.
+    read_only = args.all or not any(
         [args.index, args.test_graphrag, args.run_example, args.run_tests]
     )
+
+    # Every step runs even after one fails -- one broken step should not hide
+    # the state of the rest -- but the exit code has to carry the result. It
+    # was 0 unconditionally, so a caller reading only the status got "verified"
+    # from a run that had just printed four warnings.
+    failed: list[str] = []
 
     print_header("4-AGENT SYSTEM VERIFICATION")
 
@@ -263,33 +323,44 @@ def main():
     if not check_dependencies():
         sys.exit(1)
 
-    # Check cloud LLM (non-blocking)
-    check_cloud_llm()
+    # Non-blocking, as before: a stubbed seat still completes a run, and the
+    # steps below are worth reading either way. It reports; it does not judge.
+    check_seats()
 
     # Step 2: Index knowledge base
-    if args.index or run_all:
+    if args.index or args.all:
         if not index_knowledge_base():
             print("\n⚠ Indexing failed, continuing anyway...")
+            failed.append("indexing")
 
     # Step 3: Test GraphRAG
-    if args.test_graphrag or run_all:
+    if args.test_graphrag or read_only:
         if not test_graphrag_search():
             print("\n⚠ GraphRAG test failed, continuing anyway...")
+            failed.append("GraphRAG search")
 
     # Step 4: Run example
-    if args.run_example or run_all:
+    if args.run_example or args.all:
         if not run_example_usage():
             print("\n⚠ Example failed, continuing anyway...")
+            failed.append("example run")
 
     # Step 5: Run tests
-    if args.run_tests or run_all:
+    if args.run_tests or read_only:
         if not run_tests():
             print("\n⚠ Some tests failed")
+            failed.append("tests")
 
     print_header("VERIFICATION COMPLETE")
+
+    if failed:
+        print("\n\u2717 Failed: " + ", ".join(failed))
+        sys.exit(1)
+
     print("\nNext steps:")
     print("  - Review output above for any issues")
-    print("  - Set ANTHROPIC_API_KEY in .env for live agent runs")
+    print("  - Any seat not live above: start Ollama and `ollama signin` for")
+    print("    a :cloud tag, or set that provider's key for an Anthropic/OpenAI seat")
     print("  - Run: python example_usage.py")
 
 
