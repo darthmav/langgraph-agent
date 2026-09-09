@@ -76,6 +76,10 @@ body::before{
 #gone code{color:var(--accent)}
 #stats b{color:var(--ink-2);font-weight:600}
 #stats .nocorpus{color:var(--ink-3);font-style:italic}
+/* Amber, not red: the corpus still answers, it just answers for a project
+   that has moved on. Red is for a seat that cannot run at all. */
+#stats .stale{color:#f2b544;border:1px solid #f2b54455;border-radius:4px;
+  padding:0 6px;cursor:help}
 
 #warn{
   grid-area:warn; display:none; background:#3a1618; border-bottom:1px solid #f8717155;
@@ -103,7 +107,7 @@ body::before{
   transition:width .15s,height .15s}
 /* The rainbow means one thing: this seat's node is on the stack right now.
    It is driven by run_progress.active -- the node actually executing -- and
-   not by the feed's last-finished node, so a seat lights for exactly as long
+   not by the run's last-finished node, so a seat lights for exactly as long
    as it is working. Nothing else on the card animates, or the colour stops
    being evidence and becomes decoration. */
 .seat.working .dot{
@@ -189,6 +193,7 @@ label.go:hover{filter:brightness(1.4)}
 
 /* ---- split panes ---- */
 .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;flex:1;min-height:0}
+.split.one{grid-template-columns:1fr}
 .col{display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .scroll{overflow-y:auto;flex:1;min-height:0}
 
@@ -228,17 +233,14 @@ label.go:hover{filter:brightness(1.4)}
 .msg{border-radius:10px;padding:9px 12px;margin-bottom:8px;font:12px/1.6 var(--sans);white-space:pre-wrap}
 .msg.user{background:var(--user-msg);color:#dbe9ff}
 .msg.sys{background:var(--bg-3);border-left:3px solid var(--accent);color:var(--ink-2);font:11px/1.6 var(--mono)}
-.stage{background:var(--bg-3);border:1px solid var(--line);border-left:3px solid var(--role,var(--ink-3));
-  border-radius:8px;padding:8px 11px;margin-bottom:7px}
-.stage .sn{display:flex;justify-content:space-between;align-items:center;
-  font:10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)}
-.stage .sd{font:11px/1.6 var(--mono);color:var(--ink-3);margin-top:5px}
 .badge{padding:1px 6px;border-radius:4px;font:9px var(--mono);letter-spacing:.08em}
 .badge.ok{background:#4ade8022;color:var(--ok)}
 .badge.run{background:#4ea3ff22;color:var(--accent)}
 .badge.bad{background:#f8717122;color:var(--err)}
-#impact{background:#3a161822;border:1px solid #f8717144;border-radius:8px;
-  padding:9px 12px;margin-bottom:9px;font:11px var(--mono);color:#ffb4b4;display:none}
+/* "Changed this machine" rides inside the Director's verdict message now. It
+   is a safety notice, so it keeps its own colour rather than reading as prose. */
+.touched{display:block;margin-top:8px;padding:7px 10px;border-radius:6px;
+  background:#3a161822;border:1px solid #f8717144;font:11px var(--mono);color:#ffb4b4}
 .muted{color:var(--ink-3);font:11px var(--mono);padding:6px 0}
 .splitlbl{display:flex;align-items:center;gap:5px;font:11px var(--mono);color:var(--ink-3);cursor:pointer}
 /* Bridge verdicts. The colour carries the same three-way distinction the
@@ -288,7 +290,12 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
 
 <main id="main">
   <section class="panel" data-p="engineer">
-    <div class="split">
+    <!-- One column. The Action Feed that used to sit on the right listed the
+         same stages the Director reports and the same seat the Crew lights
+         already name, so it was a third telling of one story. What it held
+         that nothing else did -- the clock, and the "changed this machine"
+         notice -- moved into the Director stream. -->
+    <div class="split one">
       <div class="col">
         <h2>Director</h2>
         <div class="scroll" id="director"><div class="muted">Give the Architect a goal. It sets the direction, the Planner breaks it down, and it rules on the result. Attach a document — or drop one here — to put it in the corpus the Researcher searches.</div></div>
@@ -303,13 +310,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <button class="go danger" id="eng-stop" disabled
                   title="Halt the run at its next safe boundary. Work already in flight — a file write, a test run, a model call — finishes first, so this can take up to a minute. Everything the run produced is kept.">Stop</button>
           <button class="go ghost" id="eng-clear" disabled
-                  title="Clear the transcript, the Action Feed and the State dump. Nothing on disk is touched — the last run's saved state is still there, and a reload brings it back.">Clear</button>
+                  title="Clear the transcript and the State dump. Nothing on disk is touched — the last run's saved state is still there, and a reload brings it back.">Clear</button>
         </div>
-      </div>
-      <div class="col">
-        <h2>Action Feed</h2>
-        <div id="impact"></div>
-        <div class="scroll" id="feed"><div class="muted">No run yet &mdash; stages appear here as the loop reports them.</div></div>
       </div>
     </div>
   </section>
@@ -1101,39 +1103,28 @@ $("#up-input").onchange = async e => {
 // anyone reaches for Clear.
 const ENGINEER_EMPTY = {
   director: $("#director").innerHTML,
-  feed:     $("#feed").innerHTML,
   state:    $("#state-dump").textContent,
 };
 
 // Clearing takes nothing off disk: the server still holds the last run, and a
 // reload paints it back. This empties the whole Engineer view rather than the
-// transcript alone -- the feed, the impact banner and the state dump all
+// transcript alone -- the transcript and the state dump both
 // describe the run whose messages just went, and "Changed this machine -- 3
 // files" standing over an empty transcript is a half-cleared screen.
 function clearEngineerView(){
   $("#director").innerHTML = ENGINEER_EMPTY.director;
-  $("#feed").innerHTML = ENGINEER_EMPTY.feed;
   $("#state-dump").textContent = ENGINEER_EMPTY.state;
-  const impact = $("#impact");
-  impact.style.display = "none"; impact.textContent = "";
   // The typed goal and the expect-failures box are inputs, not transcript, and
   // are deliberately left alone.
   setClearButton();
 }
 
-// Off while a run is in flight, because the poll timer repaints the feed every
-// second and would undo the clear inside of one -- and off when there is
+// Off while a run is in flight, because the poll timer rewrites the live line
+// every second and would undo the clear inside of one -- and off when there is
 // nothing to clear.
 function setClearButton(){
-  const pristine = $("#director").innerHTML === ENGINEER_EMPTY.director
-                && $("#feed").innerHTML === ENGINEER_EMPTY.feed;
+  const pristine = $("#director").innerHTML === ENGINEER_EMPTY.director;
   $("#eng-clear").disabled = CURRENT.inflight || pristine;
-}
-
-function stageCard(role, text, badge){
-  return `<div class="stage" style="--role:${ROLE_COLOR[role] || "#5a6474"}">`+
-    `<div class="sn"><span>${esc(role)}</span>${badge || ""}</div>`+
-    `<div class="sd">${esc(text)}</div></div>`;
 }
 
 // The run in flight, at module scope. It used to be entirely local to run(),
@@ -1263,27 +1254,38 @@ async function run(){
   setRunButtons();
   $("#director").innerHTML += `<div class="msg user">${esc(goal)}`
     + (expectFail ? ` <span class="badge">expect failures</span>` : "")
-    + `</div>`;
+    + `</div>`
+    + `<div class="msg sys" id="run-live"><b>Running</b></div>`;
   $("#eng-prompt").value = "";
 
   // A run is many cloud calls long and the POST does not return until the last
-  // one lands, so the feed polls the server for the nodes that have finished so
-  // far. Showing only an elapsed counter made a working run and a wedged one
-  // look identical, which is the whole reason a slow run reads as a hang.
+  // one lands, so the console polls the server for the nodes that have finished
+  // so far. Showing only an elapsed counter made a working run and a wedged one
+  // look identical, which is the whole reason a slow run reads as a hang -- so
+  // the live line names the last finished stage as well as the clock.
   const started = Date.now();
   let done = [], node = "", budget = 0, polling = false;
 
+  // One line that rewrites itself, rather than a column of cards. It still has
+  // to distinguish a working run from a wedged one -- that is why the feed
+  // showed stages at all -- so it names the stage that finished last as well as
+  // the clock. Which seat is *currently* working is not repeated here: the Crew
+  // lights answer that from `run_progress.active`, which is the better source,
+  // since `node` is the seat that just finished rather than the one working.
   const paint = () => {
+    const live = $("#run-live");
+    if(!live) return;
     const secs = ((Date.now() - started) / 1000).toFixed(0);
     // The budget is shown alongside the clock so a long run reads as one that
     // still has time left, rather than as one that may never stop.
     const clock = budget ? `${secs}s / ${Math.round(budget)}s` : `${secs}s`;
-    $("#feed").innerHTML =
-      stagesFrom(done).map(s =>
-        stageCard(s.role || "graph", s.text, `<span class="badge ok">DONE</span>`)).join("")
-      + stageCard(node || "architect", `${node || "Loop"} running… ${clock}`,
-                  `<span class="badge run">RUN</span>`);
-    $("#feed").scrollTop = $("#feed").scrollHeight;
+    const stages = stagesFrom(done);
+    const last = stages.length ? stages[stages.length - 1] : null;
+    live.innerHTML =
+      `<b>Running</b> <span class="badge run">${esc(clock)}</span>`
+      + (last ? `\n\n${stages.length} stage(s) done \u2014 last: ${esc(last.text)}`
+              : `\n\nWaiting for the first stage\u2026`);
+    $("#director").scrollTop = $("#director").scrollHeight;
   };
   paint();
 
@@ -1311,9 +1313,10 @@ async function run(){
     const r = await rpc("run_goal", {goal, expect_failures: expectFail});
     renderRun(r);
   }catch(e){
-    $("#feed").innerHTML = stageCard("architect", "Run failed: "+e.message, `<span class="badge bad">FAIL</span>`);
+    const live = $("#run-live");
+    if(live) live.remove();
     // The director pane is where the goal was typed and where a finished run
-    // answers. Reporting the failure only in the feed leaves that pane showing
+    // answers. Reporting the failure anywhere else leaves that pane showing
     // the goal and nothing after it, which reads as a request that was never
     // sent rather than one that died on the first call.
     $("#director").innerHTML +=
@@ -1349,7 +1352,7 @@ function paintActiveSeat(){
 }
 
 // Each node logs "[Role] ..." into messages; that log is the run's actual
-// path, so the feed is built from it rather than from a fixed sequence.
+// path, so the live line is built from it rather than from a fixed sequence.
 function stagesFrom(messages){
   return (messages || []).map(m => {
     const hit = /^\[(\w+)\]\s*(.*)$/.exec(m);
@@ -1385,14 +1388,18 @@ function recoveryBlock(r){
 function renderRun(r, note){
   $("#state-dump").textContent = JSON.stringify(r, null, 2);
 
-  const stages = stagesFrom(r.messages);
-  $("#feed").innerHTML = stages.map(s =>
-    stageCard(s.role || "graph", s.text, `<span class="badge ok">DONE</span>`)).join("");
+  // The run is over, so the line that was tracking it is replaced by the
+  // answer rather than left behind reading "Running".
+  const live = $("#run-live");
+  if(live) live.remove();
 
+  // A run that wrote to this machine says so on the verdict itself. It used to
+  // be a separate box beside the feed, and it is a safety notice rather than a
+  // progress report -- it belongs with the result someone actually reads.
   const files = r.files_changed || [];
-  const impact = $("#impact");
-  impact.style.display = files.length ? "block" : "none";
-  impact.textContent = files.length ? `Changed this machine — ${files.length} file(s): ${files.join(", ")}` : "";
+  const touched = files.length
+    ? `<span class="touched">Changed this machine \u2014 ${files.length} file(s): ${esc(files.join(", "))}</span>`
+    : "";
 
   const tag = note ? ` <span class="badge">${esc(note)}</span>` : "";
   if(r.stopped){
@@ -1403,6 +1410,7 @@ function renderRun(r, note){
       (r.stop_reason ? ` ${esc(r.stop_reason)}` : "")+
       `\n\n${esc(recoveryBlock(r))}`+
       (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
+      touched+
       `</div>`;
   }else{
     const verdict = r.verdict || "(none)";
@@ -1411,6 +1419,7 @@ function renderRun(r, note){
       `<div class="msg sys"><b>Architect verdict:</b> <span class="badge ${cls}">${esc(verdict)}</span>${tag}`+
       (r.architecture ? `\n\n${esc(r.architecture)}` : "")+
       (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
+      touched+
       `</div>`;
   }
   $("#director").scrollTop = $("#director").scrollHeight;
@@ -1439,7 +1448,8 @@ async function reattach(){
     setRunButtons();
     $("#director").innerHTML +=
       `<div class="msg sys"><b>Reattached</b> to a run already in flight`+
-      (p.goal ? `\n\n${esc(p.goal)}` : "")+`</div>`;
+      (p.goal ? `\n\n${esc(p.goal)}` : "")+`</div>`+
+      `<div class="msg sys" id="run-live"><b>Running</b></div>`;
     // This page has no run_goal fetch of its own to return the final state, so
     // it watches for the run to end and then reads the server's snapshot.
     CURRENT.timer = setInterval(async () => {
@@ -1448,11 +1458,17 @@ async function reattach(){
       if(!q) return;
       setActiveSeat(q.running ? q.active : "");
       if(q.running){
-        $("#feed").innerHTML =
-          stagesFrom(q.messages || []).map(x =>
-            stageCard(x.role || "graph", x.text, `<span class="badge ok">DONE</span>`)).join("")
-          + stageCard(q.node || "architect", `${q.node || "Loop"} running…`,
-                      `<span class="badge run">RUN</span>`);
+        // No clock on this path: the console reattached partway through and
+        // never saw the run start, so it cannot honestly say how long it has
+        // been going. The stage count is what it does know.
+        const live = $("#run-live");
+        if(live){
+          const stages = stagesFrom(q.messages || []);
+          const last = stages.length ? stages[stages.length - 1] : null;
+          live.innerHTML = `<b>Running</b>`
+            + (last ? `\n\n${stages.length} stage(s) done \u2014 last: ${esc(last.text)}`
+                    : `\n\nWaiting for the next stage\u2026`);
+        }
         if(q.stopping && !CURRENT.stopping){ CURRENT.stopping = true; setRunButtons(); }
         return;
       }
@@ -1512,6 +1528,34 @@ function healthChip(stats){
 }
 
 
+// The corpus is a function of what is on disk and nothing rebuilds it, so it
+// drifts in silence: every counter beside this one stays non-zero and
+// internally consistent while retrieval quietly stops finding the project.
+// This is the only thing on the header that says "press Reindex" for a corpus
+// that already exists, so it names the numbers rather than just glowing.
+function staleChip(stats){
+  const s = stats.staleness;
+  if(!s) return "";
+  // Reported apart from staleness on purpose: an oversized file is correctly
+  // absent and Reindex will not change that, so asking for one would be a
+  // permanent warning with nothing behind it. It still has to be visible --
+  // a source file growing past the limit drops out of the corpus in silence.
+  const big = s.oversized_count
+    ? `<span class="stale" title="${("Too large to index, so absent from the corpus. Reindexing will not "
+        + "change this - split the file or raise MAX_INDEXABLE_BYTES.\n\n"
+        + (s.oversized || []).join("\n")).replace(/"/g,"&quot;")}">${s.oversized_count} too large</span>`
+    : "";
+  if(!s.stale) return big;
+  const parts = [];
+  if(s.missing_count) parts.push(`${s.missing_count} not indexed`);
+  if(s.extra_count) parts.push(`${s.extra_count} no longer on disk`);
+  const sample = [].concat(s.missing || [], s.extra || []).slice(0, 8).join("\n");
+  const title = `The corpus does not match the project: ${s.indexed} documents indexed, `
+    + `${s.expected} in the walk. Press Reindex project on the Corpus tab.`
+    + (sample ? `\n\n${sample}` : "");
+  return `<span class="stale" title="${title.replace(/"/g,"&quot;")}">stale: ${parts.join(", ")}</span>`+big;
+}
+
 async function poll(quiet){
   if(EXITING) return;
   try{
@@ -1530,6 +1574,7 @@ async function poll(quiet){
         `<span>chunks <b>${stats.total_chunks}</b></span>`+
         `<span>nodes <b>${stats.total_nodes}</b></span>`+
         `<span>edges <b>${stats.total_edges}</b></span>`+
+        staleChip(stats)+
         healthChip(stats);
     await loadCrew(true);
   }catch(e){ /* goOffline already reported it */ }

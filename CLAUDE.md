@@ -52,6 +52,10 @@ python example_usage.py
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
 │   ├── mcp_client.py          # MCP client / local tool bindings
 │   ├── lexical.py             # BM25 + rank fusion: the lexical half of search
+│   ├── web_research.py        # Online research: keyless search, our own selection gate
+│   ├── html_text.py           # HTML → text by link density. No library, no dependency
+│   ├── corpus_health.py       # Is the corpus still the project? missing / extra / oversized
+│   ├── corpus_spectral.py     # connectivity / topics / bottleneck / duplicate_entities (mixin)
 │   ├── exceptions.py          # Public error surface (re-exports _internal/)
 │   ├── self_healing/          # Opt-in retry / circuit-breaker decorators (see note below)
 │   │   ├── logger.py          # SelfHealingLogger: structured, severity-leveled healing log
@@ -74,6 +78,13 @@ python example_usage.py
 │   ├── test_lexical.py        # BM25, rank fusion, the relevance floor
 │   ├── test_self_healing.py   # self_healing: logger, retry, circuit breaker
 │   ├── test_uploads.py        # Uploading a document into the corpus
+│   ├── test_web_research.py   # Fan-out, the selection gate, storage, the empty answers
+│   ├── test_html_text.py      # The from-scratch HTML reader
+│   ├── test_web_entities.py   # Fetched pages stay out of the entity graph
+│   ├── test_run_research_phase.py # Where the research phase sits in a run
+│   ├── test_corpus_staleness.py   # Corpus vs disk, and not crying wolf
+│   ├── test_graph_queries.py  # Undirected traversal of the knowledge graph
+│   ├── test_research_length.py # How much retrieved evidence reaches the Builder
 │   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── reindex.py             # Re-index files into GraphRAG
@@ -199,6 +210,27 @@ agents. Adding one means: a node in `nodes.py`, a prompt in `prompts/`, wiring
 plus a router in `graph.py`, entries in `AGENTS` / `DEFAULT_SEATS` /
 `_DEFAULT_AGENT_MODELS`, a `StubLLM` branch, and a `ROLE_COLOR` entry in
 `frontend/index.html`.
+
+### The Engineer panel is one column
+
+The Action Feed that sat to the right of the Director is gone. It was a third
+telling of one story: the stage cards repeated what the Director reports and
+what the Crew lights already say, and `run_progress.active` drives those lights
+from the seat *currently* executing, which is strictly better than the feed's
+`node` -- that names the seat which just finished.
+
+Two things it held were not repeated anywhere, so they moved rather than went.
+The **clock** and the last finished stage now live in a single `#run-live` line
+inside the Director, rewritten in place each second and replaced by the verdict
+when the run ends. That line has to keep naming the last stage, not just the
+elapsed seconds: showing only a counter made a working run and a wedged one
+look identical, which is the whole reason the feed listed stages at all. The
+**"changed this machine"** notice is now a `.touched` block on the verdict
+message itself -- it is a safety notice about files on disk, so it belongs with
+the result someone reads rather than in a pane beside it.
+
+`stageCard` and the `.stage` CSS went with the column; the Clear button's
+tooltip no longer promises to clear a pane that does not exist.
 
 ### The console API
 The console drives a single `POST /rpc` taking `{method, params}` and returning
@@ -406,6 +438,31 @@ deliver the reply.
   second account of the same corpus, free to disagree with it. A store that
   cannot answer `get` falls back to dense-only instead of raising: the lexical
   half improves an ordering that is already correct without it.
+- **The Builder gets the whole retrieved passage, from every result.**
+  `RESEARCH_RESULTS` feeds both the `top_k` the Researcher asks for and the
+  slice it forwards, so the two cannot drift: the search used to request five
+  results and hand on three, discarding two passages that had already been
+  retrieved, ranked and re-ranked -- and the *diverse* two, since
+  `SEARCH_ESCALATION` widens the window precisely to stop one file taking every
+  hit. `RESEARCH_SNIPPET_CHARS` then caps each passage at 1,500 characters
+  rather than the old 300.
+  The 300 was the worse of the two, because of *which* 300 it kept. A chunk is
+  the unit retrieval judges -- it is selected because it matched, and the
+  matching sentence sits anywhere inside it -- so keeping the opening third
+  keeps the part with no particular reason to be relevant. Measured on this
+  corpus, chunks run to a mean of 882 characters and a p99 of 1,373, so 300
+  carried **34%** of a typical passage. On a `research/web` document the
+  opening is the provenance header, and there the loss was total: the
+  top-scoring source of the 2026-09-09 run reached the Builder as a title, a
+  URL, a retrieval timestamp and the goal it was fetched for, truncated
+  mid-word, with not one character of the article attached. The Builder was
+  handed a citation and no evidence. 1,500 clears the p99, so a passage
+  normally arrives whole and the cap guards against a pathological chunk;
+  measured across three questions the Builder now receives ~4,900 characters
+  from five sources against 900 from three. A cut that does bite is announced
+  in the text (`_research_snippet`), for the reason `_fit_to_index_limit`
+  writes its note onto the page: a silent trim is indistinguishable from a
+  source that had nothing more to say, and the Builder cannot ask.
 - **A failed verification blocks approval.** `failed_verification` carries the
   paths, and the Architect rewrites its own `approved` to `revise` while that
   list is non-empty — the one place the gate's ruling is overridden. The step
@@ -569,6 +626,20 @@ deliver the reply.
   expanded: there is no shell here, and a `cwd` that expanded what an argument
   on the same line would not is a worse surprise than a refusal naming the
   path.
+  **The schema was not enough on its own, which is measured rather than
+  assumed.** Re-running the same goal after `cwd` shipped, the Builder reached
+  for `cd there && ...` three times before using the argument that replaces
+  it, then used `cwd` on all eleven of its remaining terminal calls and never
+  went back. A description is consulted before the turn; an error is read at
+  the moment the mistake is made, so `_missing_program_error` names the
+  replacement in the `FileNotFoundError` path. Only the `cd` family gets one:
+  `export` and `source` are equally builtins with nothing here to replace
+  them, so they get the fact that ends the retry instead of an alternative
+  that does not exist. And the report line carries `[cwd=...]`, because the
+  Architect rules on that report and `find . -type f -> ok` names no
+  directory -- once the Builder passes `cwd`, the command alone stopped
+  locating anything, since the same relative command means a different thing
+  in every directory it could have run in.
 - **The Builder's deadline may never abandon a tool call.** Only the model's
   own call is wrapped in `_with_deadline` — discarding a half-received response
   costs a turn and nothing else. The tool calls underneath it write files,
@@ -897,6 +968,162 @@ deliver the reply.
   and exporting it do not, and those are what the console does on a timer.
   Loading it in `__init__` meant every header poll paid for the model and
   importing the module pulled in torch behind it.
+- **Online research costs nothing, and that is a constraint rather than a
+  happy accident.** `web_research` reaches the internet through DuckDuckGo's
+  keyless HTML endpoint, or a SearxNG instance the operator hosts
+  (`SEARXNG_URL`). No API key, no account, no per-call charge — every general
+  web search API that would be easier charges money, including the ones with a
+  free tier, and this project does not buy services. The result list is the
+  *only* thing taken from outside: ranking, extraction and selection are all
+  in-tree, which is why `html_text` is a from-scratch reader rather than a
+  dependency.
+  The phase has four stages and the last two are why it is ours.
+  `expand_queries` fans a goal into several searches using `lexical.tokenize`,
+  so a goal naming `BUILDER_DEADLINE_SECONDS` also searches
+  `builder deadline seconds` — a search engine has seen the second and never
+  the first. Those orderings merge through `reciprocal_rank_fusion`, the same
+  function `search` merges its dense and lexical halves with, so a page several
+  queries agree on outranks one that topped a single query. `html_text.extract`
+  reads each page by **link density plus block length**: a nav strip is short
+  and almost all anchor text, an article is long and almost none, and a block
+  is dropped only when *both* tests fail it — headings are exempt from the
+  length test, being short by nature. It reports `kept`/`dropped`/`fell_back`
+  because an extractor that cannot be graded would be the one unmeasured link
+  in a chain where the floor, the chunker and the duplicate scan were all
+  tuned against printed numbers.
+  Then `select_pages` decides what is *embedded*, which the engine's rank
+  deliberately does not. Every fetched page is scored with `BM25Index` against
+  the goal and kept only above a **ratio of the best page's score** — never an
+  absolute, for the reason `lexical.py` already gives: a BM25 score is
+  unbounded and corpus-relative, so a constant is a hyperparameter fitted to
+  one set of pages and meaningless on the next. Zero is the single absolute
+  floor, because zero means no shared term at all. This gate is the answer to
+  the problem the phase creates: a web document competes with the checkout's
+  own files at retrieval time, under a `RETRIEVAL_RELEVANCE_FLOOR` calibrated
+  on a corpus containing none of them.
+  A fetched page is written under `research/web/` **before** it is embedded,
+  the same ordering and for the same reason as `store_uploaded_document`, and
+  that directory must stay inside `PROJECT_INDEX_PATTERNS` and out of
+  `PROJECT_INDEX_EXCLUDES`. Filenames are deterministic
+  (`host-path-<8 hex>.md`) so re-researching a topic overwrites in place rather
+  than growing the corpus by a near-identical document per run. Provenance —
+  URL, title, retrieval time, originating goal — goes in the document *text*
+  and never in the metadata: metadata is `_document_metadata`'s two keys,
+  shared with `index_project_files`, so a third key set only on this path would
+  vanish the moment a reindex re-read the file from the walk.
+  `search_web` distinguishes `disabled`, `error` and a genuine empty result,
+  and `research_online` reports `considered` beside `documents` — a phase that
+  read twelve pages and kept none is working correctly on a goal the web has
+  nothing to say about, and must not read as one that failed.
+  **It runs before the Architect opens, and that ordering is the design.**
+  `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
+  lock and before `graph.stream`, so the corpus is whole by the time any seat
+  searches it and does not move again for the rest of the run. This is not a
+  way around `_refuse_while_a_run_is_in_flight`; it is the only ordering that
+  obeys it. Measured end to end on 2026-09-09: 12 pages read, 8 embedded, 174
+  passages, 19.6s, and the Researcher then retrieved one of them at 0.74 --
+  comfortably over the floor -- with its provenance header intact in the
+  matched chunk.
+  The phase reaches the Researcher through **the corpus and nothing else**.
+  There is deliberately no path by which a fetched page skips retrieval: it is
+  embedded, and the Researcher finds it with the same search, the same hybrid
+  re-rank and the same relevance floor as everything else. A page fetched for a
+  goal that cannot be retrieved for that goal should not reach the Builder on
+  the strength of having been fetched.
+  Every failure is swallowed into the report and none of them stops the run --
+  a goal the web cannot answer, an engine that is down, a machine with no
+  network. The feed line words the empty outcomes apart, because "switched
+  off", "we asked and it broke" and "we read twelve pages and none earned a
+  place" call for completely different things and an empty count reads
+  identically in all three.
+  **The suite must never run this.** `tests/conftest.py` switches it off for
+  every test, the same way and for the same reason it forces `StubLLM`.
+  Without that, every test starting a run fetched a dozen live pages and
+  embedded them: it took the suite from 28s to 138s, broke a stop test whose
+  five-second wait had been generous, and wrote **31 web pages into the
+  developer's own corpus** from goals like `"Do a thing"` and `"a long job"` --
+  Bible verses and project-management blogs, indexed as project knowledge.
+  `test_web_research.py` turns it back on and answers every request from a
+  `MockTransport`.
+- **A fetched web page is a retrieval source, not knowledge-graph material.**
+  `add_document` skips entity extraction for anything under `WEB_RESEARCH_DIR`
+  (`_is_web_document`), decided from the **path** and never from the call site
+  -- a reindex re-reads these as ordinary markdown, so a rule applied only
+  where a page is first stored would be reversed by the next rebuild, silently.
+  The capital rule is far worse on web prose than on this project's files:
+  `ENTITY_STOPWORDS` is hand-audited, and it was audited against source code
+  and numpy docstrings where the forced capitals are `Returns`, `Every`,
+  `False`. Web prose opens sentences with a different vocabulary entirely.
+  Measured on 2026-09-09, after a handful of runs: 15 fetched pages had minted
+  **551 entities no project document mentions -- 19% of the whole graph, 36.7
+  per page** -- `Although`, `Afterward`, `Altogether`, `Again`, `Accessed`.
+  Skipping them took the graph from 2,830 entities to 2,285 and duplicate
+  candidates from 205 to 171. The page is still chunked, embedded and fully
+  retrievable; it simply stops voting on what the entities of this project are.
+  The side effect is that such a page has no edges and is therefore an isolated
+  node -- which is exactly the symptom `connectivity()` exists to detect, and
+  the only place an entity-extraction regression shows at all. So
+  `connectivity()` excludes them and reports `web_documents` alongside, because
+  15 permanent false isolates would bury the one reading that matters.
+- **The staleness verdict is withheld while a run is in flight.** The research
+  phase writes each page to disk and embeds it as a separate step, so between
+  those two there is a file the walk can see and the store cannot. Observed
+  live: the header read `stale: 1 not indexed` mid-phase and cleared itself
+  moments later. The counts stay -- they are the truth about that instant --
+  and only the accusation is withheld, under `settling`. A verdict that
+  flickers teaches the operator to ignore the one that does not.
+- **The corpus rots in silence, so something has to compare it against the
+  project.** `corpus_health.corpus_staleness` is that comparison, and it rides
+  on `rag_stats` because the console header is where it will actually be seen.
+  It exists because of a failure with no symptom at all: measured here on
+  2026-09-09, the store held **8 documents, all of them uploads, against a walk
+  offering 103**. Every project query therefore scored under
+  `RETRIEVAL_RELEVANCE_FLOOR` -- `BUILDER_DEADLINE_SECONDS` returned an
+  unrelated upload at 0.284 -- so `_gather_research` discarded retrieval and
+  fell through to the Researcher's seat on *every* run, which is the
+  step-burning loop described above. Nothing reported it. `rag_stats` said
+  `indexed`, every counter was non-zero and consistent with the others, and the
+  full suite passed. The only way to see it was to put two numbers side by side
+  that nobody had ever compared.
+  Three states, and they are not one request. `missing` is in the walk and not
+  in the corpus -- work written since the last reindex. `extra` is in the
+  corpus and not in the walk -- a file deleted or renamed, whose text is
+  nowhere in the project and still answers searches. `oversized` is in the walk
+  and too large to index, so **correctly** absent: it is reported *apart* from
+  `stale` because reindexing cannot change it, and a header permanently asking
+  for a rebuild that would do nothing is a warning nobody reads.
+  Both size tests are exact rather than approximate, and that is the whole
+  reliability of the thing: `index_project_files` measures *characters* while
+  `stat` counts *bytes*, and a UTF-8 file is never fewer bytes than characters.
+  So `st_size <= MAX_INDEXABLE_BYTES` already proves a file indexable and
+  settles nearly every file without a read; only the handful above that line
+  are ambiguous, and those are read and measured properly. Guessing either way
+  invents an accusation -- excluding an indexable file calls a document that
+  belongs in the corpus `extra`, including a skipped one calls a document the
+  indexer is right to omit `missing` -- and one standing false accusation
+  teaches the operator to ignore the whole signal.
+  It lives in its own module because writing it inside `graphrag_server` pushed
+  that file from 98,920 characters to 104,582, past `MAX_INDEXABLE_BYTES`: the
+  module that defines the corpus would have been dropped *from* the corpus at
+  the next reindex, silently, as the direct result of adding the check meant to
+  catch exactly that. `graphrag_server.py` now sits ~250 characters under the
+  limit, so any edit to it is a live hazard, and `oversized` is what makes that
+  visible when it happens. The walk is cached for `WALK_CACHE_SECONDS` since
+  the console polls every five seconds; `forget_expected_documents` drops it,
+  and `rpc_upload_document` calls it because an upload is the one writer that
+  changes what the walk would find.
+- **`query_graph` traverses undirected, and must.** Every edge in the knowledge
+  graph runs **document -> entity**, so an entity has in-edges only and a
+  *directed* walk from one reaches nothing. It traversed directed until
+  2026-09-09 and returned the entity by itself -- `neighbors` of length 1 --
+  for every entity in the corpus: `Planner` has 21 edges and reported none, and
+  its real 2-hop neighbourhood is 614 nodes. That is the Researcher's
+  `query_knowledge_graph` tool, so one half of retrieval answered every
+  relationship question with "this term connects to nothing", which reads as a
+  finding rather than as a broken traversal. `neighborhood` already took the
+  undirected view and carried the comment explaining why; this is the same fix,
+  arrived at late. Both now share `_resolve_node`, so the console and the
+  Researcher cannot resolve an id differently.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and prunes Chroma ids that no longer qualify, so excluded or deleted files stop answering searches.
 - **A corpus clear empties in place and must reach disk.** `clear()` deletes

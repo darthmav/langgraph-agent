@@ -71,6 +71,43 @@ def _resolve_timeout(requested: Any) -> float:
     return min(seconds, TERMINAL_TIMEOUT_MAX_SECONDS)
 
 
+# A shell builtin reaches `subprocess` as a missing executable, so
+# `Command not found: 'cd'` is what the Builder gets -- true, and useless: it
+# names what failed and not one of the things that would work. Measured on the
+# rerun of the leviathan goal after `cwd` shipped, the Builder spent three
+# turns on `cd there && ...` before finding the argument that replaces it. The
+# schema says so already; an error is read at the moment the mistake is made,
+# which a description consulted before the turn is not.
+#
+# Only the first group has a replacement to point at. The rest get the fact
+# that ends the retry rather than an alternative that does not exist: `export`
+# cannot set a variable for a later call here, and no wording makes it able to.
+_CWD_BUILTINS = frozenset({"cd", "pushd", "popd"})
+_OTHER_BUILTINS = frozenset(
+    {"source", ".", "export", "set", "unset", "alias", "eval", "exec"}
+)
+
+
+def _missing_program_error(program: str) -> str:
+    """Say a program is missing, and say what to do when it is a builtin instead.
+
+    Kept apart from the `FileNotFoundError` handler so the wording can be
+    tested without spawning anything.
+    """
+    if program in _CWD_BUILTINS:
+        return (
+            f"Command not found: {program!r}. It is a shell builtin, not a "
+            "program, and there is no shell here -- pass `cwd` to choose the "
+            "directory the command runs in."
+        )
+    if program in _OTHER_BUILTINS:
+        return (
+            f"Command not found: {program!r}. It is a shell builtin, not a "
+            "program, and there is no shell here -- run one program per call."
+        )
+    return f"Command not found: {program!r}"
+
+
 def _resolve_cwd(requested: Any) -> tuple[str | None, str | None]:
     """Resolve a requested working directory to `(cwd, error)`.
 
@@ -410,10 +447,11 @@ class MCPClient:
             # With a shell this came back as rc=127 and a message on stderr.
             # Without one it raises, and a bare OSError repr does not say which
             # of the words was the program -- so name it, or the caller reads
-            # "not found" as its file argument being missing.
+            # "not found" as its file argument being missing. A builtin is
+            # named along with what to do instead (`_missing_program_error`).
             return {
                 "success": False,
-                "error": f"Command not found: {argv[0]!r}",
+                "error": _missing_program_error(argv[0]),
                 "command": command,
             }
         except Exception as e:

@@ -26,6 +26,10 @@ dependencies = [
     "langchain-anthropic>=0.2.0",  # primary cloud provider
     "mcp>=0.5.0",
     "python-dotenv>=1.0.0",
+    # Online research. It arrives transitively with langchain and chromadb
+    # anyway; named here because `web_research` imports it directly, and a
+    # direct dependency left implicit breaks the day a transitive one moves.
+    "httpx>=0.27.0",
     # GraphRAG dependencies
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
