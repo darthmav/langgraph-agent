@@ -1163,6 +1163,14 @@ PROJECT_INDEX_EXCLUDES = (
     "__pycache__", ".git", ".venv", "venv", "node_modules",
     ".pytest_cache", ".mypy_cache", "build/", "dist/", ".egg-info",
     "knowledge/", "scripts/", ".qwen/", ".claude/",
+    # Seat-diagnostic sweeps. `.gitignore` already calls these "per-run
+    # measurements against non-deterministic models, not history", but the walk
+    # is a glob and not git, so being gitignored kept them out of commits and
+    # not out of the corpus: five sweeps from one afternoon sat in the store as
+    # indexed documents, answering questions with a week-old measurement of a
+    # seating nobody runs any more. `reports/*.md` is written deliberately and
+    # stays indexed; only the timestamped sweeps under it are excluded.
+    "reports/diagnostics/",
 )
 
 # Above this size a file is documentation of something else, not a unit of

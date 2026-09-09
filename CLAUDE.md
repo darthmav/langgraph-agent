@@ -1092,6 +1092,38 @@ deliver the reply.
   moments later. The counts stay -- they are the truth about that instant --
   and only the accusation is withheld, under `settling`. A verdict that
   flickers teaches the operator to ignore the one that does not.
+- **Deleting a file does not delete the document, and git will not tell you
+  either.** Two separate gaps, and the 2026-09-09 cleanup hit both. Removing a
+  file from disk leaves its chunks in the store answering searches with text
+  that is nowhere in the project until something rebuilds -- which is exactly
+  what `corpus_staleness`'s `extra` reports, and it did: three entries appeared
+  the moment the files were unlinked and cleared on the next reindex. So the
+  sequence is delete, reindex, check; not delete and assume.
+  The second gap is why this paragraph exists at all. Everything removed that
+  day was **untracked**, so the deletion produced no diff, no commit and no
+  history -- `git log` will never show it happened. A future reader finding
+  these paths referenced in an old report has nothing to consult, which is the
+  only reason to write it down here.
+  Removed deliberately, and not to be re-added: the bot-detection and
+  security-circumvention material (`docs/legal-boundaries.md`,
+  `docs/research/bot-detection-techniques.md`,
+  `reports/security-circumvention-blocker.md` -- the last being the Architect's
+  own refusal of a goal asking for anti-bot circumvention, which is a record of
+  the gate working rather than of work done). That line of work is not part of
+  this project. Alongside them went the dead run artifacts (`AUDIT_REPORT.md`,
+  `CLARIFICATION_NEEDED.md`, `run_exercise.py`, `ai_efficiency_report.md`) and
+  the unrelated `files/` deliverable.
+  `reports/diagnostics/` went too, and it is the case worth generalising: the
+  `.gitignore` already called those sweeps *"per-run measurements against
+  non-deterministic models, not history"*, yet five of them were sitting in the
+  corpus as indexed documents, because **the walk is a glob and not git**.
+  Anything gitignored is still retrievable unless it is also in
+  `PROJECT_INDEX_EXCLUDES`, so a transient artifact that outlives its run does
+  not merely take up disk -- it answers questions. The corpus went from 122
+  documents to 108 on the reindex that followed. `reports/diagnostics/` is now
+  in `PROJECT_INDEX_EXCLUDES`, because deleting the sweeps fixed the afternoon
+  and not the next `diagnose_seats.py` run; the deliberate `reports/*.md`
+  beside them stay indexed, and the test asserts both halves through the walk.
 - **The corpus rots in silence, so something has to compare it against the
   project.** `corpus_health.corpus_staleness` is that comparison, and it rides
   on `rag_stats` because the console header is where it will actually be seen.
