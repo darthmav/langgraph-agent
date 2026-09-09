@@ -88,6 +88,57 @@ _OTHER_BUILTINS = frozenset(
 )
 
 
+# Shell operators, recognised only as *whole argv tokens*. That precision is
+# what separates this from the character whitelist the shell removal replaced:
+# the old filter scanned the raw string and so refused
+# `python -c "import x; print(y)"` for a `;` that was never syntax. After
+# `shlex.split` the same one-liner is three tokens with the `;` inside the
+# quoted one, and only an operator the caller wrote unquoted stands alone.
+#
+# Redirection gets a different sentence from chaining because a replacement
+# exists for it and not for them -- the same reason `cd` is answered with `cwd`
+# and `export` is not answered with anything.
+_REDIRECTS = frozenset({">", ">>", "<", "<<", "2>", "2>>", "1>", "&>", ">&"})
+_CHAINS = frozenset({"&&", "||", ";", "&", "|"})
+SHELL_OPERATORS = _REDIRECTS | _CHAINS
+
+
+def _shell_operator_error(token: str) -> str:
+    """Explain a shell operator that reached argv, and name what replaces it.
+
+    There is no shell, so the operator is inert either way; refusing it is
+    about the *diagnosis*, not about safety. Left to run, the command fails
+    somewhere unrelated and blames the wrong thing: `wc -l notes.md && tail
+    -50 notes.md` hands `wc` the arguments `&&`, `tail` and `-50`, and comes
+    back `wc: invalid option -- '5'` having never counted the file it was
+    given. Nothing in that names the chain.
+
+    That a description is not enough here is measured rather than assumed. The
+    schema already said shell syntax is not interpreted, and on the rerun of
+    2026-09-08 the Builder still reached for `cd there && ...` three times
+    before using the `cwd` argument that replaces it. A description is
+    consulted before the turn; an error is read at the moment the mistake is
+    made.
+    """
+    if token in _REDIRECTS:
+        return (
+            f"{token!r} is shell redirection, and there is no shell here. Use "
+            "`filesystem_write` to write a file, or `filesystem_read` to read "
+            "one -- the output of this call is already returned to you."
+        )
+    if token == "|":
+        return (
+            "'|' is a shell pipe, and there is no shell here to connect two "
+            "programs. Run one program per call and work on the output that "
+            "comes back."
+        )
+    return (
+        f"{token!r} chains commands in a shell, and there is no shell here. Run "
+        "one program per call. To run somewhere else, pass `cwd` rather than "
+        "chaining a `cd`."
+    )
+
+
 def _missing_program_error(program: str) -> str:
     """Say a program is missing, and say what to do when it is a builtin instead.
 
@@ -402,6 +453,21 @@ class MCPClient:
             return {
                 "success": False,
                 "error": "Empty command.",
+                "command": command,
+            }
+
+        # Refused before the spawn, like `_resolve_cwd`, and for the same
+        # reason: the complaint has to be made while we still know what is
+        # being complained about. Note the limit -- only a *spaced* operator is
+        # its own token. `echo hi; rm -rf /` splits to `['echo', 'hi;', ...]`,
+        # so the `;` rides on `hi` and stays inert data, which is what the
+        # canary test pins. This catches the shapes a caller writes on purpose,
+        # not every shape that exists.
+        operator = next((token for token in argv if token in SHELL_OPERATORS), None)
+        if operator is not None:
+            return {
+                "success": False,
+                "error": _shell_operator_error(operator),
                 "command": command,
             }
 

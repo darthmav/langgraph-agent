@@ -599,12 +599,32 @@ deliver the reply.
   /` runs `echo` with four literal arguments, which is a stronger guarantee
   than refusing the string was, and a test asserts the canary file survives
   rather than asserting the refusal.
-  The trade is that shell *features* are gone rather than rejected, and one of
-  them changes shape: a pipe used to be refused and is now accepted and
-  meaningless, passed to the program as the literal argument `|`. That is in
-  the tool description and pinned by a test, because a silently inert pipe is
-  worse than a refused one -- the Builder would read the empty result as the
-  command failing. Two failures the shell used to fold into a return code are
+  The trade is that shell *features* are gone rather than rejected -- and for a
+  while they were also silent. A pipe was accepted and meaningless, handed to
+  the program as the literal argument `|`, which is worse than a refusal: the
+  Builder reads the strange result as the command failing and repairs the wrong
+  thing. `SHELL_OPERATORS` now refuses an operator that stands alone in argv
+  and says which one it was (`_shell_operator_error`). The measured case:
+  `wc -l notes.md && tail -50 notes.md` gave `wc` the arguments `&&`, `tail`
+  and `-50` and came back `wc: invalid option -- '5'`, never having counted the
+  file it was handed, with nothing in the message naming the chain.
+  **This is not the character whitelist coming back**, and the difference is
+  where it runs. The old filter scanned the raw string, so it refused
+  `python -c "import x; print(y)"` over a `;` that was never syntax. This runs
+  *after* `shlex.split` and matches whole tokens, so an operator inside a
+  quoted argument is untouched and a filename containing one is still a
+  filename. It is also not a safety mechanism -- the operators were already
+  inert -- so it stays a refusal *before* the spawn, and the guarantee remains
+  the canary file, not the rejection.
+  Two things follow from matching tokens. A *spaced* operator is caught;
+  `echo hi; rm -rf /` splits to `['echo', 'hi;', ...]`, so that `;` rides on
+  `hi`, stays inert, and is what the canary test still pins -- this catches the
+  shapes a caller writes on purpose, not every shape that exists. And a literal
+  `&&` can no longer be passed as an argument even quoted, since `shlex` leaves
+  the two indistinguishable; nothing here needs that. Redirection is answered
+  with `filesystem_write`, the way `cd` is answered with `cwd`, while chaining
+  has no replacement and is not given a fake one.
+  Two failures the shell used to fold into a return code are
   now surfaced by name: unbalanced quotes cannot be parsed (`shlex` raises,
   and the message says to check the quoting), and a missing program raises
   `FileNotFoundError` rather than returning 127, so the error names the

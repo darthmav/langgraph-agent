@@ -126,21 +126,60 @@ async def test_terminal_execute_runs_a_python_one_liner(client: MCPClient):
 
 
 @pytest.mark.asyncio
-async def test_terminal_execute_passes_shell_syntax_through_literally(
+async def test_terminal_execute_refuses_a_shell_operator_and_names_it(
     client: MCPClient,
 ):
-    """A pipe is an argument, not a pipeline -- accepted, and inert.
+    """An operator written as its own word is refused, with the reason.
 
-    Worth pinning because it is the one place removing the shell is a
-    downgrade in behaviour rather than an upgrade: the old filter refused a
-    pipe, and this accepts one that will not do what it looks like. The tool
-    description says so; this proves the description true.
+    This used to be accepted and inert -- `echo a | wc -l` ran `echo` and
+    printed `a | wc -l` -- on the grounds that removing the shell removed the
+    danger. It did, and that was never the problem: the problem is the
+    *diagnosis*. `wc -l notes.md && tail -50 notes.md` hands `wc` the arguments
+    `&&`, `tail` and `-50` and comes back `wc: invalid option -- '5'`, having
+    never counted the file it was given, with nothing in the message naming the
+    chain. The old tool description already warned about this; the Builder
+    still reached for `cd there && ...` three times on the 2026-09-08 rerun
+    before using `cwd`. A description is consulted before the turn, an error at
+    the moment of the mistake.
     """
-    result = await client.call_tool(
-        "terminal_execute", {"command": "echo a | wc -l"}
+    chained = await client.call_tool(
+        "terminal_execute", {"command": "echo a && echo b"}
     )
-    assert result["success"]
-    assert result["stdout"].strip() == "a | wc -l"
+    assert not chained["success"]
+    assert "&&" in chained["error"]
+    assert "cwd" in chained["error"]
+
+    piped = await client.call_tool("terminal_execute", {"command": "echo a | wc -l"})
+    assert not piped["success"]
+    assert "pipe" in piped["error"]
+
+    # Redirection is answered with the tool that replaces it, the way `cd` is
+    # answered with `cwd`; chaining has no replacement and is not given one.
+    redirected = await client.call_tool(
+        "terminal_execute", {"command": "echo a > out.txt"}
+    )
+    assert not redirected["success"]
+    assert "filesystem_write" in redirected["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_operator_inside_an_argument_is_still_just_text(
+    client: MCPClient,
+):
+    """The precision that separates this from the filter it replaced.
+
+    The old character whitelist scanned the raw string, so it refused
+    `python -c "import x; print(y)"` over a `;` that was never syntax. The
+    check runs *after* `shlex.split` and matches whole tokens, so an operator
+    inside a quoted argument is untouched -- and a filename containing one is
+    still a filename.
+    """
+    quoted = await client.call_tool(
+        "terminal_execute",
+        {"command": 'python -c "print(\'a && b | c > d\')"'},
+    )
+    assert quoted["success"], quoted.get("error") or quoted.get("stderr")
+    assert quoted["stdout"].strip() == "a && b | c > d"
 
 
 @pytest.mark.asyncio
