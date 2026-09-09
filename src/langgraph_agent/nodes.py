@@ -1118,6 +1118,9 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
                 "a pipe, a redirect, && or $(...) is passed to the program as a "
                 "literal argument rather than doing anything, so run one program per "
                 "call and let the tool give you its output. "
+                "For the same reason there is no `cd` to run -- it is a shell builtin, "
+                "not a program -- so pass `cwd` to choose the directory the command "
+                "runs in. "
                 f"The command is killed after {int(TERMINAL_TIMEOUT_SECONDS)} seconds "
                 "unless you pass a longer `timeout`; a kill is reported as a timeout "
                 "with whatever the command printed first, which is not the same thing "
@@ -1127,6 +1130,15 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The command to run."},
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Directory to run the command in. Defaults to the project "
+                            "root, which is also what a relative path here is relative "
+                            "to. Use this instead of `cd`, which is not a program and "
+                            "cannot be run."
+                        ),
+                    },
                     "timeout": {
                         "type": "number",
                         "description": (

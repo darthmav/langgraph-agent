@@ -552,6 +552,23 @@ deliver the reply.
   and the message says to check the quoting), and a missing program raises
   `FileNotFoundError` rather than returning 127, so the error names the
   program instead of leaving "not found" to read as a missing file argument.
+  The other feature that had to be *replaced* rather than merely lost is
+  `cd`: it is a builtin, not a program, so `cd there && python x.py` does not
+  run in the wrong directory, it fails with `Command not found: 'cd'` -- and a
+  Builder with no other spelling to try burns turns rediscovering absolute
+  paths, which is what it did on the run of 2026-09-08. `cwd` is in the schema
+  for the reason `timeout` is: the tool honoured the argument while
+  `BUILDER_TOOLS` offered no way to ask for it. It is validated by
+  `_resolve_cwd` **before** the subprocess rather than left to raise, because
+  a missing directory raises the same `FileNotFoundError` a missing program
+  does and would be answered `Command not found: 'python'` -- naming the one
+  thing that was fine -- while a `cwd` pointing at a file raises
+  `NotADirectoryError`, which is not a `FileNotFoundError` at all and falls
+  through to a bare errno string. A relative `cwd` resolves against the
+  project root, the base the filesystem tools already use, and `~` is not
+  expanded: there is no shell here, and a `cwd` that expanded what an argument
+  on the same line would not is a worse surprise than a refusal naming the
+  path.
 - **The Builder's deadline may never abandon a tool call.** Only the model's
   own call is wrapped in `_with_deadline` — discarding a half-received response
   costs a turn and nothing else. The tool calls underneath it write files,

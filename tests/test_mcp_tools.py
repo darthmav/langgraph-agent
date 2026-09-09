@@ -16,6 +16,7 @@ from langgraph_agent.mcp_client import (
     TERMINAL_TIMEOUT_MAX_SECONDS,
     TERMINAL_TIMEOUT_SECONDS,
     MCPClient,
+    _resolve_cwd,
     _resolve_timeout,
     mcp_client,
 )
@@ -196,6 +197,103 @@ def test_terminal_timeout_is_clamped_not_trusted():
     # Malformed, absent or non-positive falls back rather than raising.
     for bad in (None, "not-a-number", 0, -5, float("nan"), float("inf")):
         assert _resolve_timeout(bad) == TERMINAL_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_terminal_execute_runs_in_a_requested_cwd(client: MCPClient):
+    """`cwd` is the replacement for a `cd` that cannot exist.
+
+    Removing the shell removed the only spelling the Builder had for "run this
+    somewhere else": `cd there && python x.py` reports `Command not found:
+    'cd'`, which is true and useless.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "marker.txt").write_text("here", encoding="utf-8")
+
+        result = await client.call_tool(
+            "terminal_execute",
+            {
+                "command": 'python -c "import pathlib; print(pathlib.Path.cwd())"',
+                "cwd": tmpdir,
+            },
+        )
+        assert result["success"], result.get("error") or result.get("stderr")
+        assert Path(result["stdout"].strip()).samefile(tmpdir)
+
+        # And the command sees that directory's files by relative path.
+        read = await client.call_tool(
+            "terminal_execute",
+            {"command": "cat marker.txt", "cwd": tmpdir},
+        )
+        assert read["success"], read.get("error") or read.get("stderr")
+        assert read["stdout"].strip() == "here"
+
+
+@pytest.mark.asyncio
+async def test_terminal_execute_blames_a_bad_cwd_not_the_program(
+    client: MCPClient,
+):
+    """The directory is named, and the program is not accused of missing.
+
+    An unchecked `cwd` reaches `subprocess.run`, which raises
+    `FileNotFoundError` for a missing directory -- indistinguishable, at the
+    handler, from a missing program, and answered `Command not found:
+    'python'` while python was fine.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        missing = str(Path(tmpdir) / "no-such-dir")
+        result = await client.call_tool(
+            "terminal_execute", {"command": "python --version", "cwd": missing}
+        )
+        assert not result["success"]
+        assert missing in result["error"]
+        assert "python" not in result["error"].lower()
+
+        # A file is not a directory, and raises something else again.
+        a_file = Path(tmpdir) / "file.txt"
+        a_file.write_text("x", encoding="utf-8")
+        on_file = await client.call_tool(
+            "terminal_execute", {"command": "python --version", "cwd": str(a_file)}
+        )
+        assert not on_file["success"]
+        assert str(a_file) in on_file["error"]
+        assert "not a directory" in on_file["error"].lower()
+
+
+def test_resolve_cwd_returns_a_directory_or_an_error_never_both():
+    """Absent means inherit; anything malformed is refused rather than raised."""
+    assert _resolve_cwd(None) == (None, None)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        resolved, error = _resolve_cwd(tmpdir)
+        assert error is None
+        assert resolved is not None and Path(resolved).samefile(tmpdir)
+
+    # The value arrives as JSON from a model, so a wrong type is a refusal
+    # with a message, not a TypeError out of the tool call.
+    for bad in ("", "   ", 5, ["/tmp"], {}):
+        resolved, error = _resolve_cwd(bad)
+        assert resolved is None
+        assert error
+
+
+def test_builder_can_ask_for_a_working_directory():
+    """The schema must expose `cwd`, or the tool can do what the seat cannot ask.
+
+    Exactly the shape the `timeout` gap had: `_terminal_execute` honours the
+    argument, and a BUILDER_TOOLS entry omitting it leaves the Builder with no
+    way to know it exists -- reaching for `cd` instead, which cannot work.
+    """
+    from langgraph_agent.nodes import BUILDER_TOOLS
+
+    tool = next(
+        t for t in BUILDER_TOOLS if t["function"]["name"] == "terminal_execute"
+    )
+    params = tool["function"]["parameters"]
+    assert "cwd" in params["properties"]
+    assert "cwd" not in params.get("required", [])
+    # Says why, where the seat reading the tool can see it.
+    assert "cd" in tool["function"]["description"]
 
 
 def test_builder_can_ask_for_a_longer_timeout():

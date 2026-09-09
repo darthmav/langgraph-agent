@@ -828,7 +828,18 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 }
 
 # Methods the console polls on a timer. Logging these buries everything else.
-QUIET_METHODS = {"status", "rag_stats", "list_seats", "run_progress"}
+# `llm_options` is not polled on a timer of its own -- it rides along with
+# `list_seats` in the console's `loadCrew`, which is how it was missed when the
+# rest of this set was written. It is the same 5s cadence either way: it left
+# 851 of the 1233 lines in one session's log, so the run that session was
+# started to look at could not be found by reading it.
+QUIET_METHODS = {
+    "status",
+    "rag_stats",
+    "list_seats",
+    "llm_options",
+    "run_progress",
+}
 
 
 class Handler(SimpleHTTPRequestHandler):
