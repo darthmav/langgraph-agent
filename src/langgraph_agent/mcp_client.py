@@ -71,6 +71,40 @@ def _resolve_timeout(requested: Any) -> float:
     return min(seconds, TERMINAL_TIMEOUT_MAX_SECONDS)
 
 
+def _resolve_cwd(requested: Any) -> tuple[str | None, str | None]:
+    """Resolve a requested working directory to `(cwd, error)`.
+
+    An error is returned *instead of* a directory, never alongside one; both
+    are None when nothing was requested and the command inherits ours.
+
+    The check is here rather than left to `subprocess.run` because of what
+    that raises: a missing `cwd` comes back as `FileNotFoundError`, which is
+    the same exception a missing *program* raises and lands in the handler
+    that answers `Command not found: 'python'` -- naming the one thing that
+    was fine. A `cwd` that exists but is a file raises `NotADirectoryError`,
+    which is not a `FileNotFoundError` at all and falls through to a bare
+    errno string. Both are the false accusation this module keeps having to
+    design against, so the directory is checked while we still know it is the
+    directory being complained about.
+
+    A relative path resolves against the server's working directory, which is
+    the project root -- the same base `filesystem_read` and `filesystem_write`
+    use, so one relative path means one place across the whole tool belt.
+    `~` is not expanded, for the reason no other shell syntax is: there is no
+    shell here, and a `cwd` that quietly expanded what an argument on the same
+    line would not is a worse surprise than a refusal naming the path.
+    """
+    if requested is None:
+        return None, None
+    if not isinstance(requested, str) or not requested.strip():
+        return None, f"Invalid cwd: {requested!r}. Pass a directory path."
+    path = Path(requested)
+    if not path.is_dir():
+        detail = "exists but is not a directory" if path.exists() else "does not exist"
+        return None, f"Cannot run in {requested!r}: it {detail}."
+    return str(path), None
+
+
 class MCPClient:
     """Client for MCP servers (GraphRAG, Filesystem, Git).
 
@@ -298,6 +332,14 @@ class MCPClient:
         `|`. That is stated in the tool description, because a silently
         meaningless pipe is worse than a refused one.
 
+        `cwd` runs the command somewhere other than the project root, and is
+        offered to the Builder because without it there is no way to express
+        it at all: `cd` is a shell builtin, so `cd somewhere && python x.py`
+        does not run in the wrong directory, it fails with
+        `Command not found: 'cd'` -- and the Builder, having no other spelling
+        to try, spends turns rediscovering absolute paths. It is the same gap
+        `timeout` was: a thing the tool can do that the schema never offered.
+
         `env` overlays the current environment for this one command; a key
         mapped to None is removed rather than set. It is not offered to the
         Builder in BUILDER_TOOLS -- only callers inside the process set it,
@@ -326,6 +368,10 @@ class MCPClient:
                 "command": command,
             }
 
+        cwd, cwd_error = _resolve_cwd(args.get("cwd"))
+        if cwd_error is not None:
+            return {"success": False, "error": cwd_error, "command": command}
+
         try:
             result = subprocess.run(
                 argv,
@@ -333,6 +379,7 @@ class MCPClient:
                 text=True,
                 timeout=_resolve_timeout(args.get("timeout")),
                 env=_child_env(args.get("env")),
+                cwd=cwd,
                 # No human is at the keyboard behind a Builder tool call, so a
                 # command that reads stdin must get EOF and fail, never block
                 # until its timeout and report as a hang.
