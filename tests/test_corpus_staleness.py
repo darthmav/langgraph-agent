@@ -24,7 +24,7 @@ from langgraph_agent.corpus_health import (
     forget_expected_documents,
     oversized_documents,
 )
-from langgraph_agent.graphrag_server import MAX_INDEXABLE_BYTES
+from langgraph_agent.graphrag_server import MAX_INDEXABLE_BYTES, iter_project_files
 
 
 @pytest.fixture(autouse=True)
@@ -182,3 +182,27 @@ def test_the_stale_verdict_is_withheld_while_a_run_is_in_flight(monkeypatch, tmp
     assert during["settling"] is True
     # The counts are still the truth about this instant.
     assert during["missing_count"] == 1
+
+
+def test_seat_diagnostic_sweeps_are_not_indexed(tmp_path, monkeypatch):
+    """Gitignored is not the same as unindexed: the walk is a glob, not git.
+
+    `scripts/diagnose_seats.py` writes one timestamped directory per sweep, and
+    `.gitignore` calls them "per-run measurements against non-deterministic
+    models, not history". They were still being embedded — five sweeps from one
+    afternoon sat in the corpus answering questions with a week-old measurement
+    of a seating nobody runs any more.
+
+    Asserted through the walk rather than by reading the exclude list, because
+    the deliberate `reports/*.md` next door must keep being indexed and only
+    running it proves both halves.
+    """
+    (tmp_path / "reports" / "diagnostics" / "20260902-101142").mkdir(parents=True)
+    (tmp_path / "reports" / "diagnostics" / "20260902-101142" / "report.md").write_text("sweep", encoding="utf-8")
+    (tmp_path / "reports" / "spectral_conclusion.md").write_text("deliberate", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    walked = {str(path) for path in iter_project_files(".")}
+
+    assert "reports/spectral_conclusion.md" in walked
+    assert not any("diagnostics" in path for path in walked), walked
