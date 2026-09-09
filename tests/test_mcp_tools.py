@@ -85,14 +85,81 @@ async def test_terminal_execute(client: MCPClient):
 
 
 @pytest.mark.asyncio
-async def test_terminal_execute_rejects_unsafe_characters(client: MCPClient):
-    """terminal_execute rejects commands with shell metacharacters."""
+async def test_terminal_execute_neutralises_injection(client: MCPClient):
+    """A chained command is inert data, never a second command.
+
+    There is no shell, so `;` separates nothing. This replaced a character
+    filter that refused the input outright -- the canary surviving is a
+    stronger guarantee than that refusal was, and unlike the refusal it does
+    not also block `python -c "...; ..."`. Note the old filter admitted a bare
+    `rm -rf /` quite happily: it never guarded destruction, only chaining.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        canary = Path(tmpdir) / "canary.txt"
+        canary.write_text("still here", encoding="utf-8")
+
+        result = await client.call_tool(
+            "terminal_execute", {"command": f"echo hello; rm -rf {tmpdir}"}
+        )
+
+        # `echo` received the rest as literal arguments and printed them.
+        assert result["success"]
+        assert "rm -rf" in result["stdout"]
+
+        # The part that matters: nothing was deleted.
+        assert canary.exists()
+        assert canary.read_text(encoding="utf-8") == "still here"
+
+
+@pytest.mark.asyncio
+async def test_terminal_execute_runs_a_python_one_liner(client: MCPClient):
+    """The exact shape the old filter refused: `;` and `()` in a -c argument."""
     result = await client.call_tool(
-        "terminal_execute", {"command": "echo hello; rm -rf /"}
+        "terminal_execute",
+        {"command": 'python -c "import sys; print(sys.version_info[0])"'},
     )
-    assert not result["success"]
-    error = result.get("error", "")
-    assert "disallowed" in error.lower() or "shell metacharacter" in error.lower()
+    assert result["success"], result.get("error") or result.get("stderr")
+    assert result["stdout"].strip() == "3"
+
+
+@pytest.mark.asyncio
+async def test_terminal_execute_passes_shell_syntax_through_literally(
+    client: MCPClient,
+):
+    """A pipe is an argument, not a pipeline -- accepted, and inert.
+
+    Worth pinning because it is the one place removing the shell is a
+    downgrade in behaviour rather than an upgrade: the old filter refused a
+    pipe, and this accepts one that will not do what it looks like. The tool
+    description says so; this proves the description true.
+    """
+    result = await client.call_tool(
+        "terminal_execute", {"command": "echo a | wc -l"}
+    )
+    assert result["success"]
+    assert result["stdout"].strip() == "a | wc -l"
+
+
+@pytest.mark.asyncio
+async def test_terminal_execute_reports_unparseable_and_missing_commands(
+    client: MCPClient,
+):
+    """Two failures the shell used to fold into a return code."""
+    unbalanced = await client.call_tool(
+        "terminal_execute", {"command": 'python -c "print(1)'}
+    )
+    assert not unbalanced["success"]
+    assert "quoting" in unbalanced["error"].lower()
+
+    empty = await client.call_tool("terminal_execute", {"command": "   "})
+    assert not empty["success"]
+
+    missing = await client.call_tool(
+        "terminal_execute", {"command": "no-such-program-xyzzy --help"}
+    )
+    assert not missing["success"]
+    # Names the program, not its arguments.
+    assert "no-such-program-xyzzy" in missing["error"]
 
 
 @pytest.mark.asyncio
