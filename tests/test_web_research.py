@@ -382,7 +382,7 @@ def test_the_phase_can_be_switched_off_and_says_so(monkeypatch, kb, tmp_path):
     """"We never asked" must not read as "the web had nothing"."""
     monkeypatch.setattr(web_research, "WEB_SEARCH_ENABLED", False)
 
-    report = research_online(kb, GOAL, str(tmp_path))
+    report = research_online(lambda: kb, GOAL, str(tmp_path))
 
     assert report["source"] == "disabled"
     assert report["documents"] == 0
@@ -447,7 +447,7 @@ def test_research_online_embeds_only_what_earned_a_place(monkeypatch, kb, tmp_pa
         "https://example.com/pastry": OFF_TOPIC,
     })
 
-    report = research_online(kb, GOAL, str(tmp_path))
+    report = research_online(lambda: kb, GOAL, str(tmp_path))
 
     assert report["source"] == "duckduckgo"
     assert report["considered"] == 4
@@ -462,7 +462,7 @@ def test_a_goal_the_web_cannot_answer_is_not_a_failed_phase(monkeypatch, kb, tmp
     """Fetching pages and keeping none is correct behaviour, not an error."""
     _standard_web(monkeypatch, {"https://example.com/bread": OFF_TOPIC})
 
-    report = research_online(kb, GOAL, str(tmp_path))
+    report = research_online(lambda: kb, GOAL, str(tmp_path))
 
     assert report["considered"] == 1
     assert report["documents"] == 0
