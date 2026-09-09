@@ -510,6 +510,24 @@ deliver the reply.
   before them a stalled seat hung a run indefinitely while the console still
   named the *previous* node as current, and `_SeatLLM` recorded nothing because
   a hang raises nothing.
+- **A command's timeout is a budget, not a verdict.** `terminal_execute`
+  defaulted to 30 seconds while `run_tests` got 600, and `BUILDER_TOOLS` offered
+  only `command` -- so the Builder could not raise it and was never told the
+  limit existed. This project's own `scripts/verify_and_test.py` finishes clean
+  in ~33s and was reported `FAILED` for the difference, which is
+  `MIN_VERIFY_SLICE_SECONDS`' false accusation one level up: the Builder is
+  handed a working script labelled broken and spends its next turns repairing
+  code that was never wrong. `TERMINAL_TIMEOUT_SECONDS` is 60, matching
+  `VERIFY_TIMEOUT_SECONDS` -- both bound a single command a seat is waiting on
+  -- and `timeout` is now in the schema with the cap named in the description,
+  since a limit a seat cannot see is one it reads as a failure. A requested
+  value is clamped by `TERMINAL_TIMEOUT_MAX_SECONDS` rather than trusted: a
+  tool call is never abandoned, so an unbounded request does not overrun a
+  deadline, it hangs the pass past every deadline there is. Raising the default
+  does not make every script runnable inside a pass, and is not meant to --
+  `example_usage.py` is a full 4-agent run at ~256s, past
+  `BUILDER_DEADLINE_SECONDS` (240) entirely. That is a thing to run outside the
+  Builder, not a number to raise.
 - **The Builder's deadline may never abandon a tool call.** Only the model's
   own call is wrapped in `_with_deadline` — discarding a half-received response
   costs a turn and nothing else. The tool calls underneath it write files,
