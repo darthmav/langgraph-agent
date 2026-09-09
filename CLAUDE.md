@@ -1211,9 +1211,16 @@ deliver the reply.
   than one that is merely stale. The files under `knowledge/` are kept, holding
   an empty store: Chroma has that directory open, and pulling it out from under
   a live client is the worse failure. The trailing `_save_graph()` is
-  load-bearing — `index_project_files` has exactly that hole today, where
-  `graph.clear()` is persisted only as a side effect of indexing something
-  afterwards, so a reindex matching zero files leaves the old graph on disk.
+  load-bearing, and `index_project_files` now ends with the same two lines for
+  the same reason. It had exactly this hole: its `graph.clear()` and its prune
+  of stale Chroma rows were persisted and invalidated only as a side effect of
+  `add_document`, so a reindex that added nothing — no matching files, or every
+  one of them oversized or unreadable — emptied the graph in memory, reported
+  `indexed: 0` and success, and left the old `knowledge_graph.json` for the
+  next process start to reload. The corpus it had just rebuilt came back. The
+  lexical index went the same way: built before the prune, it went on answering
+  with the rows the prune deleted. Both lines are unconditional there, since a
+  reindex is the one operation after which that index must be rebuilt anyway.
 - **An uploaded document is a file first and a document second, and that
   ordering is the whole design.** `store_uploaded_document` writes the upload
   under `uploads/` and only then calls `add_document`. The corpus is a function

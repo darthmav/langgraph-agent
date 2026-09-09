@@ -1407,6 +1407,19 @@ def index_project_files(
         except Exception as exc:
             errors.append(f"{file_path}: {exc}")
 
+    # Both halves of the rebuild above are otherwise persisted only as a side
+    # effect of `add_document`: the `graph.clear()` reaches disk through its
+    # `_save_graph()`, and the pruned rows leave the lexical index through its
+    # invalidation. So a reindex that added nothing -- no matching files, or
+    # every one of them oversized or unreadable -- cleared the graph in memory
+    # and left the old `knowledge_graph.json` for the next process start to
+    # reload, while an index built before the prune went on answering with the
+    # chunks the prune had just deleted. Unconditional, the way `clear()` ends
+    # with the same two lines: the work was done either way, and a reindex is
+    # the one operation after which the lexical index must be rebuilt anyway.
+    kb._save_graph()
+    kb._lexical_index = None
+
     report: dict[str, Any] = {"indexed": indexed, "skipped": skipped, "errors": errors}
     report.update(kb.stats())
     return report

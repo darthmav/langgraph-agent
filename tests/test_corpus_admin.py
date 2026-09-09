@@ -19,7 +19,10 @@ import numpy as np
 import pytest
 
 import serve
-from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
+from langgraph_agent.graphrag_server import (
+    GraphRAGKnowledgeBase,
+    index_project_files,
+)
 
 
 class _FakeCollection:
@@ -115,16 +118,81 @@ def test_clear_empties_both_halves_and_reports_what_went(kb):
 def test_clear_survives_a_restart(kb, tmp_path):
     """The clear has to reach disk, not just memory.
 
-    `index_project_files` has this hole: its `graph.clear()` is persisted only
-    as a side effect of indexing something afterwards. A clear that indexes
-    nothing afterwards would leave the old graph on disk and the corpus would
-    come back at the next process start.
+    Otherwise the corpus comes back at the next process start, which reloads
+    the graph from `knowledge_graph.json`. `index_project_files` had exactly
+    this hole -- its `graph.clear()` was persisted only as a side effect of
+    indexing something afterwards -- and it is pinned next door now that it
+    does not.
     """
     kb.clear()
 
     reloaded = json.loads((tmp_path / "knowledge_graph.json").read_text())
     assert reloaded["nodes"] == []
     assert _edges(reloaded) == []
+
+
+def test_a_reindex_that_matches_nothing_still_reaches_disk(kb, tmp_path):
+    """The other half of `test_clear_survives_a_restart`, one door along.
+
+    `index_project_files` prunes Chroma and clears the graph before it indexes
+    anything, but both were persisted only as a side effect of `add_document`.
+    A reindex matching no files therefore emptied the graph in memory, wrote
+    nothing, and left the old `knowledge_graph.json` for the next process start
+    to reload -- reporting `indexed: 0` and success while the corpus it claimed
+    to have rebuilt sat on disk intact.
+
+    A root with no indexable file in it is the honest way to reach that: the
+    same path a walk takes after every match is excluded or deleted.
+    """
+    empty_root = tmp_path / "nothing"
+    empty_root.mkdir()
+    kb._lexical_index = object()  # stands in for one built before the prune
+
+    report = index_project_files(kb, str(empty_root))
+
+    assert report["indexed"] == 0
+    assert kb.collection.count() == 0  # the prune ran
+    assert kb.graph.number_of_nodes() == 0  # and the graph was cleared
+
+    reloaded = json.loads((tmp_path / "knowledge_graph.json").read_text())
+    assert reloaded["nodes"] == []
+    assert _edges(reloaded) == []
+    assert kb._lexical_index is None  # or it answers with the pruned rows
+
+
+def test_a_reindex_that_indexes_something_persists_what_it_built(kb, tmp_path):
+    """The ordinary path must not have been broken to fix the empty one.
+
+    The stand-in for `add_document` does what the real one does to the graph
+    and to the index -- adds the document, mints an entity, saves, invalidates
+    -- and only skips the embedder this suite avoids throughout. A stub that
+    merely counted would leave this test passing on the new unconditional save
+    alone, which is not the claim being made.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "notes.md").write_text("The Planner interprets goals.", encoding="utf-8")
+
+    def fake_add(path: str, content: str, metadata: dict[str, Any]) -> int:
+        kb.collection.add(path, content, metadata)
+        kb.graph.add_node(path, type="document", path=path)
+        kb.graph.add_node("Planner", type="entity")
+        kb.graph.add_edge(path, "Planner", relation="mentions")
+        kb._save_graph()
+        kb._lexical_index = None
+        return 1
+
+    kb.add_document = fake_add
+    kb._lexical_index = object()
+
+    report = index_project_files(kb, str(root))
+
+    assert report["indexed"] == 1
+    reloaded = json.loads((tmp_path / "knowledge_graph.json").read_text())
+    assert {node["id"] for node in reloaded["nodes"]} == {
+        str(root / "notes.md"), "Planner"}
+    assert _edges(reloaded)  # the rebuild is on disk, not just the emptying
+    assert kb._lexical_index is None
 
 
 def test_a_chroma_failure_leaves_the_graph_alone(kb):
