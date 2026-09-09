@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -32,6 +33,46 @@ if TYPE_CHECKING:
 # The complement of what `_terminal_execute` allows, written once so the
 # refusal and the check can never name different sets of characters.
 _DISALLOWED_COMMAND_CHARS = re.compile(r"[^A-Za-z0-9_./\s\-:'\"=,]")
+
+
+# How long one `terminal_execute` command may run before it is killed. It was
+# 30, which is under what this project's own scripts take: `verify_and_test.py`
+# finishes clean in ~33s and was reported FAILED for the 3s difference. That is
+# the failure `MIN_VERIFY_SLICE_SECONDS` describes, one level up -- a working
+# command comes back labelled broken, and the Builder spends its next turns
+# repairing code that was never wrong. 60 matches `VERIFY_TIMEOUT_SECONDS`, the
+# closest sibling: both bound a single command the Builder is waiting on, and
+# the Builder's whole node budget (`BUILDER_DEADLINE_SECONDS`, 240) has to
+# cover several of them plus the verification reserve.
+TERMINAL_TIMEOUT_SECONDS = float(os.getenv("TERMINAL_TIMEOUT_SECONDS", "60"))
+
+# The ceiling on a *requested* timeout. A tool call is never abandoned -- the
+# Builder's deadline may interrupt the model's turn but never a running tool --
+# so a seat that asks for 99999 seconds does not overrun a deadline, it hangs
+# the pass past every deadline there is. The ceiling is what stops an exposed
+# knob from becoming that. 600 matches `_run_tests`, the longest thing the
+# tool belt legitimately does.
+TERMINAL_TIMEOUT_MAX_SECONDS = float(os.getenv("TERMINAL_TIMEOUT_MAX_SECONDS", "600"))
+
+
+def _resolve_timeout(requested: Any) -> float:
+    """Clamp a requested command timeout to [1, TERMINAL_TIMEOUT_MAX_SECONDS].
+
+    A missing or malformed value falls back to the default instead of raising.
+    The number arrives as JSON from a model, and refusing the call to complain
+    about it costs a whole tool turn to say what a clamp says for nothing.
+    Non-finite is rejected here rather than left to `min`: `min(nan, 600)` is
+    `nan`, which reaches `subprocess.run` as no timeout at all.
+    """
+    if requested is None:
+        return TERMINAL_TIMEOUT_SECONDS
+    try:
+        seconds = float(requested)
+    except (TypeError, ValueError):
+        return TERMINAL_TIMEOUT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        return TERMINAL_TIMEOUT_SECONDS
+    return min(seconds, TERMINAL_TIMEOUT_MAX_SECONDS)
 
 
 class MCPClient:
@@ -248,6 +289,10 @@ class MCPClient:
         mapped to None is removed rather than set. It is not offered to the
         Builder in BUILDER_TOOLS -- only callers inside the process set it,
         which today means the verification pass asking for a headless run.
+
+        `timeout` is offered to the Builder, and is clamped rather than
+        trusted (`_resolve_timeout`). The verification pass always passes one
+        computed from its remaining deadline, so it never sees the default.
         """
         command = args.get("command", "")
         # Allow only simple commands: alphanumerics, dashes, underscores, dots,
@@ -274,7 +319,7 @@ class MCPClient:
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=args.get("timeout", 30),
+                timeout=_resolve_timeout(args.get("timeout")),
                 env=_child_env(args.get("env")),
                 # No human is at the keyboard behind a Builder tool call, so a
                 # command that reads stdin must get EOF and fail, never block

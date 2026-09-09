@@ -21,7 +21,11 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from langgraph_agent.config import get_agent_llm
 from langgraph_agent.control import RUN_CONTROL
-from langgraph_agent.mcp_client import mcp_client
+from langgraph_agent.mcp_client import (
+    TERMINAL_TIMEOUT_MAX_SECONDS,
+    TERMINAL_TIMEOUT_SECONDS,
+    mcp_client,
+)
 from langgraph_agent.state import AgentState, ResearchStatus, Verdict
 
 
@@ -1108,11 +1112,27 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
                 "Run a simple shell command in the project. Only letters, digits, "
                 "spaces and _ . / - : ' \" = , are accepted anywhere in the command, "
                 "including inside quotes -- so pipes and redirection do not work, and "
-                "neither do regex characters such as ^ * ( ) | in a grep pattern."
+                "neither do regex characters such as ^ * ( ) | in a grep pattern. "
+                f"The command is killed after {int(TERMINAL_TIMEOUT_SECONDS)} seconds "
+                "unless you pass a longer `timeout`; a kill is reported as a timeout "
+                "with whatever the command printed first, which is not the same thing "
+                "as the command failing."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"command": {"type": "string", "description": "The command to run."}},
+                "properties": {
+                    "command": {"type": "string", "description": "The command to run."},
+                    "timeout": {
+                        "type": "number",
+                        "description": (
+                            "Seconds to allow before the command is killed. Defaults "
+                            f"to {int(TERMINAL_TIMEOUT_SECONDS)}, capped at "
+                            f"{int(TERMINAL_TIMEOUT_MAX_SECONDS)}. Raise it for a "
+                            "command you expect to be slow rather than reading the "
+                            "kill as a failure."
+                        ),
+                    },
+                },
                 "required": ["command"],
             },
         },
