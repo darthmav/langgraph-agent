@@ -8,6 +8,7 @@ Verifies that the documented tool belts are exposed and functional:
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -16,6 +17,7 @@ from langgraph_agent.mcp_client import (
     TERMINAL_TIMEOUT_MAX_SECONDS,
     TERMINAL_TIMEOUT_SECONDS,
     MCPClient,
+    _missing_program_error,
     _resolve_cwd,
     _resolve_timeout,
     mcp_client,
@@ -275,6 +277,91 @@ def test_resolve_cwd_returns_a_directory_or_an_error_never_both():
         resolved, error = _resolve_cwd(bad)
         assert resolved is None
         assert error
+
+
+@pytest.mark.asyncio
+async def test_terminal_execute_points_a_builtin_at_its_replacement(
+    client: MCPClient,
+):
+    """`cd` is the mistake the Builder actually makes, so the error answers it.
+
+    Measured on the rerun after `cwd` shipped: three turns spent on
+    `cd there && ...` before the Builder found the argument that replaces it.
+    The schema said so; an error is read at the moment the mistake is made.
+    """
+    result = await client.call_tool(
+        "terminal_execute", {"command": "cd /tmp && python --version"}
+    )
+    assert not result["success"]
+    assert "cd" in result["error"]
+    assert "cwd" in result["error"]
+
+
+def test_missing_program_error_names_a_fix_only_where_one_exists():
+    """A builtin with no replacement gets the fact, not an invented alternative."""
+    # Points at the argument that does the job.
+    for builtin in ("cd", "pushd", "popd"):
+        message = _missing_program_error(builtin)
+        assert "builtin" in message
+        assert "`cwd`" in message
+
+    # No `cwd` to offer: `export` cannot set a variable for a later call here,
+    # and no wording makes it able to. Say what ends the retry instead.
+    export = _missing_program_error("export")
+    assert "builtin" in export
+    assert "cwd" not in export
+
+    # An ordinary missing program is still named, and gains nothing.
+    plain = _missing_program_error("no-such-program-xyzzy")
+    assert "no-such-program-xyzzy" in plain
+    assert "builtin" not in plain
+
+
+def test_report_line_names_the_directory_a_command_ran_in():
+    """The Architect rules on the report, so a line must be rulable on.
+
+    `find . -type f -> ok` locates nothing once `cwd` exists: the same
+    relative command means a different thing in every directory it could have
+    run in, and the report was the only place anyone would find out.
+    """
+    from langgraph_agent.nodes import _Deadline, _run_builder_tools
+
+    class _OneCall:
+        """Asks for two commands on the first turn, then stops asking."""
+
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def invoke(self, _messages):
+            self.turn += 1
+            if self.turn > 1:
+                return SimpleNamespace(content="done", tool_calls=[])
+            return SimpleNamespace(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "terminal_execute",
+                        "args": {"command": "python --version", "cwd": tmpdir},
+                        "id": "call-1",
+                    },
+                    {
+                        "name": "terminal_execute",
+                        "args": {"command": "python --version"},
+                        "id": "call-2",
+                    },
+                ],
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tool_log: list[str] = []
+        _run_builder_tools(_OneCall(), [], [], tool_log, _Deadline(60))
+
+    with_cwd, without_cwd = tool_log
+    assert f"[cwd={tmpdir}]" in with_cwd
+    assert with_cwd.endswith("-> ok")
+    # A command that did not ask for one says nothing, rather than naming a
+    # default the Builder never chose.
+    assert "cwd" not in without_cwd
 
 
 def test_builder_can_ask_for_a_working_directory():

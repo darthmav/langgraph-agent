@@ -66,6 +66,13 @@ runs/
 # an upload is only durable because it is a file the walk finds.
 uploads/
 
+# Pages fetched by the online research phase. Third-party text this machine
+# pulled down for a goal, not this project's source, and re-fetchable from the
+# URL each one records in its header. Ignored here for the same reason uploads
+# are, and with the same caveat: the walk is a glob, not git, so these are
+# still indexed — which is the only thing that makes them survive a reindex.
+research/web/
+
 # Seat diagnostic output (scripts/diagnose_seats.py writes one timestamped
 # directory per sweep). Per-run measurements against non-deterministic models,
 # not history — the committed reports/*.md are written deliberately.

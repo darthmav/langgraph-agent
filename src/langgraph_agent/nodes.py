@@ -56,6 +56,32 @@ _T = TypeVar("_T")
 # calls each of which finishes just inside its own limit.
 NODE_DEADLINE_SECONDS = float(os.getenv("NODE_DEADLINE_SECONDS", "150"))
 
+# How many retrieved passages reach the Builder, and how much of each.
+#
+# Both were quietly throwing away work that had already been paid for. The
+# search asked for five results and the formatter forwarded three, so two
+# passages were retrieved, ranked, re-ranked and dropped unread -- and they are
+# the *diverse* two, since `SEARCH_ESCALATION` widens the window precisely to
+# stop one file monopolising the hits. One number now feeds both the request
+# and the slice, so they cannot drift apart again.
+#
+# The 300-character cut was worse, because of what it kept. A chunk is the unit
+# retrieval judges: it is selected *because* it matched, and the matching
+# sentence can sit anywhere inside it. Measured on this corpus, chunks run to a
+# mean of 882 characters and a p99 of 1,373, so 300 kept **34%** of a typical
+# passage -- always the opening 34%, never the part that matched. On a
+# document from `research/web` the opening is the provenance header, and the
+# effect was total: the top-scoring source in the run of 2026-09-09 reached the
+# Builder as its title, its URL, its retrieval timestamp and the goal it was
+# fetched for, truncated mid-word, with not one character of the article
+# attached. The Builder was handed a citation and no evidence.
+#
+# 1,500 clears the p99, so in practice a passage arrives whole and the cap is a
+# guard against a pathological chunk rather than a routine trim. Five whole
+# passages is roughly 4,400 characters against the 900 that used to arrive.
+RESEARCH_RESULTS = int(os.getenv("RESEARCH_RESULTS", "5"))
+RESEARCH_SNIPPET_CHARS = int(os.getenv("RESEARCH_SNIPPET_CHARS", "1500"))
+
 
 class _Deadline:
     """A monotonic countdown shared across the several calls one node makes.
@@ -829,6 +855,21 @@ _RESEARCH_EMPTY = (
 )
 
 
+def _research_snippet(content: str) -> str:
+    """A retrieved passage as the Builder should see it: whole, or visibly cut.
+
+    Says when it truncated. Everything else in this project that shortens text
+    on its way somewhere announces it -- `_fit_to_index_limit` writes a note
+    onto the page, `_timeout_detail` keeps the tail and says so -- because a
+    silent trim is indistinguishable from a source that simply had nothing more
+    to say, and the Builder has no way to ask.
+    """
+    text = (content or "").strip()
+    if len(text) <= RESEARCH_SNIPPET_CHARS:
+        return text
+    return text[:RESEARCH_SNIPPET_CHARS].rstrip() + f"\n   [... passage truncated at {RESEARCH_SNIPPET_CHARS} characters]"
+
+
 def _gather_research(state: AgentState) -> tuple[str, str]:
     """Retrieve for the Researcher and return `(findings, status)`.
 
@@ -845,7 +886,7 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
 
     try:
         search_response: dict[str, Any] = _call_mcp_tool_sync(
-            "search_knowledge_graph", {"query": plan, "top_k": 5}
+            "search_knowledge_graph", {"query": plan, "top_k": RESEARCH_RESULTS}
         )
         results = search_response.get("results", [])
 
@@ -894,8 +935,8 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
         results = graphrag_results.get("results", [])
         research_findings = "## Key Findings\n"
 
-        for i, result in enumerate(results[:3], 1):
-            content = result.get('content', '')[:300]
+        for i, result in enumerate(results[:RESEARCH_RESULTS], 1):
+            content = _research_snippet(result.get("content", ""))
             score = result.get('score', 0)
             research_findings += f"\n{i}. {content}"
             if result.get("related_entities"):
@@ -1270,8 +1311,16 @@ def _run_builder_tools(
                 if path and path not in files_changed:
                     files_changed.append(path)
 
+            # The Architect rules on this report, so a line has to say enough
+            # to be ruled on. `find . -type f -> ok` names no directory, and
+            # once the Builder started passing `cwd` the command alone stopped
+            # locating anything: the same relative command means a different
+            # thing in every directory it could have run in.
             target = args.get("path") or args.get("command") or ""
-            tool_log.append(f"{name}({target}) -> {'ok' if ok else 'failed'}")
+            where = f" [cwd={args['cwd']}]" if args.get("cwd") else ""
+            tool_log.append(
+                f"{name}({target}){where} -> {'ok' if ok else 'failed'}"
+            )
 
             payload = json.dumps(result, default=str)
             if len(payload) > MAX_TOOL_RESULT_CHARS:

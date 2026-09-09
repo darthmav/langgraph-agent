@@ -49,6 +49,10 @@ from langgraph_agent.config import (  # noqa: E402
     set_agent_llm,
 )
 from langgraph_agent.control import ACTIVITY, RUN_CONTROL  # noqa: E402
+from langgraph_agent.corpus_health import (  # noqa: E402
+    corpus_staleness,
+    forget_expected_documents,
+)
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
     NO_CORPUS_NOTE,
@@ -59,6 +63,7 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     open_knowledge_base,
     store_uploaded_document,
 )
+from langgraph_agent.web_research import research_online  # noqa: E402
 
 # Initialize graph. The knowledge base is deliberately *not* initialized here.
 graph = create_agent_graph()
@@ -133,6 +138,35 @@ def rpc_rag_stats(_: dict[str, Any]) -> dict[str, Any]:
 
     stats = kb_or_none.stats()
     stats["corpus"] = "indexed" if stats["total_chunks"] else "empty"
+
+    # A corpus rots in silence: it is a function of what is on disk, nothing
+    # rebuilds it automatically, and every counter above stays non-zero and
+    # internally consistent while it drifts. On 2026-09-09 this project's store
+    # held 8 documents against a walk offering 103 -- every project query
+    # scored under the relevance floor and the Researcher's seat answered from
+    # memory on every run, with nothing anywhere reporting a problem. The
+    # comparison is advisory and must never take the header down with it, so a
+    # failure to walk leaves the counters alone rather than replacing them.
+    try:
+        documents = [
+            node
+            for node, attrs in kb_or_none.graph.nodes(data=True)
+            if attrs.get("type") == "document"
+        ]
+        report = corpus_staleness(documents)
+        # A run in flight is the one time the corpus is *supposed* to be moving:
+        # the online research phase writes each page to disk and embeds it as a
+        # separate step, so between those two there is a file the walk can see
+        # and the store cannot. Observed live -- the header read
+        # "stale: 1 not indexed" mid-phase and cleared itself moments later.
+        # A verdict that flickers is the credibility problem the exact size test
+        # was built to avoid, so the *counts* stay (they are the truth about
+        # this instant) and only the accusation is withheld.
+        if report.get("stale") and _run_progress.get("running"):
+            report = {**report, "stale": False, "settling": True}
+        stats["staleness"] = report
+    except Exception as exc:  # pragma: no cover - a walk that cannot run
+        stats["staleness"] = {"stale": False, "unavailable": str(exc)}
     return stats
 
 
@@ -261,7 +295,13 @@ def rpc_upload_document(params: dict[str, Any]) -> dict[str, Any]:
     content = params.get("content", "")
     if not isinstance(name, str) or not isinstance(content, str):
         raise ValueError("An upload is a filename and its text; both must be strings.")
-    return store_uploaded_document(_kb_for_indexing(), name, content)
+    report = store_uploaded_document(_kb_for_indexing(), name, content)
+    # An upload puts a *file* on disk, so the cached walk is now behind the
+    # corpus rather than ahead of it -- and the staleness report would call the
+    # freshly embedded document `extra` until the cache expired. This is the
+    # one writer that changes what the walk would find.
+    forget_expected_documents()
+    return report
 
 
 def rpc_bottleneck(params: dict[str, Any]) -> dict[str, Any]:
@@ -656,6 +696,84 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     return {"exiting": True, "running": False, "detail": "The server is exiting."}
 
 
+def _research_online_before_the_run(goal: str) -> dict[str, Any]:
+    """Search the web for the goal and embed what earns a place. Never raises.
+
+    This runs **before** `graph.stream` and never during it, and that ordering
+    is the design rather than a convenience. `_refuse_while_a_run_is_in_flight`
+    refuses every other corpus write while a run is live because a corpus
+    changing underneath the Researcher manufactures an absence no seat can
+    detect: a rebuild half-done returns whatever fraction of itself has been
+    re-added, which reads as `no_relevant_knowledge` and routes the run around
+    a gap created out from under it. Doing the research first is not a way
+    around that rule -- it is the only ordering that obeys it. By the time the
+    Architect opens, the corpus is whole and stays that way for the rest of the
+    run.
+
+    It reaches the Researcher through the **corpus**, not through state. There
+    is deliberately no path by which a fetched page skips retrieval: the pages
+    are embedded, and the Researcher finds them with the same search, the same
+    hybrid re-rank and the same relevance floor it applies to everything else.
+    A web page that cannot be retrieved for this goal should not reach the
+    Builder just because it was fetched for it.
+
+    The creating door (`_kb_for_indexing`) is correct here, unlike everywhere
+    else the console reads: this *is* indexing, and a goal researched against a
+    machine with no corpus should leave one behind holding what it found. The
+    staleness report will then say, accurately, that the project's own files
+    are still missing from it.
+
+    Every failure is swallowed into the report. A goal the web cannot answer,
+    a search engine that is down, a machine with no network -- none of those is
+    a reason to refuse to run against the corpus already on disk, and the
+    report distinguishes them so the feed can say which happened.
+    """
+    if RUN_CONTROL.stopped():
+        return {"source": "stopped", "documents": 0, "considered": 0, "note":
+                "Stopped before the online research phase began."}
+    try:
+        report = research_online(_kb_for_indexing(), goal)
+    except Exception as exc:
+        return {"source": "error", "documents": 0, "considered": 0,
+                "note": f"The online research phase failed: {exc}"}
+    # The phase writes files under research/web/, so the cached walk is now
+    # behind what is on disk and the header would call the freshly embedded
+    # pages `extra` until it expired.
+    forget_expected_documents()
+    return report
+
+
+def _research_feed_line(report: dict[str, Any]) -> str:
+    """One line for the feed, saying what the phase actually did.
+
+    Worded so the three empty outcomes cannot be mistaken for each other, for
+    the reason `search_web` keeps them apart in the first place: "the web had
+    nothing on this" and "we never asked" and "we asked and it broke" call for
+    completely different things from the operator, and an empty count reads
+    identically in all three.
+    """
+    source = report.get("source", "")
+    considered = report.get("considered", 0)
+    kept = report.get("documents", 0)
+
+    if source == "disabled":
+        return "[Research] Online research is switched off; running against the corpus as it stands."
+    if source == "stopped":
+        return "[Research] Stopped before online research began."
+    if source == "error" or (not considered and report.get("errors")):
+        return f"[Research] Online research found nothing usable: {report.get('note') or 'the search failed'}"
+    if not kept:
+        return (
+            f"[Research] Read {considered} page(s) and kept none -- none of them "
+            "scored well enough against this goal to earn a place in the corpus."
+        )
+    return (
+        f"[Research] Read {considered} page(s), embedded {kept} "
+        f"({report.get('chunks', 0)} passages) in {report.get('elapsed_s', 0)}s. "
+        "The Researcher retrieves these like any other document."
+    )
+
+
 def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     """Run a goal through the four-agent loop and return the final state."""
     run_id = uuid.uuid4().hex
@@ -685,9 +803,22 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             stopping=False,
         )
 
+    # Online research first, then the embedder, then the Architect opens --
+    # see `_research_online_before_the_run` for why that order is the only one
+    # that respects the corpus-write rule.
+    research_report = _research_online_before_the_run(goal)
+    research_line = _research_feed_line(research_report)
+    print(f"[run] research -> {research_line}")
+    with _run_lock:
+        _run_progress["messages"] = [research_line]
+
     state: AgentState = {
         "goal": goal,
-        "messages": [],
+        # Seeded rather than pushed only to `_run_progress`, which every node
+        # update overwrites wholesale: the line has to survive into the final
+        # payload and the snapshot, because what the run was told is part of
+        # how its result should be read.
+        "messages": [research_line],
         "architecture": "",
         "verdict": "",
         "plan": "",
@@ -756,11 +887,26 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
 
         elapsed = int(time.monotonic() - started)
 
+        # "without an approved verdict" is the usual case and was written as if
+        # it were the only one. It is not: both exits are checked *between*
+        # supersteps, so a stop or a budget that expires while the Architect is
+        # ruling lands after that ruling is already in state. Measured on
+        # 2026-09-09 -- a stop sent while the gate was working produced
+        # "[Architect] Verdict: approved" immediately above "[Graph] Stopped ...
+        # without an approved verdict", the run's own record contradicting
+        # itself in the one place anyone finds out how it ended. The verdict is
+        # read rather than assumed.
+        ruled = str(last.get("verdict", "")) == "approved"
+        verdict_clause = (
+            "The Architect had already ruled approved; the loop was ending anyway"
+            if ruled
+            else "without an approved verdict"
+        )
         if stopped:
             last["messages"] = [
                 *last.get("messages", []),
                 f"[Graph] Stopped by the emergency stop after {elapsed}s, at the "
-                f"{node_at_stop or 'first'} boundary, without an approved verdict. "
+                f"{node_at_stop or 'first'} boundary, {verdict_clause}. "
                 "Nothing further was started. Anything already written is listed "
                 "below, and anything nobody ran is unproven rather than working.",
             ]
@@ -768,7 +914,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             last["messages"] = [
                 *last.get("messages", []),
                 f"[Graph] Stopped after {elapsed}s, over the {int(RUN_BUDGET_SECONDS)}s "
-                "budget, without an approved verdict. The work above is what the run "
+                f"budget, {verdict_clause}. The work above is what the run "
                 "produced. Raise RUN_BUDGET_SECONDS to give it longer.",
             ]
 
@@ -782,6 +928,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             over_budget=over_budget,
             elapsed_s=elapsed,
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            web_research=research_report,
         )
         _save_snapshot(payload)
         return payload
@@ -797,6 +944,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             elapsed_s=int(time.monotonic() - started),
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             error=str(exc),
+            web_research=research_report,
         )
         _save_snapshot(payload)
         raise

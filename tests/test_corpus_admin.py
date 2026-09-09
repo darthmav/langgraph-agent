@@ -426,6 +426,10 @@ def test_connectivity_is_defined_on_an_empty_and_a_single_node_graph(kb):
         "largest_component": 0,
         "isolated_nodes": 0,
         "lambda_2": None,
+        # Pages the research phase fetched are entity-free by design, so they
+        # are excluded from the component counts and reported here instead --
+        # see `test_web_entities.py`. Zero of them, on an empty graph.
+        "web_documents": 0,
     }
 
     kb.graph = nx.DiGraph()
