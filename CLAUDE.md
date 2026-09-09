@@ -528,6 +528,30 @@ deliver the reply.
   `example_usage.py` is a full 4-agent run at ~256s, past
   `BUILDER_DEADLINE_SECONDS` (240) entirely. That is a thing to run outside the
   Builder, not a number to raise.
+- **`terminal_execute` has no shell, which is what lets it accept `;` and
+  `()`.** It was `shell=True` behind a whitelist of permitted characters, and
+  the whitelist refused the ordinary way to write a one-liner: `python -c
+  "import x; print(x.y)"` trips on `;` `(` `)`, as does any path containing
+  parentheses -- and this project has those
+  (`examples/filter_band_pass_(40_60_hz).png`), so a runnable file named that
+  way could never be verified and would sit in `failed_verification` forever.
+  Meanwhile the filter admitted a bare `rm -rf /` without complaint: it never
+  guarded against a destructive command, only against chaining one onto
+  another. The command is now `shlex.split` into an argv list and run
+  directly, so the shell metacharacters are inert *data* -- `echo hi; rm -rf
+  /` runs `echo` with four literal arguments, which is a stronger guarantee
+  than refusing the string was, and a test asserts the canary file survives
+  rather than asserting the refusal.
+  The trade is that shell *features* are gone rather than rejected, and one of
+  them changes shape: a pipe used to be refused and is now accepted and
+  meaningless, passed to the program as the literal argument `|`. That is in
+  the tool description and pinned by a test, because a silently inert pipe is
+  worse than a refused one -- the Builder would read the empty result as the
+  command failing. Two failures the shell used to fold into a return code are
+  now surfaced by name: unbalanced quotes cannot be parsed (`shlex` raises,
+  and the message says to check the quoting), and a missing program raises
+  `FileNotFoundError` rather than returning 127, so the error names the
+  program instead of leaving "not found" to read as a missing file argument.
 - **The Builder's deadline may never abandon a tool call.** Only the model's
   own call is wrapped in `_with_deadline` — discarding a half-received response
   costs a turn and nothing else. The tool calls underneath it write files,

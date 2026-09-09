@@ -1109,10 +1109,15 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "terminal_execute",
             "description": (
-                "Run a simple shell command in the project. Only letters, digits, "
-                "spaces and _ . / - : ' \" = , are accepted anywhere in the command, "
-                "including inside quotes -- so pipes and redirection do not work, and "
-                "neither do regex characters such as ^ * ( ) | in a grep pattern. "
+                "Run one program in the project. There is no shell: the command is "
+                "split into arguments and run directly, so quoting works and any "
+                "character may appear inside an argument -- "
+                "python -c \"import x; print(x.y)\" is fine, and so are ( ) ; * ^ "
+                "in a regex or a filename. "
+                "Because there is no shell, shell *syntax* is not interpreted at all: "
+                "a pipe, a redirect, && or $(...) is passed to the program as a "
+                "literal argument rather than doing anything, so run one program per "
+                "call and let the tool give you its output. "
                 f"The command is killed after {int(TERMINAL_TIMEOUT_SECONDS)} seconds "
                 "unless you pass a longer `timeout`; a kill is reported as a timeout "
                 "with whatever the command printed first, which is not the same thing "

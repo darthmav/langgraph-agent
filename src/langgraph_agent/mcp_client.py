@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import os
-import re
+import shlex
 import subprocess
 import sys
 from collections.abc import AsyncGenerator
@@ -29,10 +29,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
 
-
-# The complement of what `_terminal_execute` allows, written once so the
-# refusal and the check can never name different sets of characters.
-_DISALLOWED_COMMAND_CHARS = re.compile(r"[^A-Za-z0-9_./\s\-:'\"=,]")
 
 
 # How long one `terminal_execute` command may run before it is killed. It was
@@ -281,9 +277,26 @@ class MCPClient:
     # Terminal / test tools
 
     async def _terminal_execute(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Run a shell command in the project workspace.
+        """Run a command in the project workspace.
 
-        Safety: rejects shell metacharacters and only allows simple commands.
+        There is no shell. The command is split with `shlex` and handed to
+        `subprocess` as an argv list, so `;`, `|`, `>`, `&&`, `$(...)` and
+        globs are inert *data* rather than syntax -- `echo hi; rm -rf /` runs
+        `echo` with four literal arguments and deletes nothing.
+
+        This replaced a whitelist of permitted characters guarding
+        `shell=True`. That filter refused the ordinary way to write a
+        one-liner (`python -c "import x; print(y)"` trips on `;` `(` `)`) and
+        any path containing parentheses, while still admitting a bare
+        `rm -rf /` -- it never guarded against a destructive command, only
+        against chaining one onto another. Removing the shell removes the
+        thing the chaining needed, so the characters no longer have to be
+        refused to be harmless.
+
+        The trade is that shell *features* are gone rather than rejected: a
+        pipe is now accepted and passed to the program as the literal argument
+        `|`. That is stated in the tool description, because a silently
+        meaningless pipe is worse than a refused one.
 
         `env` overlays the current environment for this one command; a key
         mapped to None is removed rather than set. It is not offered to the
@@ -295,28 +308,27 @@ class MCPClient:
         computed from its remaining deadline, so it never sees the default.
         """
         command = args.get("command", "")
-        # Allow only simple commands: alphanumerics, dashes, underscores, dots,
-        # slashes, spaces, and a few safe flags/punctuation.
-        rejected = list(dict.fromkeys(_DISALLOWED_COMMAND_CHARS.findall(command)))
-        if rejected:
+        try:
+            argv = shlex.split(command)
+        except ValueError as exc:
+            # Unbalanced quotes. Say so plainly: the caller cannot see the
+            # parse, and "No closing quotation" alone reads like the program
+            # failed rather than like the command was never built.
             return {
                 "success": False,
-                # Name them. "Shell metacharacters" reads as pipes and
-                # redirection, but the class also catches `^ * ( )` inside a
-                # quoted regex -- a caller shown only the category cannot see
-                # which character it tripped on, so it retries variants that
-                # trip on the same one, a tool turn each.
-                "error": (
-                    "Command contains disallowed shell metacharacters: "
-                    + " ".join(repr(char) for char in rejected)
-                ),
+                "error": f"Could not parse command ({exc}). Check the quoting.",
+                "command": command,
+            }
+        if not argv:
+            return {
+                "success": False,
+                "error": "Empty command.",
                 "command": command,
             }
 
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=_resolve_timeout(args.get("timeout")),
@@ -345,6 +357,16 @@ class MCPClient:
                 "timed_out": True,
                 "stdout": _as_captured_text(e.stdout),
                 "stderr": _as_captured_text(e.stderr),
+                "command": command,
+            }
+        except FileNotFoundError:
+            # With a shell this came back as rc=127 and a message on stderr.
+            # Without one it raises, and a bare OSError repr does not say which
+            # of the words was the program -- so name it, or the caller reads
+            # "not found" as its file argument being missing.
+            return {
+                "success": False,
+                "error": f"Command not found: {argv[0]!r}",
                 "command": command,
             }
         except Exception as e:

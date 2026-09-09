@@ -357,7 +357,7 @@ unified MCP-style interface:
 | `filesystem_write` | Builder | Write a file |
 | `git_status` | Builder | `git status --porcelain` |
 | `git_diff` | Builder | `git diff` |
-| `terminal_execute` | Builder | Run a safe shell command (killed after `TERMINAL_TIMEOUT_SECONDS`, default 60; pass `timeout` to raise) |
+| `terminal_execute` | Builder | Run one program, no shell (killed after `TERMINAL_TIMEOUT_SECONDS`, default 60; pass `timeout` to raise) |
 | `run_tests` | Builder | Run `pytest` |
 
 The Researcher and Builder nodes call these tools through `MCPClient`, preserving
