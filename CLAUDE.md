@@ -1174,11 +1174,21 @@ deliver the reply.
   that file from 98,920 characters to 104,582, past `MAX_INDEXABLE_BYTES`: the
   module that defines the corpus would have been dropped *from* the corpus at
   the next reindex, silently, as the direct result of adding the check meant to
-  catch exactly that. `graphrag_server.py` now sits ~250 characters under the
-  limit, so any edit to it is a live hazard, and `oversized` is what makes that
-  visible when it happens. The walk is cached for `WALK_CACHE_SECONDS` since
-  the console polls every five seconds; `forget_expected_documents` drops it,
-  and `rpc_upload_document` calls it because an upload is the one writer that
+  catch exactly that. That is why it is a separate module and stays one.
+  **The margin is not thin, and the note that said it was never described a
+  file that shipped.** "~250 characters under the limit" was written in the
+  same commit that split the spectral applications out to `corpus_spectral.py`
+  (~35,400 characters), which took `graphrag_server.py` to ~71,000 -- so the
+  sentence was wrong the moment it was committed, having measured a state that
+  existed only partway through the change. Editing that file is not the live
+  hazard it claimed. Both numbers are quoted here to the nearest thousand on
+  purpose: a character count in prose goes stale on the next edit, which is
+  what happened, and the guard was never meant to be a figure anybody tracks by
+  hand. `oversized` is the guard -- it reports a file the walk offers and the
+  indexer must skip, apart from `stale` because a reindex cannot fix it.
+  The walk is cached for `WALK_CACHE_SECONDS` since the console polls every
+  five seconds; `forget_expected_documents` drops it, and
+  `rpc_upload_document` calls it because an upload is the one writer that
   changes what the walk would find.
 - **`query_graph` traverses undirected, and must.** Every edge in the knowledge
   graph runs **document -> entity**, so an entity has in-edges only and a
