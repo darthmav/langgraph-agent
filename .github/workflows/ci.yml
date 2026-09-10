@@ -1,0 +1,98 @@
+# The checks from CLAUDE.md's Quick Reference, run on every push and pull
+# request. The commands are copied verbatim from that section rather than
+# reworded, so a check that passes locally and a check that passes here cannot
+# quietly come to mean different things.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Ruff needs none of the project's dependencies, so it runs on its own and
+  # reports in well under a minute. The test job below spends most of its time
+  # installing torch; a formatting mistake should not wait for that.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        # Pinned to the version pyproject asks for, so CI cannot start failing
+        # on a rule a new release turned on.
+        run: pip install "ruff>=0.5.0"
+      - name: Lint
+        run: ruff check src/ tests/ serve.py scripts/ example_usage.py test_cloud.py
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # One version failing is worth knowing about even when the other is
+      # still running.
+      fail-fast: false
+      matrix:
+        # 3.12 is the floor `pyproject.toml` requires and the version
+        # `mypy.ini` pins; 3.14 is what the project is developed on. Both are
+        # run because the suite has to pass on the oldest interpreter anyone
+        # can install it on as well as the newest anyone uses.
+        # `tests/test_claims.py` asserts the floor here still matches
+        # pyproject, so this comment cannot drift away from it again -- it
+        # already did once, claiming >= 3.10 against a project requiring 3.12.
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU-only torch
+        # Before the project, and deliberately. `sentence-transformers` pulls
+        # torch, and torch from PyPI drags in the whole CUDA stack -- measured
+        # at 19 packages including cuda-toolkit, nvidia-cudnn and triton, none
+        # of which a GPU-less runner can use. Installing torch from the CPU
+        # index first pins it, so the dependency resolution below cannot reach
+        # for the CUDA build. The project already forces CPU at import time
+        # (`CUDA_VISIBLE_DEVICES=""` in graphrag_server.py), so this only makes
+        # the install match what the code was always going to do.
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project
+        run: pip install -e ".[dev]"
+
+      - name: Type check
+        run: mypy src/langgraph_agent/ serve.py
+
+      - name: Tests
+        run: python -m pytest tests/ -v
+
+      - name: Root verification scripts
+        # These are the scripts that prove the root-level import path works.
+        # `spectral_graph` is not part of the installed distribution -- it is
+        # importable only with the project root on sys.path -- and CLAUDE.md's
+        # rule that "a package module only proves itself through a root-level
+        # script that imports it" is exactly what these check. The pytest suite
+        # runs from the root too, so nothing else here would notice that path
+        # breaking.
+        run: |
+          for script in verify_spectrum.py verify_fiedler.py verify_clustering.py \
+                        verify_embedding.py test_spectral_graph.py; do
+            echo "--- $script"
+            python "$script"
+          done

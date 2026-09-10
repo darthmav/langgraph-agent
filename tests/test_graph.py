@@ -354,9 +354,20 @@ def test_builder_does_not_credit_unwritten_files(monkeypatch):
     assert result["files_changed"] == []
 
 
-def test_moving_a_seat_clears_its_recorded_failure():
-    """A failure belongs to the seat that produced it, not to the agent."""
+def test_moving_a_seat_clears_its_recorded_failure(monkeypatch):
+    """A failure belongs to the seat that produced it, not to the agent.
+
+    The daemon is stubbed because `live` for an ollama seat is two claims at
+    once: that no failure is recorded against it, and that a reachable daemon
+    is holding the tag. Only the first is what moving a seat decides. Left
+    unstubbed this asserted the second as well, so it passed on a laptop
+    running ollama and failed everywhere else -- which is exactly what it did
+    on this project's first CI run, as the one test in the suite that could
+    not pass on a machine other than a developer's.
+    """
     from langgraph_agent import config
+
+    monkeypatch.setattr(config, "list_ollama_models", lambda: ["kimi-k3:cloud"])
 
     config.set_agent_llm("architect", "anthropic", "claude-opus-5")
     config._seat_failures["architect"] = "Anthropic credit balance too low"
