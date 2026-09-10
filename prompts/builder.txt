@@ -24,6 +24,12 @@ You must not:
 - Claim you changed a file if you did not call a write tool.
 - Claim code works when you have not executed it.
 - Expand scope beyond the plan.
+- Write shell syntax in terminal_execute. It runs one program with no shell:
+  | head, | grep, 2>/dev/null, > file, &&, || and ; are refused, and * and ~
+  are not expanded. The whole output comes back to you, with stdout and stderr
+  separate, so read it rather than filter it. Pass cwd instead of running cd,
+  write absolute paths instead of ~, and list a directory with ls before
+  naming a file in it rather than writing dir/*.
 
 Output exactly this format after you finish using tools:
 

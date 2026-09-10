@@ -692,6 +692,14 @@ four the moment this file described the problem.
   the two indistinguishable; nothing here needs that. Redirection is answered
   with `filesystem_write`, the way `cd` is answered with `cwd`, while chaining
   has no replacement and is not given a fake one.
+  **A redirect glued to its target is caught too** (`_GLUED_REDIRECT`):
+  `shlex` keeps `2>/dev/null` as one token, so on the run of 2026-09-10 it
+  reached `find` as a path. Output redirection only -- a glued `<` cannot be
+  told from `grep "<div>"`, and `>=` is a version bound -- at the cost `&&`
+  already pays: an argument really beginning with `>` cannot be passed. A glob
+  or `~` cannot be refused, since `find -name "*.py"` needs the literal, so
+  `_unexpanded_hint` names one only when the program quotes it back in its
+  own error (`cat: 'dir/*': No such file or directory`).
   Two failures the shell used to fold into a return code are
   now surfaced by name: unbalanced quotes cannot be parsed (`shlex` raises,
   and the message says to check the quoting), and a missing program raises
@@ -728,6 +736,12 @@ four the moment this file described the problem.
   directory -- once the Builder passes `cwd`, the command alone stopped
   locating anything, since the same relative command means a different thing
   in every directory it could have run in.
+  A failed line also says why (`_failure_reason`): eleven of forty-seven
+  calls on the 2026-09-10 run read only `failed`, eight of them correct
+  refusals of shell syntax. That run is also why `prompts/builder.txt` names
+  the shapes outright -- the Builder sent calls in batches that all failed
+  before one refusal could be read, and the system prompt is read before the
+  batch.
 - **The Builder's deadline may never abandon a tool call.** Only the model's
   own call is wrapped in `_with_deadline` — discarding a half-received response
   costs a turn and nothing else. The tool calls underneath it write files,

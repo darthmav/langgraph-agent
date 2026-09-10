@@ -20,6 +20,7 @@ from langgraph_agent.mcp_client import (
     _missing_program_error,
     _resolve_cwd,
     _resolve_timeout,
+    _unexpanded_hint,
     mcp_client,
 )
 
@@ -180,6 +181,80 @@ async def test_an_operator_inside_an_argument_is_still_just_text(
     )
     assert quoted["success"], quoted.get("error") or quoted.get("stderr")
     assert quoted["stdout"].strip() == "a && b | c > d"
+
+
+@pytest.mark.asyncio
+async def test_a_glued_redirect_is_refused_like_a_spaced_one(client: MCPClient):
+    """`2>/dev/null` is one token to `shlex`, so the whole-token check missed it.
+
+    The Builder on the 2026-09-10 run wrote that suffix nine times in one pass,
+    and the one no other operator was caught ahead of reached `find` as a
+    literal argument: `paths must precede expression: '2>/dev/null'`.
+    """
+    discarded = await client.call_tool(
+        "terminal_execute", {"command": "find . -maxdepth 0 2>/dev/null"}
+    )
+    assert not discarded["success"]
+    assert "2>/dev/null" in discarded["error"]
+    # Discarding a stream needs no replacement: both come back separately.
+    assert "separately" in discarded["error"]
+
+    merged = await client.call_tool("terminal_execute", {"command": "echo a 2>&1"})
+    assert not merged["success"]
+    assert "separately" in merged["error"]
+
+    written = await client.call_tool("terminal_execute", {"command": "echo a >x.txt"})
+    assert not written["success"]
+    assert "filesystem_write" in written["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_argument_that_only_resembles_a_redirect_passes(client: MCPClient):
+    """Only output redirection is read into a glued token, never a comparison.
+
+    An input redirect glued to its target cannot be told from markup a grep is
+    looking for, and `>=1` is a version bound.
+    """
+    for argument in (">=1", "<div>", "->"):
+        echoed = await client.call_tool(
+            "terminal_execute",
+            {"command": f'python -c "import sys; print(sys.argv[1])" "{argument}"'},
+        )
+        assert echoed["success"], echoed.get("error") or echoed.get("stderr")
+        assert echoed["stdout"].strip() == argument
+
+
+@pytest.mark.asyncio
+async def test_an_unexpanded_glob_is_named_when_the_program_trips_on_it(
+    client: MCPClient, tmp_path: Path
+):
+    """With no shell, `cat dir/*` asks `cat` for a file literally named that.
+
+    Its answer -- no such file or directory, about a directory that exists --
+    is true of the name it was given and false of what was meant.
+    """
+    (tmp_path / "manifest").write_text("x")
+
+    missed = await client.call_tool("terminal_execute", {"command": f"cat {tmp_path}/*"})
+    assert not missed["success"]
+    assert "glob" in missed["hint"]
+
+    # A literal the program wants is not a mistake, and earns no hint.
+    wanted = await client.call_tool(
+        "terminal_execute", {"command": f'find {tmp_path} -name "*"'}
+    )
+    assert wanted["success"], wanted.get("stderr")
+    assert "hint" not in wanted
+
+
+def test_the_glob_hint_needs_the_program_to_have_quoted_the_token():
+    """Only the program's own quoted complaint about a token earns the hint."""
+    assert _unexpanded_hint(["cat", "d/*"], "cat: 'd/*': No such file or directory")
+    assert _unexpanded_hint(["ls", "~/x"], "ls: cannot access '~/x': No such file")
+    # A regex that failed to compile is reported unquoted: not a glob problem.
+    assert _unexpanded_hint(["grep", "["], "grep: Unmatched [, [^, [:, [., or [=") is None
+    # A token holding nothing a shell would expand is never named.
+    assert _unexpanded_hint(["cat", "plain"], "cat: 'plain': No such file") is None
 
 
 @pytest.mark.asyncio
@@ -401,6 +476,63 @@ def test_report_line_names_the_directory_a_command_ran_in():
     # A command that did not ask for one says nothing, rather than naming a
     # default the Builder never chose.
     assert "cwd" not in without_cwd
+
+
+def test_report_line_says_why_a_call_failed():
+    """`-> failed` alone read the same for a refused pipe and a broken machine.
+
+    Eleven of the forty-seven calls on the 2026-09-10 run said only that, and
+    eight of them were the tool correctly refusing shell syntax.
+    """
+    from langgraph_agent.nodes import _Deadline, _run_builder_tools
+
+    class _TwoCalls:
+        """Asks for a refused command and a working one, then stops asking."""
+
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def invoke(self, _messages):
+            self.turn += 1
+            if self.turn > 1:
+                return SimpleNamespace(content="done", tool_calls=[])
+            return SimpleNamespace(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "terminal_execute",
+                        "args": {"command": "echo a | wc -l"},
+                        "id": "call-1",
+                    },
+                    {
+                        "name": "terminal_execute",
+                        "args": {"command": "python --version"},
+                        "id": "call-2",
+                    },
+                ],
+            )
+
+    tool_log: list[str] = []
+    _run_builder_tools(_TwoCalls(), [], [], tool_log, _Deadline(60))
+
+    refused, ran = tool_log
+    assert "-> failed: " in refused and "pipe" in refused
+    assert ran.endswith("-> ok")
+
+
+def test_a_failure_reason_is_one_line_in_the_tools_own_words():
+    """The tool's own error first, then the last thing the program said."""
+    from langgraph_agent.nodes import MAX_FAILURE_REASON_CHARS, _failure_reason
+
+    traceback = "Traceback (most recent call last):\n  File \"x\"\nValueError: bad\n"
+    assert _failure_reason({"success": False, "returncode": 1, "stderr": traceback}) == (
+        "ValueError: bad"
+    )
+    assert _failure_reason({"success": False, "error": "refused\nand why"}) == "refused"
+    assert _failure_reason({"success": False, "returncode": 3, "stderr": ""}) == "exit 3"
+    assert len(_failure_reason({"success": False, "error": "x" * 500})) == (
+        MAX_FAILURE_REASON_CHARS
+    )
 
 
 def test_builder_can_ask_for_a_working_directory():
