@@ -131,7 +131,7 @@ def _standard_web(monkeypatch, pages: dict[str, str]):
 # ---------------------------------------------------------------------------
 
 
-def test_the_verbatim_goal_is_always_the_first_query():
+def test_the_verbatim_goal_is_the_first_query_when_it_fits():
     """It is the only query carrying the phrasing a person actually chose."""
     assert expand_queries(GOAL)[0] == GOAL
 
@@ -152,6 +152,62 @@ def test_expansion_does_not_repeat_itself_or_overrun_the_limit():
     assert len(queries) == len({q.lower() for q in queries})
     assert len(expand_queries(GOAL, limit=2)) == 2
     assert expand_queries("   ") == []
+
+
+# Paragraph-length, the shape of goal that found the limit: every sentence short
+# enough to send, the whole far too long to, and more distinct terms than one
+# query can carry.
+LONG_GOAL = " ".join(
+    f"Measure {topic} against the current baseline."
+    for topic in (
+        "chunk overlap", "dense recall", "lexical precision", "fusion depth",
+        "relevance floors", "entity stopwords", "graph traversal", "eigengap gates",
+        "cheeger brackets", "duplicate scans", "upload limits", "staleness verdicts",
+        "reindex pruning", "export notes", "seat timeouts", "builder deadlines",
+        "verification slices", "headless plotting", "terminal operators", "working directories",
+        "research fanout", "page extraction", "selection ratios", "provenance headers",
+    )
+)
+
+
+def test_no_query_is_longer_than_a_search_engine_will_take():
+    """DuckDuckGo answers an over-long query with `302` to its own error page.
+
+    Every search of the run that found this was refused: the verbatim goal went
+    out at 1,227 characters and the term list at 816 and 840, against a limit
+    measured between 496 and 592.
+    """
+    assert len(LONG_GOAL) > 1000
+    queries = expand_queries(LONG_GOAL)
+
+    assert len(queries) == web_research.WEB_SEARCH_QUERIES
+    assert all(0 < len(q) <= web_research.WEB_QUERY_MAX_CHARS for q in queries)
+    # Whole leading sentences, not a clause cut off wherever the limit fell.
+    assert LONG_GOAL.startswith(queries[0]) and queries[0].endswith(".")
+    # The terms that survive are the ones the goal opens with.
+    assert queries[1].startswith("measure chunk overlap")
+    assert queries[2].endswith("documentation reference")
+
+
+def test_the_query_cap_sits_inside_the_range_measured_to_be_accepted():
+    """Raising the cap past the measured limit would show up nowhere else.
+
+    Every query would still be built and sent, each would come back `302`, and
+    the phase would report having researched nothing -- the run this cap exists
+    because of. 496 characters is the longest query measured to be accepted;
+    592 the shortest measured to be refused.
+    """
+    assert 0 < web_research.WEB_QUERY_MAX_CHARS <= 496
+
+
+def test_a_goal_with_no_sentence_short_enough_is_searched_by_its_terms():
+    """Omitting the verbatim query must not leave the goal unsearched."""
+    run_on = LONG_GOAL.replace(".", ",")
+
+    queries = expand_queries(run_on)
+
+    assert queries and all(0 < len(q) <= web_research.WEB_QUERY_MAX_CHARS for q in queries)
+    assert queries[0].startswith("measure chunk overlap")
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +455,83 @@ def test_a_failing_search_is_reported_as_an_error_not_as_an_empty_web(monkeypatc
     assert answer["source"] == "error"
     assert answer["pages"] == []
     assert any("429" in error for error in answer["errors"])
+
+
+def test_a_redirected_search_says_where_it_was_sent(monkeypatch):
+    """`HTTP 302` alone read as a mystery; where it pointed is the explanation.
+
+    DuckDuckGo refuses an over-long query by redirecting to its own error page,
+    and httpx does not follow a redirect it was not asked to.
+    """
+    _serve(monkeypatch, lambda request: httpx.Response(302, headers={"location": "/50x.html?e=3"}))
+
+    answer = search_web(GOAL)
+
+    assert answer["source"] == "error"
+    assert answer["errors"]
+    assert all("302 -> /50x.html?e=3" in error for error in answer["errors"])
+
+
+# The shape of DuckDuckGo's challenge as captured on 2026-09-10: `202`, a modal
+# asking the caller to prove a human, and not one result link.
+_BOT_CHECK = (
+    '<div class="anomaly-modal__mask"><div class="anomaly-modal__modal">'
+    '<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>'
+    '<form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html"></form>'
+    "</div></div>"
+)
+
+
+def test_a_bot_check_is_an_error_not_a_web_with_nothing_to_say(monkeypatch):
+    """A block used to parse to zero results and be filed as a genuine empty web.
+
+    It passes `raise_for_status` -- `202` is a success -- so nothing marked it
+    as a failure, and the feed said the phase had read pages and kept none.
+    Every request sent into a block extends it, so the fan-out stops at the
+    first rather than spending the remaining queries on the same refusal.
+    """
+    searches: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        searches.append(request)
+        return httpx.Response(202, text=_BOT_CHECK)
+
+    _serve(monkeypatch, handler)
+    answer = search_web(GOAL)
+
+    assert answer["source"] == "error"
+    assert "bot check" in answer["note"]
+    assert "not sent" in answer["note"]
+    assert len(searches) == 1
+
+
+def test_a_202_carrying_results_is_still_read(monkeypatch):
+    """The block is recognised by its markup, never by its status alone."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "duckduckgo" in request.url.host:
+            return httpx.Response(202, text=_results_html("https://example.com/a"))
+        return httpx.Response(
+            200, text=_page_html(ON_TOPIC), headers={"content-type": "text/html"}
+        )
+
+    _serve(monkeypatch, handler)
+    answer = search_web(GOAL)
+
+    assert answer["source"] == "duckduckgo"
+    assert [page["url"] for page in answer["pages"]] == ["https://example.com/a"]
+
+
+def test_an_error_quotes_a_long_query_without_repeating_it(monkeypatch):
+    """Quoting each failed query whole made one feed line ~2,900 characters."""
+    _serve(monkeypatch, lambda request: httpx.Response(429))
+
+    answer = search_web(LONG_GOAL)
+
+    assert answer["errors"]
+    for error in answer["errors"]:
+        assert len(error) < 150
+        assert "chars)" in error
 
 
 def test_a_page_that_is_not_text_is_declined_by_name(monkeypatch):

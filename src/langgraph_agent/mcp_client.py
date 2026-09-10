@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -102,6 +103,21 @@ _REDIRECTS = frozenset({">", ">>", "<", "<<", "2>", "2>>", "1>", "&>", ">&"})
 _CHAINS = frozenset({"&&", "||", ";", "&", "|"})
 SHELL_OPERATORS = _REDIRECTS | _CHAINS
 
+# A redirect written the way it is usually written: glued to its target.
+# `shlex` keeps `2>/dev/null` as one token, so the whole-token check never saw
+# an operator in it and the program was handed the literal string -- `find`
+# answered `paths must precede expression: '2>/dev/null'` on the run of
+# 2026-09-10, whose Builder wrote that suffix nine times in one pass. Output
+# redirection only: an input redirect glued to its target cannot be told from
+# a real argument (`grep "<div>"`), and `=` may not follow the `>`, so a
+# version bound like `>=1.0` passes. The cost is the one `&&` already pays: an
+# argument that really does begin with `>` cannot be passed, quoted or not.
+_GLUED_REDIRECT = re.compile(r"^[0-9&]?>>?(?:&[0-9]+|[^\s=>&]\S*)$")
+
+
+def _is_shell_operator(token: str) -> bool:
+    return token in SHELL_OPERATORS or _GLUED_REDIRECT.match(token) is not None
+
 
 def _shell_operator_error(token: str) -> str:
     """Explain a shell operator that reached argv, and name what replaces it.
@@ -120,7 +136,16 @@ def _shell_operator_error(token: str) -> str:
     consulted before the turn; an error is read at the moment the mistake is
     made.
     """
-    if token in _REDIRECTS:
+    if token in _REDIRECTS or _GLUED_REDIRECT.match(token):
+        # Discarding or merging a stream is the commonest redirect by far, and
+        # it has no replacement because it needs none: nothing is printed to a
+        # terminal here, both streams come back as separate fields.
+        if token.endswith("/dev/null") or re.search(r">&[0-9]+$", token):
+            return (
+                f"{token!r} is shell redirection, and there is no shell here. "
+                "Drop it: stdout and stderr already come back to you "
+                "separately, whatever the command prints."
+            )
         return (
             f"{token!r} is shell redirection, and there is no shell here. Use "
             "`filesystem_write` to write a file, or `filesystem_read` to read "
@@ -157,6 +182,33 @@ def _missing_program_error(program: str) -> str:
             "program, and there is no shell here -- run one program per call."
         )
     return f"Command not found: {program!r}"
+
+
+# What a shell would have expanded before the program saw the argument.
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _unexpanded_hint(argv: list[str], stderr: str) -> str | None:
+    """Name a glob or `~` that reached the program literally and tripped it.
+
+    With no shell, `cat dir/*` hands `cat` a file named `dir/*`, and `cat`
+    answers "No such file or directory" about a directory that exists -- true
+    of the name it got, and false of what was meant. Only raised when the
+    program quoted the token back in its own error: `find . -name "*.py"`
+    wants the literal and succeeds, and a regex such as `[` that fails to
+    compile is reported unquoted, so neither is mistaken for an unexpanded
+    glob.
+    """
+    for token in argv[1:]:
+        if not (_GLOB_CHARS & set(token) or token.startswith("~")):
+            continue
+        if any(f"{quote}{token}'" in stderr for quote in ("'", "`")) or f'"{token}"' in stderr:
+            return (
+                f"{token!r} reached the program exactly as written: there is no "
+                "shell here to expand a glob or `~`. List the directory with `ls` "
+                "and name the file, or write the absolute path."
+            )
+    return None
 
 
 def _resolve_cwd(requested: Any) -> tuple[str | None, str | None]:
@@ -415,10 +467,12 @@ class MCPClient:
         thing the chaining needed, so the characters no longer have to be
         refused to be harmless.
 
-        The trade is that shell *features* are gone rather than rejected: a
-        pipe is now accepted and passed to the program as the literal argument
-        `|`. That is stated in the tool description, because a silently
-        meaningless pipe is worse than a refused one.
+        The trade is that shell *features* are gone. An operator written on
+        purpose -- a pipe, a chain, a redirect spaced or glued -- is refused by
+        name before anything runs (`_is_shell_operator`), because a silently
+        meaningless pipe is worse than a refused one. A glob or `~` cannot be
+        refused, since `find -name "*.py"` needs the literal, so it reaches the
+        program as written and a failure it causes is named in `hint`.
 
         `cwd` runs the command somewhere other than the project root, and is
         offered to the Builder because without it there is no way to express
@@ -458,12 +512,13 @@ class MCPClient:
 
         # Refused before the spawn, like `_resolve_cwd`, and for the same
         # reason: the complaint has to be made while we still know what is
-        # being complained about. Note the limit -- only a *spaced* operator is
-        # its own token. `echo hi; rm -rf /` splits to `['echo', 'hi;', ...]`,
+        # being complained about. Note the limit -- an operator is caught when
+        # it is its own token, or a redirect glued to its target
+        # (`2>/dev/null`). `echo hi; rm -rf /` splits to `['echo', 'hi;', ...]`,
         # so the `;` rides on `hi` and stays inert data, which is what the
         # canary test pins. This catches the shapes a caller writes on purpose,
         # not every shape that exists.
-        operator = next((token for token in argv if token in SHELL_OPERATORS), None)
+        operator = next((token for token in argv if _is_shell_operator(token)), None)
         if operator is not None:
             return {
                 "success": False,
@@ -488,13 +543,18 @@ class MCPClient:
                 # until its timeout and report as a hang.
                 stdin=subprocess.DEVNULL,
             )
-            return {
+            outcome: dict[str, Any] = {
                 "success": result.returncode == 0,
                 "returncode": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "command": command,
             }
+            if result.returncode != 0:
+                hint = _unexpanded_hint(argv, result.stderr or "")
+                if hint:
+                    outcome["hint"] = hint
+            return outcome
         except subprocess.TimeoutExpired as e:
             # Keep what the command managed to print. `str(e)` alone says only
             # that it timed out, and a caller with no output to look at cannot

@@ -1153,14 +1153,20 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
                 "Run one program in the project. There is no shell: the command is "
                 "split into arguments and run directly, so quoting works and any "
                 "character may appear inside an argument -- "
-                "python -c \"import x; print(x.y)\" is fine, and so are ( ) ; * ^ "
-                "in a regex or a filename. "
+                "python -c \"import x; print(x.y)\" is fine, and so are ( ) ; ^ "
+                "in a regex. "
                 "Because there is no shell, shell *syntax* does nothing here. A "
-                "pipe, a redirect, && , || or ; written as its own word is refused "
+                "pipe, a redirect (2>/dev/null included), && , || or ; is refused "
                 "with an error saying so, rather than handed to the program as a "
-                "meaningless argument -- so run one program per call and work on the "
-                "output this tool returns. To write a file use filesystem_write; "
-                "$(...) and backticks are not expanded either. "
+                "meaningless argument. None of them is needed: the whole output "
+                "comes back to you, with stdout and stderr as separate fields, so "
+                "read it rather than piping it through head or grep, and run one "
+                "program per call. To write a file use filesystem_write. "
+                "Nothing is expanded either: * and ~ reach the program exactly as "
+                "written, as do $(...), $VAR and backticks. find . -name \"*.py\" "
+                "works, because find wants the literal; cat dir/* does not -- list "
+                "the directory with ls and then name the file, and write absolute "
+                "paths instead of ~. "
                 "For the same reason there is no `cd` to run -- it is a shell builtin, "
                 "not a program -- so pass `cwd` to choose the directory the command "
                 "runs in. "
@@ -1236,6 +1242,42 @@ VERIFY_RESERVE_SECONDS = float(os.getenv("VERIFY_RESERVE_SECONDS", "60"))
 # A tool result this long is summarised rather than pasted whole. Large reads
 # are the reason: a whole file in the transcript crowds out the plan.
 MAX_TOOL_RESULT_CHARS = 20000
+
+# How much of a failure's reason its report line carries. One line in the
+# tool's or the program's own words is enough to tell a refused pipe from a
+# missing file; the whole of it is already in the transcript the Builder reads.
+MAX_FAILURE_REASON_CHARS = 120
+
+
+def _failure_reason(result: Any) -> str:
+    """One line saying why a tool call failed, for its report line.
+
+    `-> failed` alone cannot tell a refused pipe from a missing file from a
+    broken machine, and the Architect rules on this report: on the run of
+    2026-09-10 eleven of forty-seven lines read `failed` with nothing beside
+    them, eight of them the tool correctly refusing shell syntax, and the
+    operator reading them had no way to see that. The tool's own `error` comes
+    first, being written to be read; then the last line on stderr, which is
+    where a traceback puts its exception and `cat` its only line; then stdout,
+    where pytest puts its summary; then the exit status.
+    """
+    if not isinstance(result, dict):
+        return ""
+    line = ""
+    error = str(result.get("error") or "").strip()
+    if error:
+        line = error.splitlines()[0]
+    else:
+        for stream in ("stderr", "stdout"):
+            lines = [ln.strip() for ln in str(result.get(stream) or "").splitlines() if ln.strip()]
+            if lines:
+                line = lines[-1]
+                break
+        if not line and result.get("returncode") is not None:
+            line = f"exit {result['returncode']}"
+    if len(line) > MAX_FAILURE_REASON_CHARS:
+        line = line[: MAX_FAILURE_REASON_CHARS - 3].rstrip() + "..."
+    return line
 
 
 def _run_builder_tools(
@@ -1318,11 +1360,15 @@ def _run_builder_tools(
             # once the Builder started passing `cwd` the command alone stopped
             # locating anything: the same relative command means a different
             # thing in every directory it could have run in.
+            # The same goes for a failure: the line names why, or eight refused
+            # pipes read exactly like eight broken commands.
             target = args.get("path") or args.get("command") or ""
             where = f" [cwd={args['cwd']}]" if args.get("cwd") else ""
-            tool_log.append(
-                f"{name}({target}){where} -> {'ok' if ok else 'failed'}"
-            )
+            outcome = "ok"
+            if not ok:
+                reason = _failure_reason(result)
+                outcome = f"failed: {reason}" if reason else "failed"
+            tool_log.append(f"{name}({target}){where} -> {outcome}")
 
             payload = json.dumps(result, default=str)
             if len(payload) > MAX_TOOL_RESULT_CHARS:
