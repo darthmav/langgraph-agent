@@ -1141,6 +1141,14 @@ four the moment this file described the problem.
   and `research_online` reports `considered` beside `documents` — a phase that
   read twelve pages and kept none is working correctly on a goal the web has
   nothing to say about, and must not read as one that failed.
+  **Every query fits `WEB_QUERY_MAX_CHARS`.** DuckDuckGo refuses a long query
+  with `302` to its `/50x.html` page, which `raise_for_status` reported as a
+  bare status: on 2026-09-10 a paragraph-length goal sent 1,227-, 816- and
+  840-character queries and every search failed. The measurements behind the
+  default are at the constant. **Its bot check is a `202`** with no results,
+  which parsed as a genuine empty web; `_search_duckduckgo` recognises it by
+  its markup and raises `_SearchBlocked`, and the fan-out stops there, since
+  each further request prolongs the block.
   **It runs before the Architect opens, and that ordering is the design.**
   `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
   lock and before `graph.stream`, so the corpus is whole by the time any seat

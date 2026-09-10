@@ -119,6 +119,25 @@ WEB_SEARCH_QUERIES = int(os.environ.get("WEB_SEARCH_QUERIES", "3"))
 WEB_RESULTS_PER_QUERY = int(os.environ.get("WEB_RESULTS_PER_QUERY", "10"))
 WEB_FETCH_LIMIT = int(os.environ.get("WEB_FETCH_LIMIT", "12"))
 
+# The longest query sent to a search engine. An engine does not read a long
+# query badly -- it refuses it. DuckDuckGo answers `302` to its own
+# `/50x.html?e=3` page, which httpx does not follow and `raise_for_status`
+# reports as a bare status. Measured on 2026-09-10: 496 characters accepted,
+# 592 and every length above it redirected, and a 287-character query came back
+# with a full page of results. The run that found this sent the verbatim goal
+# at 1,227 characters and its term list at 816 and 840, so every search the
+# phase made was refused before a single page was read. The default sits inside
+# the range measured to *return results*, not at the edge of the range measured
+# to be *accepted*: whether results still come back between 287 and 496 is
+# unmeasured, because the probe that would have said tripped the bot check.
+WEB_QUERY_MAX_CHARS = int(os.environ.get("WEB_QUERY_MAX_CHARS", "250"))
+
+# How much of a query an error message quotes. Errors are reported per query,
+# and quoting each whole made the feed line for that same run ~2,900
+# characters: the long goal three times over, burying the one word that said
+# what had happened.
+_QUERY_LABEL_CHARS = 60
+
 # How many pages may actually enter the corpus for one goal. Every one of these
 # competes with the checkout's own documents at retrieval time, so this is a
 # ceiling on how far a single run can shift what the Researcher sees.
@@ -183,23 +202,72 @@ def web_search_available() -> bool:
     return WEB_SEARCH_ENABLED
 
 
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+
+
+def _fit_query(text: str, limit: int) -> str:
+    """The longest leading run of whole words in `text` that fits in `limit`.
+
+    Leading, because the terms a goal opens with are the ones it is about --
+    the ordering `expand_queries` already relies on. A first word longer than
+    the limit by itself is cut rather than dropped: an empty query is not a
+    shorter search, it is no search, and it would be reported as the web
+    having nothing to say.
+    """
+    if limit < 1:
+        return ""
+    words = text.split()
+    kept: list[str] = []
+    length = 0
+    for word in words:
+        added = len(word) + (1 if kept else 0)
+        if length + added > limit:
+            break
+        kept.append(word)
+        length += added
+    if not kept and words:
+        return words[0][:limit]
+    return " ".join(kept)
+
+
+def _leading_sentences(text: str, limit: int) -> str:
+    """As many whole leading sentences of `text` as fit in `limit`, else "".
+
+    Whole sentences or nothing. The verbatim query is there to carry the
+    phrasing a person chose, and a sentence cut off mid-clause is not that --
+    the term queries already cover a goal this function has to leave out.
+    """
+    kept = ""
+    for sentence in _SENTENCE_BREAK.split(text):
+        candidate = f"{kept} {sentence}" if kept else sentence
+        if len(candidate) > limit:
+            break
+        kept = candidate
+    return kept
+
+
 def expand_queries(goal: str, limit: int | None = None) -> list[str]:
     """Derive several search queries from one goal.
 
-    The verbatim goal comes first -- it is the only query carrying the phrasing
-    a person chose, and an engine's own understanding of a sentence is
-    sometimes better than anything derived from it. The rest are built from the
-    goal's content terms, using this project's `tokenize` rather than a plain
-    split, so an identifier in the goal contributes its pieces as well as
-    itself: a goal naming `BUILDER_DEADLINE_SECONDS` searches
+    The verbatim goal comes first when it fits -- it is the only query carrying
+    the phrasing a person chose, and an engine's own understanding of a
+    sentence is sometimes better than anything derived from it. The rest are
+    built from the goal's content terms, using this project's `tokenize` rather
+    than a plain split, so an identifier in the goal contributes its pieces as
+    well as itself: a goal naming `BUILDER_DEADLINE_SECONDS` searches
     `builder deadline seconds` too, and a search engine has seen the second and
     never the first.
+
+    Every query fits `WEB_QUERY_MAX_CHARS`, because an over-long query is not
+    searched worse, it is refused outright. A goal too long to send whole is
+    represented by its leading whole sentences, or not at all when even the
+    first will not fit, and the term queries keep the goal's leading terms.
 
     Duplicate-free and order-preserving: a one-word goal collapses its variants
     into the verbatim query rather than searching the same string three times.
     """
     wanted = max(1, limit or WEB_SEARCH_QUERIES)
-    goal = goal.strip()
+    goal = " ".join(goal.split())
     if not goal:
         return []
 
@@ -213,17 +281,21 @@ def expand_queries(goal: str, limit: int | None = None) -> list[str]:
             seen.add(key)
             queries.append(cleaned)
 
-    offer(goal)
+    offer(_leading_sentences(goal, WEB_QUERY_MAX_CHARS))
 
     # `dict.fromkeys` keeps first-appearance order, which matters: the terms a
-    # goal opens with are the ones it is about.
+    # goal opens with are the ones it is about, and they are what survives the
+    # length cap.
     terms = [t for t in dict.fromkeys(tokenize(goal)) if t not in _QUERY_STOPWORDS and len(t) > 1]
     if terms:
-        offer(" ".join(terms))
+        joined = " ".join(terms)
+        offer(_fit_query(joined, WEB_QUERY_MAX_CHARS))
         for intent in _QUERY_INTENTS:
             if len(queries) >= wanted:
                 break
-            offer(f"{' '.join(terms)} {intent}")
+            head = _fit_query(joined, WEB_QUERY_MAX_CHARS - len(intent) - 1)
+            if head:
+                offer(f"{head} {intent}")
 
     return queries[:wanted]
 
@@ -284,6 +356,23 @@ def _unwrap_redirect(href: str) -> str:
     return href
 
 
+class _SearchBlocked(Exception):
+    """The engine answered with a challenge page instead of results.
+
+    Kept apart from an HTTP error because the right response differs. A failed
+    query says nothing about the next one; a block covers every query from this
+    address, and each further request only prolongs it.
+    """
+
+
+# DuckDuckGo's bot check arrives as `202` carrying a challenge form and no
+# results, which passes `raise_for_status` and parses to an empty list -- so a
+# block was reported as a web with nothing to say on the goal, the one outcome
+# `search_web` exists to keep apart from "we asked and it broke". Recognised by
+# its markup rather than its status, so a 202 that does carry results is read.
+_DUCKDUCKGO_CHALLENGE_MARKERS = ("anomaly-modal", "/anomaly.js")
+
+
 def _search_duckduckgo(query: str, count: int, client: httpx.Client) -> list[dict[str, str]]:
     response = client.post(
         DUCKDUCKGO_ENDPOINT,
@@ -292,6 +381,12 @@ def _search_duckduckgo(query: str, count: int, client: httpx.Client) -> list[dic
         headers={"User-Agent": USER_AGENT},
     )
     response.raise_for_status()
+    if any(marker in response.text for marker in _DUCKDUCKGO_CHALLENGE_MARKERS):
+        raise _SearchBlocked(
+            f"DuckDuckGo answered with its bot check (HTTP {response.status_code}) "
+            "instead of results. It lifts on its own; a SearxNG instance "
+            "(SEARXNG_URL) avoids it."
+        )
     parser = _DuckDuckGoResults()
     parser.feed(response.text)
     parser.close()
@@ -315,6 +410,13 @@ def _search_searxng(query: str, count: int, client: httpx.Client) -> list[dict[s
     return results
 
 
+def _query_label(query: str) -> str:
+    """Name a query in an error message without repeating all of it."""
+    if len(query) <= _QUERY_LABEL_CHARS:
+        return repr(query)
+    return f"{query[:_QUERY_LABEL_CHARS].rstrip()!r}... ({len(query)} chars)"
+
+
 def _rank_urls(goal: str, client: httpx.Client, queries: list[str]) -> tuple[list[str], dict[str, str], list[str]]:
     """Search every derived query and fuse the orderings into one.
 
@@ -327,14 +429,28 @@ def _rank_urls(goal: str, client: httpx.Client, queries: list[str]) -> tuple[lis
     errors: list[str] = []
     backend = _search_searxng if SEARXNG_URL else _search_duckduckgo
 
-    for query in queries:
+    for position, query in enumerate(queries):
+        label = _query_label(query)
         try:
             hits = backend(query, WEB_RESULTS_PER_QUERY, client)
+        except _SearchBlocked as exc:
+            # The rest of the fan-out would be refused the same way, and every
+            # request sent into a block extends it.
+            unsent = len(queries) - position - 1
+            skipped = f" The other {unsent} search(es) were not sent." if unsent else ""
+            errors.append(f"{label}: {exc}{skipped}")
+            break
         except httpx.HTTPStatusError as exc:
-            errors.append(f"{query!r}: HTTP {exc.response.status_code}")
+            # Where a redirect points is the explanation. DuckDuckGo refuses an
+            # over-long query with `302` to its `/50x.html` page, and the bare
+            # status reads as a mystery rather than as a refusal.
+            where = exc.response.headers.get("location")
+            errors.append(
+                f"{label}: HTTP {exc.response.status_code}" + (f" -> {where}" if where else "")
+            )
             continue
         except (httpx.HTTPError, ValueError) as exc:
-            errors.append(f"{query!r}: {type(exc).__name__}: {exc}")
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
             continue
         rankings.append([hit["url"] for hit in hits])
         for hit in hits:
@@ -518,7 +634,7 @@ def search_web(goal: str, fetch_limit: int | None = None) -> dict[str, Any]:
         urls, titles, errors = _rank_urls(goal, client, queries)
         if not urls:
             note = (
-                "Every derived search failed; nothing was researched online. "
+                "No derived search succeeded; nothing was researched online. "
                 + "; ".join(errors)
                 if errors
                 else "The search returned no results for this goal."
