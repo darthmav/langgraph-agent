@@ -211,6 +211,60 @@ async def test_a_graph_query_with_no_corpus_is_empty_not_stubbed(nowhere):
 
 
 # ---------------------------------------------------------------------------
+# the online research phase
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_leaves_no_corpus_behind_when_the_phase_stores_nothing(nowhere):
+    """The first run on a fresh machine must not invent a knowledge base.
+
+    `_research_online_before_the_run` is allowed to build one -- storing a page
+    is indexing -- but it used to resolve that door on the way in, as the
+    argument to `research_online`, before it knew whether the phase would run
+    at all. The phase is off in every test and on any machine without
+    `WEB_SEARCH_ENABLED`, so a run that never fetched a page still created an
+    empty store, and `rag_stats` read `empty` from then on where the truth was
+    `absent`. Only one of those two means "press Reindex".
+    """
+    serve.rpc_run_goal({"goal": "Do a thing"})
+
+    assert "knowledge" not in _touched(nowhere)
+    assert corpus_state(str(nowhere / "knowledge"))[0] == "absent"
+
+
+def test_the_phase_opens_the_door_only_for_a_page_it_keeps(monkeypatch):
+    """Nothing kept, nothing built; and the corpus is built once, not per page.
+
+    Asserted on the factory rather than on the disk so the two halves are one
+    test: the same call that must not happen for an empty selection must happen
+    exactly once for a non-empty one.
+    """
+    from langgraph_agent import web_research
+
+    opened = []
+    monkeypatch.setattr(web_research, "search_web", lambda goal: {
+        "goal": goal, "pages": [], "queries": [goal], "source": "duckduckgo",
+        "note": "", "errors": []})
+    monkeypatch.setattr(web_research, "store_web_document",
+                        lambda kb, page, goal, root: {"chunks": 1, "path": page["url"]})
+
+    def factory():
+        opened.append(1)
+        return object()
+
+    monkeypatch.setattr(web_research, "select_pages", lambda *a, **k: [])
+    report = web_research.research_online(factory, "a goal", ".")
+    assert report["documents"] == 0
+    assert opened == []  # considered nothing, so built nothing
+
+    pages = [{"url": "https://example.com/a"}, {"url": "https://example.com/b"}]
+    monkeypatch.setattr(web_research, "select_pages", lambda *a, **k: pages)
+    report = web_research.research_online(factory, "a goal", ".")
+    assert report["documents"] == 2
+    assert opened == [1]  # one corpus for both pages, not one each
+
+
+# ---------------------------------------------------------------------------
 # the local model
 # ---------------------------------------------------------------------------
 

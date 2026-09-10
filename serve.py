@@ -723,6 +723,13 @@ def _research_online_before_the_run(goal: str) -> dict[str, Any]:
     staleness report will then say, accurately, that the project's own files
     are still missing from it.
 
+    It is handed over **unopened** for that same sentence to hold. Passing
+    `_kb_for_indexing()` created the store on the way into a phase that had not
+    yet read a page and might never store one -- switched off, or a goal the
+    web cannot answer -- so a machine that had never been indexed came out of
+    its first run reporting `empty` instead of `absent`. `research_online`
+    calls it on the first page that earns a place.
+
     Every failure is swallowed into the report. A goal the web cannot answer,
     a search engine that is down, a machine with no network -- none of those is
     a reason to refuse to run against the corpus already on disk, and the
@@ -732,7 +739,7 @@ def _research_online_before_the_run(goal: str) -> dict[str, Any]:
         return {"source": "stopped", "documents": 0, "considered": 0, "note":
                 "Stopped before the online research phase began."}
     try:
-        report = research_online(_kb_for_indexing(), goal)
+        report = research_online(_kb_for_indexing, goal)
     except Exception as exc:
         return {"source": "error", "documents": 0, "considered": 0,
                 "note": f"The online research phase failed: {exc}"}

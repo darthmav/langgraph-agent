@@ -1044,6 +1044,22 @@ deliver the reply.
   passages, 19.6s, and the Researcher then retrieved one of them at 0.74 --
   comfortably over the floor -- with its provenance header intact in the
   matched chunk.
+  **It is handed the creating door unopened.** Storing a page is indexing, so
+  `_kb_for_indexing` is the right door here -- a goal researched against a
+  machine with no corpus should leave one behind holding what it found. But it
+  was resolved on the way *in*, as the argument to `research_online`, before
+  the phase knew whether it would run at all: so a run left one behind holding
+  **nothing**. The phase is off in every test and on any machine without
+  `WEB_SEARCH_ENABLED`, and a goal the web cannot answer keeps no pages either,
+  so a machine that had never been indexed came out of its first run reporting
+  `empty` where the truth was `absent` -- and only one of those two means
+  "press Reindex". This is the *"no corpus exists until someone indexes one"*
+  rule reaching the one caller that really does index, and failing on timing
+  rather than on which door it picked. `research_online` now takes a factory
+  and calls it on the first page that earns a place, once for the batch. The
+  regression is pinned twice in `test_corpus_absent.py`: through `rpc_run_goal`
+  on a fresh machine, and on the factory itself, which must be called never for
+  an empty selection and exactly once for a full one.
   The phase reaches the Researcher through **the corpus and nothing else**.
   There is deliberately no path by which a fetched page skips retrieval: it is
   embedded, and the Researcher finds it with the same search, the same hybrid
@@ -1158,11 +1174,21 @@ deliver the reply.
   that file from 98,920 characters to 104,582, past `MAX_INDEXABLE_BYTES`: the
   module that defines the corpus would have been dropped *from* the corpus at
   the next reindex, silently, as the direct result of adding the check meant to
-  catch exactly that. `graphrag_server.py` now sits ~250 characters under the
-  limit, so any edit to it is a live hazard, and `oversized` is what makes that
-  visible when it happens. The walk is cached for `WALK_CACHE_SECONDS` since
-  the console polls every five seconds; `forget_expected_documents` drops it,
-  and `rpc_upload_document` calls it because an upload is the one writer that
+  catch exactly that. That is why it is a separate module and stays one.
+  **The margin is not thin, and the note that said it was never described a
+  file that shipped.** "~250 characters under the limit" was written in the
+  same commit that split the spectral applications out to `corpus_spectral.py`
+  (~35,400 characters), which took `graphrag_server.py` to ~71,000 -- so the
+  sentence was wrong the moment it was committed, having measured a state that
+  existed only partway through the change. Editing that file is not the live
+  hazard it claimed. Both numbers are quoted here to the nearest thousand on
+  purpose: a character count in prose goes stale on the next edit, which is
+  what happened, and the guard was never meant to be a figure anybody tracks by
+  hand. `oversized` is the guard -- it reports a file the walk offers and the
+  indexer must skip, apart from `stale` because a reindex cannot fix it.
+  The walk is cached for `WALK_CACHE_SECONDS` since the console polls every
+  five seconds; `forget_expected_documents` drops it, and
+  `rpc_upload_document` calls it because an upload is the one writer that
   changes what the walk would find.
 - **`query_graph` traverses undirected, and must.** Every edge in the knowledge
   graph runs **document -> entity**, so an entity has in-edges only and a
@@ -1185,9 +1211,16 @@ deliver the reply.
   than one that is merely stale. The files under `knowledge/` are kept, holding
   an empty store: Chroma has that directory open, and pulling it out from under
   a live client is the worse failure. The trailing `_save_graph()` is
-  load-bearing — `index_project_files` has exactly that hole today, where
-  `graph.clear()` is persisted only as a side effect of indexing something
-  afterwards, so a reindex matching zero files leaves the old graph on disk.
+  load-bearing, and `index_project_files` now ends with the same two lines for
+  the same reason. It had exactly this hole: its `graph.clear()` and its prune
+  of stale Chroma rows were persisted and invalidated only as a side effect of
+  `add_document`, so a reindex that added nothing — no matching files, or every
+  one of them oversized or unreadable — emptied the graph in memory, reported
+  `indexed: 0` and success, and left the old `knowledge_graph.json` for the
+  next process start to reload. The corpus it had just rebuilt came back. The
+  lexical index went the same way: built before the prune, it went on answering
+  with the rows the prune deleted. Both lines are unconditional there, since a
+  reindex is the one operation after which that index must be rebuilt anyway.
 - **An uploaded document is a file first and a document second, and that
   ordering is the whole design.** `store_uploaded_document` writes the upload
   under `uploads/` and only then calls `add_document`. The corpus is a function

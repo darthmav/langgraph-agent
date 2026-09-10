@@ -70,6 +70,7 @@ import hashlib
 import os
 import re
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -611,12 +612,26 @@ def store_web_document(
 
 
 def research_online(
-    kb: GraphRAGKnowledgeBase,
+    open_kb: Callable[[], GraphRAGKnowledgeBase],
     goal: str,
     root: str = ".",
     keep: int | None = None,
 ) -> dict[str, Any]:
     """Search the web for a goal and embed what earns a place. The pre-run phase.
+
+    Takes a *factory* rather than a corpus, and calls it only once a page has
+    earned a place. The caller passes the creating door (`_kb_for_indexing`),
+    which is right -- storing a page is indexing, and a goal researched against
+    a machine with no corpus should leave one behind holding what it found.
+    Resolving that door on the way in instead left one behind holding
+    **nothing**: the phase is switched off in every test and on any machine
+    without `WEB_SEARCH_ENABLED`, and a phase that never ran still built an
+    empty store, which then reported itself as a knowledge base to everything
+    that looked afterwards. `rag_stats` read `empty` where the truth was
+    `absent`, and those two call for different things from the operator -- only
+    one of them means "press Reindex". The same held for a goal the web has
+    nothing to say about: twelve pages considered, none kept, a corpus created
+    to hold them.
 
     Returns a report rather than raising, and the report distinguishes a phase
     that found nothing from one that never ran and one that broke -- see
@@ -636,8 +651,14 @@ def research_online(
 
     stored: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
+    # Resolved on the first page that is actually going to be stored, and
+    # reused for the rest: the factory creates the corpus, so calling it before
+    # the loop creates one for a phase that stores nothing.
+    kb: GraphRAGKnowledgeBase | None = None
     for page in selected:
         try:
+            if kb is None:
+                kb = open_kb()
             stored.append(store_web_document(kb, page, goal, root))
         except (ValueError, OSError) as exc:
             failed.append({"url": page.get("url", ""), "error": str(exc)})
