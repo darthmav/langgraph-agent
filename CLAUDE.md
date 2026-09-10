@@ -12,7 +12,7 @@ This is **langgraph-agent**, a cloud-only 4-Agent AI system for software develop
 Inference is cloud-only. The only thing that runs on this machine is the
 embedding model (`all-MiniLM-L6-v2`), which belongs to GraphRAG, not to a seat.
 
-Tech stack: Python 3.10+, LangGraph, Chroma + sentence-transformers + NetworkX, MCP (local stdio-compatible tool binding).
+Tech stack: Python 3.12+, LangGraph, Chroma + sentence-transformers + NetworkX, MCP (local stdio-compatible tool binding).
 
 ## Quick Reference
 
@@ -62,12 +62,19 @@ python example_usage.py
 │   │   └── decorators.py      # retry_with_backoff, circuit_breaker, self_healing_wrapper
 │   └── _internal/
 │       └── exceptions.py      # LangGraphAgentError and its five subclasses
+├── src/quisce/                # QuICSE engine prototype. Ships in the
+│   ├── quisce_engine.py       #   distribution, imported by nothing here --
+│   ├── baseline.py            #   see the note below the tree
+│   └── test_harness.py
 ├── prompts/
 │   ├── architect.txt          # System prompt (loaded by nodes.py)
 │   ├── planner.txt
 │   ├── researcher.txt
 │   └── builder.txt
 ├── tests/
+│   ├── conftest.py            # Forces StubLLM; switches the web phase off
+│   ├── test_claims.py         # Documentation claims, made executable
+│   ├── test_corpus_absent.py  # The two doors: reading never creates a corpus
 │   ├── test_graph.py          # Pytest suite
 │   ├── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
 │   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
@@ -93,16 +100,40 @@ python example_usage.py
 │   ├── auto_verify.py         # Silent verification
 │   ├── quick_test.sh          # Bash quick check
 │   ├── full_setup.py          # Automated setup + re-index
+│   ├── spectral_benchmark.py  # Graph-architecture sweep behind the A-numbers
 │   └── diagnose_seats.py      # Role probes + team runs per seating
 ├── frontend/
 │   ├── index.html             # Web console SPA
 │   └── README.md
+├── .github/workflows/
+│   └── ci.yml                 # ruff, mypy, pytest, root scripts, on every push
 ├── serve.py                   # Python HTTP server + API backend
 ├── example_usage.py           # Demo script
 ├── test_cloud.py              # Cloud LLM end-to-end test
 ├── README.md                  # User-facing documentation
 └── .env.example               # Environment variables template
 ```
+
+### `src/quisce/` is a prototype, and nothing here depends on it
+
+Roughly 960 lines: `quisce_engine.py`, a `baseline.py` to measure it against,
+and a `test_harness.py`. Three facts about it are worth knowing before anyone
+edits or removes it, because none is visible from the code.
+
+It **ships**. `[tool.setuptools.packages.find]` says `where = ["src"]`, so
+`pip install` puts `quisce` on the path beside `langgraph_agent` -- unlike
+`spectral_graph/`, which lives at the root precisely so it does not. Importing
+it pulls in torch, which is why nothing imports it at module scope.
+
+Nothing in this project imports it at all, and no test covers it. The pytest
+suite does not touch it, and CI reaches it only through `ruff`, which lints
+`src/` whole. `mypy` names `src/langgraph_agent/` and `serve.py`, so this
+package is not type-checked by anything.
+
+Its specification is gone. `from quisce import QuICSEModule` was documented in
+the behavioural-system spec, deleted on 2026-09-09 with the other spectral
+write-ups, so the package's own `__init__.py` is now the only description of
+its entry point. That is the thing to fix first if it stays.
 
 ## Conventions
 
@@ -257,6 +288,43 @@ so the main thread can wait on both ways out — Ctrl+C and `_shutdown_requested
 Calling `server.shutdown()` from the request thread that asked for it would
 deadlock: it blocks until the serve loop stops, and that loop is what has to
 deliver the reply.
+
+## Documentation claims are tests
+
+`tests/test_claims.py` exists because prose goes stale silently. On 2026-09-09
+this project found four claims that had been true when written and had stopped
+being true -- a comment saying `graphrag_server.py` sat ~250 characters under
+the indexing limit when it had 28,000 to spare, a seat diagnostic quoting a
+relevance floor that no longer matched the constant, this file asserting the
+twenty best-connected entities were all real terms when three were
+sentence-openers, and twelve citations pointing at reports deleted that
+morning. Every one was found by someone reading carefully, which is why each
+had survived being read many times. The rule now: **a claim worth writing down
+is a claim worth failing a build over.**
+
+Most of those guards *recompute* the claim from the repository, so they need no
+maintenance and catch drift nobody predicted: every path cited in prose or a
+docstring resolves, the Project Structure tree above matches the tree on disk
+in both directions, the seat table matches `DEFAULT_SEATS`, the documented
+Python floor matches `pyproject.toml`, no walked file exceeds
+`MAX_INDEXABLE_BYTES`, and CI runs the same commands the Quick Reference does.
+
+Two are different and the difference is the interesting part. A figure quoted
+in prose is checked against its constant through a small registry, because the
+real fix for a figure is not to restate it -- `scripts/diagnose_seats.py` reads
+`RETRIEVAL_RELEVANCE_FLOOR` rather than quoting it, and markdown that cannot do
+that gets a registry entry instead. And the entity audit **cannot** be a rule:
+`Measured` sits at 4 position-free capitals against 34 forced, `Spectral` at 2
+against 24, and no threshold separates the sentence-opener from the domain
+term. That is this file's own rejected-heuristic finding met one level up. So
+the top-twenty entity list is *pinned* rather than judged: the test fails when
+the graph's answer moves, which is not a bug report but the audit asking to be
+redone at the one moment the answer changed.
+
+The guards are proven by breaking each claim and watching the test fail. A
+guard that cannot fail pins nothing, and the first version of the entity guard
+was asleep -- it fired only at zero free capitals, and `Measured` had acquired
+four the moment this file described the problem.
 
 ## Important Notes
 
