@@ -496,13 +496,40 @@ def test_the_stopword_list_holds_no_domain_term(kb):
 
     Every one of these is a term the corpus is *about*; stopping one would
     delete a real relation from the graph and nothing would raise.
+
+    The last four were nominated by the 2026-09-09 widening and refused. They
+    are the ones a future pass is most likely to get wrong, because each looks
+    generic and each is load-bearing here: `L_dense` scores zero
+    position-free capitals only because an assignment starts its line, and
+    `System`, `Search` and `State` are ordinary English words that this corpus
+    genuinely uses as terms (`System` carries 22 free capitals on its own).
     """
     for term in (
         "Builder", "Architect", "Researcher", "Planner", "Laplacian", "Fiedler",
         "Cheeger", "GraphRAG", "AgentState", "NetworkX", "Chroma", "Verdict",
         "Spectral", "ValueError", "LangGraph", "Normalized", "Conductance",
+        "L_dense", "System", "Search", "State",
     ):
         assert term.lower() not in ENTITY_STOPWORDS, f"{term} is not boilerplate"
+
+
+def test_the_widened_stopwords_are_actually_stopped(kb):
+    """The 2026-09-09 additions, pinned by behaviour rather than by list entry.
+
+    `Measured` is the one that matters: this project's own notes open
+    sentences with it constantly, so the document recording a measurement was
+    minting an entity for the word. Asserted through `add_document` because a
+    membership check would pass on a list the extractor had stopped reading.
+    """
+    kb.add_document(
+        "note.md",
+        "Measured on this corpus, the Builder ran clean. Tests pass. "
+        "Initialize the Laplacian. Write the report. Degree matters.",
+    )
+
+    entities = {n for n, a in kb.graph.nodes(data=True) if a.get("type") == "entity"}
+
+    assert entities == {"Builder", "Laplacian"}
 
 
 def test_the_stopword_list_is_lowercase_ascii():

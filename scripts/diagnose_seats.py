@@ -214,6 +214,25 @@ CONFIGS_BY_NAME: dict[str, TeamConfig] = {c.name: c for c in TEAM_CONFIGS}
 # --------------------------------------------------------------------------
 
 
+def _retrieval_floor() -> str:
+    """`RETRIEVAL_RELEVANCE_FLOOR`, read from the code rather than restated.
+
+    Read at all because the restated one drifted: this help text said 0.40
+    while the constant was 0.37, and that number is not decoration -- it is
+    the gate deciding whether the Researcher's model is consulted at all, in
+    the one place an operator goes to find out which seat to trust.
+
+    Imported inside the function, not at module scope, because `--list` and
+    `--help` must not pay for chromadb. If the package will not import, the
+    constant's *name* is the honest answer; a stale number is not.
+    """
+    try:
+        from langgraph_agent.graphrag_server import RETRIEVAL_RELEVANCE_FLOOR
+    except Exception:  # pragma: no cover - the script still has to print
+        return "RETRIEVAL_RELEVANCE_FLOOR"
+    return f"{RETRIEVAL_RELEVANCE_FLOOR:g}"
+
+
 @dataclass(frozen=True)
 class Exercise:
     """A short goal, plus what counts as having done it."""
@@ -250,7 +269,7 @@ EXERCISES: dict[str, Exercise] = {
                       "RETRIEVAL_RELEVANCE_FLOOR is formatted straight into "
                       "the findings without the seat being called, so two "
                       "Researchers score alike here (this query measures "
-                      "0.605 against a floor of 0.40). Use `offcorpus` for "
+                      "0.605 against a floor of {floor}). Use `offcorpus` for "
                       "the model.",
     ),
     "offcorpus": Exercise(
@@ -1288,7 +1307,8 @@ def show_catalogue() -> None:
     rule("exercises")
     for ex in EXERCISES.values():
         print(f"  {bold(ex.name)}  {dim('writes files' if ex.expect_files else 'no files')}")
-        print(wrap(ex.what_it_tests, indent="    "))
+        print(wrap(ex.what_it_tests.replace("{floor}", _retrieval_floor()),
+                   indent="    "))
     print()
 
 

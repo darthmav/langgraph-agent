@@ -99,7 +99,7 @@ class CorpusSpectralMixin:
 
         **Components come from networkx, not from the spectrum.** The textbook
         identity is that the multiplicity of eigenvalue 0 equals the number of
-        connected components, and `reports/spectral_applicability.md` proposes
+        connected components, and the spectral applicability study proposes
         counting near-zero eigenvalues for exactly that reason. Two measured
         objections, both on this project's own graph shape (920 nodes):
 
@@ -206,7 +206,7 @@ class CorpusSpectralMixin:
     ) -> dict[str, Any]:
         """Group the corpus into topic communities, or say there are none.
 
-        The A2 application from `reports/spectral_applicability.md`:
+        The A2 application of the spectral applicability study:
         Ng-Jordan-Weiss spectral clustering over the normalized Laplacian,
         which on a bipartite document/entity graph puts documents together with
         the entities that define them -- so each cluster reads as a topic
@@ -216,7 +216,7 @@ class CorpusSpectralMixin:
 
         **The number of clusters is where this application was weakest, and it
         is not wired straight to the eigengap.** The report proposes choosing
-        `k` from the eigengap; `reports/spectral_architecture_benchmark.md`
+        `k` from the eigengap; the architecture benchmark
         measured that heuristic getting `k` wrong on 3 of 8 architectures,
         including k = 10 for a barbell whose answer is 2. The heuristic always
         returns *some* k, so on a corpus with no topic structure it invents
@@ -374,7 +374,7 @@ class CorpusSpectralMixin:
     def bottleneck(self, limit: int = 12) -> dict[str, Any]:
         """The narrowest cut in the corpus, and the nodes that bridge it.
 
-        The A3 application from `reports/spectral_applicability.md`. Sweeps the
+        The A3 application of the spectral applicability study. Sweeps the
         normalized Fiedler vector for the prefix of lowest conductance, then
         names the nodes whose edges actually cross it -- the few entities or
         documents through which two otherwise separate topic areas connect.
@@ -401,7 +401,7 @@ class CorpusSpectralMixin:
           not find one. Cheeger brackets the true conductance between
           `mu_2 / 2` and `sqrt(2 * mu_2)`, and that bracket is wide (measured
           from 4x to 546x across graph shapes in
-          `reports/spectral_architecture_benchmark.md`), so the sweep cut
+          measured across the benchmark's eight architectures), so the sweep cut
           genuinely can miss. Saying so is the honest answer; collapsing it
           into "no bottleneck" would report a gap in the evidence as a finding.
 

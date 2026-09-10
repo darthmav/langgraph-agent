@@ -769,6 +769,27 @@ deliver the reply.
   evidence by `neighborhood()`, by `top_entities`, and by
   `duplicate_entities()`. After the list the twenty best-connected entities are
   all real terms and no stopword token remains in the graph.
+  **That claim expired once, and the way it expired is the thing to remember.**
+  A hand-audited list is audited against a *vocabulary*, and this corpus's
+  vocabulary kept growing -- largely through prose written into this very file.
+  By 2026-09-09 `Tests`, `Measured` and `System` were the 6th, 8th and 10th
+  best-connected entities: the original failure exactly, one vocabulary later.
+  `Measured` is the sharpest case, because CLAUDE.md opens sentences with it
+  twenty-nine times, so the prose recording these measurements was minting the
+  entity. Thirty tokens were added and the claim holds again.
+  The audit that chose them is worth repeating rather than re-deriving. For
+  every candidate, count the capitals that **position does not explain** --
+  not at a line start, not after a full stop, not the first cell of a table
+  row. Zero of those means the token is recording where it sits. That is the
+  same heuristic this bullet rejects below, used the only way it is sound: to
+  *nominate* candidates for a human to rule on, never to filter. Two
+  nominations were refused on exactly that reading, and they are why this
+  stays a hand audit. `L_dense` scores zero free capitals because an
+  assignment starts its line -- it is a real identifier. `Spectral` scores
+  two, both marginal, and stays because it is a term the corpus is about.
+  `System` was nominated by rank and cleared by the count at 22 free capitals,
+  which is an entity that earned itself. Re-run the count before trusting the
+  list again; it is a claim about a vocabulary, and vocabularies move.
   **The obvious alternative was built, measured and rejected.** Dropping a
   token that only ever appears where a capital is forced (line start, after a
   full stop) removes the same noise and severs real edges doing it: `Planner`
@@ -817,10 +838,27 @@ deliver the reply.
   `source: "no_corpus"` and `NO_CORPUS_NOTE` instead, worded once in
   `graphrag_server` so the MCP tools, the Builder's belt and the console cannot
   describe the same absence differently.
+- **The A-numbers, and where they went.** `connectivity()`, `topics()`,
+  `bottleneck()`, `neighborhood(split=True)` and `duplicate_entities()` are
+  referred to throughout as the A1-A5 applications. That numbering came from
+  `reports/spectral_applicability.md`, which ranked five uses of the graph
+  spectrum by what they would cost and what they would prove, and from
+  `reports/spectral_architecture_benchmark.md`, which measured the eigengap
+  heuristic and the Cheeger bracket across eight graph architectures. **Both
+  were deleted on 2026-09-09, with the rest of the spectral write-ups**, and
+  the citations that pointed at them were removed rather than left dangling.
+  The labels stay because five methods and their tests are named by them and
+  renumbering proves nothing. Nothing consulted at read time was lost with the
+  files: every measurement those reports supplied and this file relies on is
+  quoted inline where it is used -- the Cheeger bracket's 4x to 546x, the
+  eigengap wrong on 3 of 8 architectures, the 5.1-23.4 decisiveness range on
+  planted topics against 1.0-1.8 on structureless graphs. The code they
+  justify is untouched: `spectral_graph/`, `corpus_spectral.py` and
+  `test_spectral_graph.py` all remain.
 - **`stats()` carries a structural health check, and it counts components
   with networkx rather than with the spectrum.** `connectivity()` reports
   `components`, `largest_component`, `isolated_nodes` and `lambda_2` -- the A1
-  application from `reports/spectral_applicability.md`. It exists because an
+  application (see *the A-numbers* below). It exists because an
   entity-extraction regression in `add_document` changes no counter and raises
   nothing: it fragments the graph, and that is visible here and nowhere else.
   Three decisions that are not interchangeable with the obvious alternatives.
@@ -850,7 +888,7 @@ deliver the reply.
   because every mutation path here only adds (`add_document`) or zeroes
   (`clear`), and a re-add that moves neither count moves no structure either.
 - **`bottleneck()` has three verdicts, and the middle one is why it is worth
-  having.** The A3 application from `reports/spectral_applicability.md`: sweep
+  having.** The A3 application: sweep
   the normalized Fiedler vector for the narrowest cut, then name the nodes
   whose edges cross it -- the entities two topic areas connect through, which
   are the terms a search should expand on for a query straddling both. Degree
@@ -864,8 +902,8 @@ deliver the reply.
   search), `found` when the sweep cut came in under the line, and
   `inconclusive` when the bound permits a bottleneck the sweep did not find.
   That third state is real, not hedging -- the Cheeger bracket runs from 4x to
-  546x wide across the shapes in
-  `reports/spectral_architecture_benchmark.md`, so the sweep genuinely can
+  546x wide across the eight architectures the benchmark covered, so the sweep
+  genuinely can
   miss, and collapsing it into "no bottleneck" reports a gap in the evidence as
   a finding. Like `connectivity()` it runs on the largest component, because on
   a disconnected graph the Fiedler vector is a component indicator and an
@@ -881,13 +919,13 @@ deliver the reply.
   five-second poll, and it takes no run guard, for the reason `export_corpus`
   takes none.
 - **`topics()` chooses `k` from the eigengap, but only when the eigengap is
-  decisive.** The A2 application from `reports/spectral_applicability.md`:
+  decisive.** The A2 application:
   Ng-Jordan-Weiss clustering over the normalized Laplacian, which on a
   bipartite document/entity graph groups documents with the entities that
   define them -- so a cluster reads as a topic and `top_entities` names it.
   This is the whole-corpus map `neighborhood()` cannot give.
   The proposal's weak point was `k`, and it is not wired straight through.
-  `reports/spectral_architecture_benchmark.md` measured the eigengap heuristic
+  The architecture benchmark measured the eigengap heuristic
   wrong on 3 of 8 architectures, k = 10 for a barbell whose answer is 2, and it
   always returns *some* k -- so on a corpus with no topics it invents one, and
   clusters shown without that caveat are a fabricated map. What rescues it is
@@ -912,8 +950,8 @@ deliver the reply.
   a disconnected graph the eigenvectors would spend themselves rediscovering
   the orphans `connectivity()` has already counted.
 - **`neighborhood(split=True)` names the sides for the centre, and the flag is
-  off by default.** The A4 application: one eigenvector, the cheapest technique
-  in `reports/spectral_applicability.md`, splitting a traced neighbourhood into
+  off by default.** The A4 application: one eigenvector, the cheapest of the
+  five, splitting a traced neighbourhood into
   what clusters with the node you looked up and what is peripheral to it. Off
   by default because it costs 1.7-3.3ms against the 1.0ms `neighborhood()`
   itself takes -- it triples a call the console makes on every click, and a

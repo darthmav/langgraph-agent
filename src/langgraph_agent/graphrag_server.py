@@ -130,6 +130,29 @@ NO_CORPUS_NOTE = (
 # is the wrong trade here, and a list a reader can audit line by line beats a
 # rule whose failures are invisible. Measured on this corpus, this list removes
 # 84 entities and 437 edges and costs **no** meaningful term a single edge.
+#
+# **A hand-audited list drifts, and this one did.** The claim above held when
+# it was written and had stopped holding by 2026-09-09, because the corpus it
+# was audited against had moved on -- much of it prose written *since*, in this
+# file and in CLAUDE.md. `Tests`, `Measured` and `System` were the 6th, 8th and
+# 10th best-connected entities in the graph, which is the exact failure the
+# list exists to prevent, one vocabulary later. `Measured` is the sharpest:
+# CLAUDE.md opens sentences with it ("Measured on this corpus...") twenty-nine
+# times, so the prose recording these measurements was minting the entity.
+#
+# The additions below were chosen by counting, per token, the capitals that
+# position does **not** explain -- not at a line start, not after a full stop,
+# not the first cell of a table row. A token with zero of those is recording
+# where it sits. That is the same heuristic rejected above, used the way it is
+# sound: to *nominate* candidates for a human to rule on, never to filter. Two
+# nominations were refused on that read and are the reason the pass is a hand
+# audit rather than a script. `L_dense` scores zero free capitals because an
+# assignment starts its line -- it is a real identifier and stays. `Spectral`
+# scores two, both marginal, and stays because it is a term this corpus is
+# about; the cost of a wrong removal is a severed true relation, which is
+# exactly what the paragraph above refuses. `System`, `Search`, `State` and
+# `Verification` were nominated by rank and cleared by the count: `System`
+# alone carries 22 free capitals, so the entity is earned.
 ENTITY_STOPWORDS = frozenset(
     word.lower()
     for word in """
@@ -150,6 +173,11 @@ ENTITY_STOPWORDS = frozenset(
     Follows Contains Containing
 
     False None Import Class Print Assert Except Finally Raise Elif Return
+
+    Measured Initialize Dense Build Maximum Empty Skipping Dictionary Apply
+    Refused Whether Split Asserted Degree Shared Based Demonstrates References
+    Generate Extract Point Seconds Deliberately Named Built Asking Pinned
+    Insert Tests Write
     """.split()
 )
 
@@ -865,7 +893,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     def _sign_split(self, keep: set[Any], centre: str) -> dict[str, Any]:
         """Fiedler sign bipartition of a swept neighbourhood, oriented on the centre.
 
-        The A4 application from `reports/spectral_applicability.md`, and the
+        The A4 application of the spectral applicability study, and the
         cheapest technique in it: one eigenvector, 1.7-3.3ms on subgraphs of
         43-291 nodes, against the 1.0ms `neighborhood()` itself costs. That is
         why it is a flag rather than always-on -- it triples the cost of a call
