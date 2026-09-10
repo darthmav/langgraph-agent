@@ -139,6 +139,18 @@ for the life of the process.
 
 ## Installation
 
+On Arch / Omarchy, one command does all of it: system packages, a `.venv`
+with CPU-only torch, `.env`, the Ollama daemon and its sign-in, the seat
+models, the embedding model, the corpus, the checks, and an "Ambiguity
+Console" entry in the app launcher. It is safe to re-run, and it ends by
+reporting whether each seat can actually run.
+
+```bash
+./install.sh            # --help lists --minimal, --no-system, --no-index, ...
+```
+
+Everything it installs is free to use. Elsewhere, or by hand:
+
 ```bash
 pip install -e ".[dev]"
 ```

@@ -5,6 +5,15 @@ set -e
 
 cd "$(dirname "$0")"
 
+# The project's packages live in .venv (install.sh builds it). Without this,
+# `python` is whatever is first on PATH -- on Omarchy that is mise's
+# interpreter, which has none of them, so serve.py died on its first import.
+# It also puts the venv first on PATH for the Builder's own terminal commands.
+if [ -f ".venv/bin/activate" ]; then
+    # shellcheck source=/dev/null
+    . .venv/bin/activate
+fi
+
 PORT=8080
 URL="http://localhost:${PORT}"
 
@@ -65,6 +74,14 @@ open_browser() {
         return 1
     fi
 }
+
+# Already up (the app launcher clicked twice): open it rather than fail on a
+# port that is in use.
+if is_server_ready; then
+    echo "✓ Console already running at ${URL}"
+    open_browser "${URL}" || true
+    exit 0
+fi
 
 echo ""
 echo "Starting frontend server on ${URL}..."

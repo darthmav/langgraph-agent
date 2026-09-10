@@ -17,6 +17,9 @@ Tech stack: Python 3.12+, LangGraph, Chroma + sentence-transformers + NetworkX, 
 ## Quick Reference
 
 ```bash
+# Install everything on Arch / Omarchy (system packages, venv, Ollama, corpus)
+./install.sh
+
 # Install dependencies
 pip install -e ".[dev]"
 
@@ -107,6 +110,7 @@ python example_usage.py
 │   └── README.md
 ├── .github/workflows/
 │   └── ci.yml                 # ruff, mypy, pytest, root scripts, on every push
+├── install.sh                 # Arch / Omarchy: everything, from nothing to a running console
 ├── serve.py                   # Python HTTP server + API backend
 ├── example_usage.py           # Demo script
 ├── test_cloud.py              # Cloud LLM end-to-end test
