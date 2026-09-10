@@ -22,8 +22,15 @@ dependencies = [
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-community>=0.3.0",
-    "langchain-openai>=0.2.0",    # optional cloud provider
-    "langchain-anthropic>=0.2.0",  # primary cloud provider
+    # Every seat in DEFAULT_SEATS is an ollama seat, so this is the one
+    # provider the shipped configuration cannot start without. It was undeclared
+    # until 2026-09-10 and nothing said so: a seat whose provider will not
+    # import becomes StubLLM, so a fresh install ran the whole four-agent loop
+    # on canned text and reported success. CI found it on its first run, on a
+    # machine that had never had it installed by hand.
+    "langchain-ollama>=0.2.0",     # every default seat
+    "langchain-openai>=0.2.0",     # optional; no seat uses it by default
+    "langchain-anthropic>=0.2.0",  # optional; no seat uses it by default
     "mcp>=0.5.0",
     "python-dotenv>=1.0.0",
     # Online research. It arrives transitively with langchain and chromadb

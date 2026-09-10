@@ -269,6 +269,37 @@ def test_a_figure_quoted_in_prose_matches_its_constant(pattern, truth, name):
     assert not wrong, "\n".join(wrong)
 
 
+def test_every_provider_the_seats_can_use_is_a_declared_dependency():
+    """A provider a seat can be pointed at must survive `pip install`.
+
+    `langchain-ollama` was undeclared while every seat in `DEFAULT_SEATS` was
+    an ollama seat, and nothing failed loudly: a provider that will not import
+    makes the seat a `StubLLM`, so a fresh install ran the whole four-agent
+    loop on canned text and called it a success. It passed unnoticed on every
+    developer machine that happened to have the package, which is why CI found
+    it and no local run ever did.
+
+    Read out of `config.py` rather than listed here, so a provider added
+    tomorrow is covered without anyone remembering this test exists.
+    """
+    import tomllib as _tomllib  # noqa: PLC0415 - local to keep the import block small
+
+    config = (ROOT / "src/langgraph_agent/config.py").read_text(encoding="utf-8")
+    imported = set(re.findall(r"from (langchain_\w+) import", config))
+    assert imported, "config.py imports no provider packages; has the seat wiring moved?"
+
+    declared = _tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    names = {re.split(r"[<>=!\[]", d)[0].strip().replace("-", "_").lower()
+             for d in declared["project"]["dependencies"]}
+
+    missing = sorted(m for m in imported if m.lower() not in names)
+    assert not missing, (
+        f"config.py imports {missing}, which pyproject.toml does not declare. "
+        "A seat pointed at an undeclared provider becomes a StubLLM and the "
+        "run reports success on canned text."
+    )
+
+
 def test_the_seat_table_matches_the_shipped_defaults():
     """CLAUDE.md prints a seat/provider/model table. It is the first place
     anyone looks to answer "what runs where", and `DEFAULT_SEATS` is the only
