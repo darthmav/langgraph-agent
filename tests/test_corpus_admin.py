@@ -557,6 +557,35 @@ def test_stats_does_not_load_the_embedder_for_the_health_check(kb):
     assert kb._embedder is None
 
 
+def test_the_embedder_is_pinned_to_the_cpu(kb, monkeypatch):
+    """Never left to sentence-transformers' own choice of device.
+
+    It picks `cuda:0` whenever `torch.cuda.is_available()` is True, and that
+    stays True on a build with no kernels for the card: a `+cu130` torch on a
+    compute-6.1 GTX 1060 made every `encode()` raise. The fake stands in for
+    the library so the test sees the arguments without loading a model.
+    """
+    import sys
+    import types
+
+    from langgraph_agent.graphrag_server import EMBEDDING_DEVICE, EMBEDDING_MODEL_NAME
+
+    seen: dict[str, Any] = {}
+
+    class _Recorder:
+        def __init__(self, name: str, **kwargs: Any) -> None:
+            seen.update(name=name, **kwargs)
+
+    fake = types.ModuleType("sentence_transformers")
+    fake.SentenceTransformer = _Recorder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+    kb.embedder  # noqa: B018 - the property load is what is under test
+
+    assert EMBEDDING_DEVICE == "cpu"
+    assert seen == {"name": EMBEDDING_MODEL_NAME, "device": "cpu"}
+
+
 # ---------------------------------------------------------------------------
 # bottleneck (the A3 bridge detection)
 # ---------------------------------------------------------------------------
