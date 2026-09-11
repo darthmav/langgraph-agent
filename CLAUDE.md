@@ -80,6 +80,7 @@ python example_usage.py
 │   ├── test_corpus_absent.py  # The two doors: reading never creates a corpus
 │   ├── test_graph.py          # Pytest suite
 │   ├── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
+│   ├── test_thinking.py       # The per-seat thinking switch: support, wire, parsing
 │   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
 │   ├── test_chunking.py       # Document chunking, chunk ids, search collapse
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
@@ -1414,6 +1415,12 @@ four the moment this file described the problem.
 - A seat with no credentials silently becomes `StubLLM`. `get_agent_status()` is the only thing that reports the difference — keep the chip and banner wired to it.
 - **Key presence is not liveness.** A key can authenticate and the seat still be unusable (no credits, rate limit, model not on the account). `_SeatLLM` records the real outcome of each call in `_seat_failures`, and `get_agent_status()` reports that over any static check. Never re-add a presence-only check as the sole signal.
 - `stubbed` and `live` are different failures: a stubbed seat completes the run with canned text, a failing seat kills it. The console words them differently; keep it that way.
+- **A seat's thinking box says what its next call does.** A switchable model
+  is always sent the flag, off included, since omitting it means *on* for
+  `qwen3.5:397b-cloud`, Opus 5 and Sonnet 5 -- which is why it defaults on.
+  `thinking_support` reads support rather than listing it, and "could not
+  ask" stays unknown, never "cannot think". A Claude reply that thought is a
+  list of blocks, so nodes read replies through `_as_text`.
 - `__pycache__` directories should never be committed (they are removed from git in this repo).
 
 ## Troubleshooting

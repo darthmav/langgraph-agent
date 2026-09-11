@@ -79,6 +79,14 @@ The left rail is the crew: one card per seat, each with its model, where the
 prompt goes (`REMOTE` / `LOCAL`), and a status chip when the seat cannot
 actually run — `NO KEY`, `FAILING`, `OFFLINE` or `NOT PULLED`.
 
+Each card also has a **thinking** checkbox: ticked, the seat's model reasons
+before it answers; unticked, it answers straight away — faster and cheaper,
+usually weaker on hard steps. It starts ticked, because the default seats were
+already thinking without saying so. The box shows what the next call will
+actually do, and it is grayed out when the model offers no switch: it cannot
+think (`gpt-4o`), always thinks (Claude Fable), or the Ollama daemon did not
+say — hover for which. Like a model change, it lasts until the server restarts.
+
 ### Stopping a run
 
 **Stop** sits next to Run and halts the run in flight. It is cooperative: work
