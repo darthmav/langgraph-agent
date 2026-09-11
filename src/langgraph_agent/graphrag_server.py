@@ -50,6 +50,16 @@ if TYPE_CHECKING:  # pragma: no cover - import cost is the whole point
 # produced the corpus it is dumping.
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
+# Where it runs, named rather than left to sentence-transformers, which picks
+# `cuda:0` whenever `torch.cuda.is_available()` says True. That answer only
+# means a driver answered, not that the installed build carries kernels for
+# the card: on 2026-09-10 a Builder swapped the venv to `torch+cu130` on a
+# GTX 1060 (compute 6.1, which CUDA 13 dropped), `is_available()` stayed True,
+# and every `encode()` raised `no kernel image is available`, taking search
+# and indexing down with it. And a 3 GB card is wanted whole for the model
+# being offloaded onto it; a 384-dimension MiniLM is not worth any of that.
+EMBEDDING_DEVICE = "cpu"
+
 # The score at or below which retrieval is treated as having answered nothing,
 # and the run falls through to the Researcher's model. It is a property of
 # EMBEDDING_MODEL_NAME and meaningless apart from it -- a cosine similarity has
@@ -345,7 +355,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer
 
-            self._embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+            self._embedder = SentenceTransformer(EMBEDDING_MODEL_NAME, device=EMBEDDING_DEVICE)
         return self._embedder
 
     def _load_graph(self) -> None:

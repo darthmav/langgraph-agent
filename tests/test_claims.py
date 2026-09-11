@@ -39,6 +39,7 @@ from langgraph_agent.graphrag_server import (
     ENTITY_STOPWORDS,
     MAX_INDEXABLE_BYTES,
     RETRIEVAL_RELEVANCE_FLOOR,
+    _is_web_document,
     iter_project_files,
 )
 
@@ -372,12 +373,25 @@ _STRIP = "\"'`()[]{}<>.,!?;:*=+-/\\|"
 _SENTENCE_END = (".", "!", "?", ":", ";")
 
 
-def _capital_census() -> dict[str, dict[str, int | set[str]]]:
-    """Per minted token: documents, and capitals position does not explain."""
+def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
+    """Per minted token: documents, and capitals position does not explain.
+
+    Skips what `add_document` skips. A page the research phase fetched is
+    walked like any markdown file but mints no entities (`_is_web_document`),
+    so counting it audits a graph that does not exist -- and one that exists
+    only on machines that have run web research. On 2026-09-10 eight pages
+    under `research/web/` pushed two sentence-openers over the positional
+    floor and a third word into the top twenty, failing both guards below over
+    entities the real graph never held. They are not named here on purpose:
+    this file is in the walk, and naming a word mid-sentence gives it the free
+    capital that takes it out of the first guard's reach.
+    """
     census: dict[str, dict] = {}
-    for path in iter_project_files(str(ROOT)):
+    for path in iter_project_files(str(root)):
+        if _is_web_document(str(path)):
+            continue
         try:
-            text = (ROOT / path).read_text(encoding="utf-8")
+            text = (root / path).read_text(encoding="utf-8")
         except OSError:  # pragma: no cover - unreadable file is its own problem
             continue
         if len(text) > MAX_INDEXABLE_BYTES:
@@ -492,3 +506,23 @@ def test_the_best_connected_entities_are_the_ones_that_were_audited():
         "AUDITED_TOP_ENTITIES; a word capitalised by position joins "
         "ENTITY_STOPWORDS."
     )
+
+
+def test_the_census_skips_fetched_web_pages(tmp_path):
+    """The census counts what the graph counts, and the graph skips web pages.
+
+    Built on a scratch tree, because asserted against the checkout this passes
+    vacuously wherever no research has run -- CI included -- which is exactly
+    where the bug could not show.
+    """
+    from langgraph_agent.graphrag_server import WEB_RESEARCH_DIR
+
+    web = tmp_path / WEB_RESEARCH_DIR
+    web.mkdir(parents=True)
+    (web / "example-com-page-00000000.md").write_text("see Zebracorn here\n")
+    (tmp_path / "notes.md").write_text("see Quokkaline here\n")
+
+    census = _capital_census(tmp_path)
+
+    assert "Quokkaline" in census, "the scratch tree was not walked at all"
+    assert "Zebracorn" not in census

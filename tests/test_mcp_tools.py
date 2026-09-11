@@ -289,6 +289,27 @@ async def test_terminal_execute_honours_a_requested_timeout(client: MCPClient):
     assert result["timed_out"] is True
 
 
+@pytest.mark.asyncio
+async def test_a_timeout_survives_into_the_report_line(client: MCPClient):
+    """The report line must say it timed out, however long the command was.
+
+    `str(TimeoutExpired)` puts the fact behind a repr of the whole argv, and
+    the report cuts its reason at MAX_FAILURE_REASON_CHARS -- so a long
+    command, like the run of 2026-09-10's `pip3 install ... --extra-index-url
+    https://...`, came back reading only its own arguments.
+    """
+    from langgraph_agent.nodes import _failure_reason
+
+    padding = "x" * 200
+    result = await client.call_tool(
+        "terminal_execute",
+        {"command": f'python -c "import time; time.sleep(30)  # {padding}"', "timeout": 1},
+    )
+
+    assert result["timed_out"] is True
+    assert _failure_reason(result) == "timed out after 1 seconds"
+
+
 def test_terminal_timeout_clears_this_project_own_scripts():
     """The default must outlast the scripts this repo tells people to run.
 

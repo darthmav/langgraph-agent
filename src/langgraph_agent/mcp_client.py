@@ -563,7 +563,7 @@ class MCPClient:
             # full timeout again on a retry that was never going to differ.
             return {
                 "success": False,
-                "error": str(e),
+                "error": _timeout_error(e),
                 "timed_out": True,
                 "stdout": _as_captured_text(e.stdout),
                 "stderr": _as_captured_text(e.stderr),
@@ -605,13 +605,28 @@ class MCPClient:
         except subprocess.TimeoutExpired as e:
             return {
                 "success": False,
-                "error": str(e),
+                "error": _timeout_error(e),
                 "timed_out": True,
                 "stdout": _as_captured_text(e.stdout),
                 "stderr": _as_captured_text(e.stderr),
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+def _timeout_error(exc: subprocess.TimeoutExpired) -> str:
+    """Say that a command timed out, and after how long, and nothing else.
+
+    `str(TimeoutExpired)` is `Command '[...argv...]' timed out after N
+    seconds`: the fact comes last, behind a repr of the whole argv. The report
+    line already names the command and cuts its reason at
+    MAX_FAILURE_REASON_CHARS, so on the run of 2026-09-10 a `pip3 install`
+    carrying an index URL read `-> failed: Command '['pip3', 'install', ...]'...`
+    -- the timeout cut off, the Builder retrying the identical command blind.
+    No advice about raising `timeout` either: verification calls this tool
+    with a limit it chose itself, and the Builder cannot raise that one.
+    """
+    return f"timed out after {exc.timeout:g} seconds"
 
 
 def _as_captured_text(captured: str | bytes | None) -> str:
