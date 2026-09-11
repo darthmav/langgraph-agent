@@ -30,7 +30,7 @@ API, so the page needs the server behind it.
 │ ┌──────────┐ │                                                          │
 │ │● ARCHITECT│ │                 active panel                            │
 │ │[opus-5  ▾]│ │                                                          │
-│ │ anthropic │ │                                                          │
+│ │anthropic ☑│ │                                                          │
 │ │ NO KEY    │ │                                                          │
 │ └──────────┘ │                                                          │
 │ …4 cards…    │                                                          │
@@ -97,8 +97,17 @@ that document rather than adding a second copy of it.
 ## Crew rail
 
 One card per seat: role-coloured dot and border, a dropdown of every curated
-model plus whatever tags the Ollama daemon reports, the provider, and chips for
-placement (`REMOTE` / `LOCAL`) and `NO KEY`.
+model plus whatever tags the Ollama daemon reports, the provider with a
+*thinking* checkbox beside it, and chips for placement (`REMOTE` / `LOCAL`)
+and `NO KEY`.
+
+The checkbox shows what the seat's next call will do, because a switchable
+model is always sent the flag — off included. It is grayed out when the model
+offers no switch, with the reason on hover: the model cannot think, always
+thinks, or nobody could say (a daemon that did not answer, or an OpenAI model
+whose reasoning is set by effort rather than on and off). The last case shows
+neither ticked nor clear. Support is asked of the Ollama daemon per tag, so a
+newly pulled model needs no code change.
 
 The status chip is the important one, and it distinguishes two different
 failures rather than blaming them both on a missing key:
@@ -140,6 +149,7 @@ request, so both come back 200.
 | `upload_document` | `name`, `content` | where it was stored, its passage count, fresh stats |
 | `list_seats` | — | the four seats and whether each can run |
 | `set_seat` | `agent`, `provider`, `model` | the updated seat |
+| `set_thinking` | `agent`, `thinking` (a JSON boolean) | the updated seat; refused for a model with no switch |
 | `llm_options` | — | curated options plus installed Ollama tags |
 | `run_goal` | `goal` | the final `AgentState` |
 

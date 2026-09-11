@@ -130,7 +130,15 @@ body::before{
 }
 .seat select{width:100%;font:10px var(--mono);padding:4px 5px;background:var(--bg-2);
   color:var(--accent);border:1px solid var(--line);border-radius:5px;cursor:pointer}
-.seat .plc{margin-top:5px;font:9px var(--mono);letter-spacing:.12em;color:var(--ink-3)}
+.seat .plc{margin-top:5px;font:9px var(--mono);letter-spacing:.12em;color:var(--ink-3);
+  display:flex;align-items:center;justify-content:space-between;gap:6px}
+/* The thinking switch rides on the provider line. Grayed rather than hidden
+   when the model offers no switch: the card still says whether the seat
+   thinks, and hovering says why it cannot be changed. */
+.seat .think{display:flex;align-items:center;gap:4px;letter-spacing:.06em;color:var(--ink-2);cursor:pointer}
+.seat .think input{margin:0;width:11px;height:11px;accent-color:var(--accent);cursor:pointer}
+.seat .think.locked{color:var(--ink-3);opacity:.5;cursor:not-allowed}
+.seat .think.locked input{cursor:not-allowed}
 .seat .chip{display:inline-block;margin-top:5px;padding:1px 5px;border-radius:4px;
   font:9px var(--mono);letter-spacing:.1em;background:#ffffff10;color:var(--ink-3)}
 .seat .chip.bad{background:#f8717122;color:#ffb4b4}
@@ -468,10 +476,15 @@ async function loadCrew(quiet){
     el.innerHTML =
       `<div class="nm"><span class="dot"></span>${esc(s.role)}</div>`+
       `<select title="Reassign this seat">${optionsHtml(s)}</select>`+
-      `<div class="plc">${esc(s.provider)}</div>`+
+      `<div class="plc"><span>${esc(s.provider)}</span>${thinkHtml(s)}</div>`+
       `<div>${chips.join(" ")}</div>`;
 
     el.querySelector("select").onchange = e => setSeat(s.role, e.target.value);
+    const think = el.querySelector(".think input");
+    // Neither ticked nor clear when nobody can say whether the model thinks:
+    // a daemon that did not answer, or reasoning this switch does not control.
+    think.indeterminate = s.thinking == null;
+    think.onchange = e => setThinking(s.role, e.target.checked);
     $("#seats").appendChild(el);
   }
 
@@ -525,6 +538,28 @@ async function setSeat(role, value){
   const {provider, model} = JSON.parse(value);
   await rpc("set_seat", {agent:role, provider, model});
   await loadCrew(true);
+}
+
+// The box shows what the seat's next call will do, not a wish: a switchable
+// model is always sent the flag, so an unticked box is a model answering
+// without thinking. Locked when the model offers no switch -- it cannot think,
+// always does, or nobody could tell -- with the reason on hover.
+function thinkHtml(s){
+  const can = !!s.thinking_switchable;
+  const title = can
+    ? "Think before answering: slower, and usually better on hard steps. Lasts until the server restarts."
+    : (s.thinking_note || "Thinking cannot be switched for this model");
+  return `<label class="think${can ? "" : " locked"}" title="${esc(title)}">`+
+    `<input type="checkbox"${s.thinking === true ? " checked" : ""}${can ? "" : " disabled"}>`+
+    `thinking</label>`;
+}
+
+async function setThinking(role, on){
+  // Repainted from the server's answer either way, so a refused switch cannot
+  // leave the box showing a state the seat is not in.
+  try{ await rpc("set_thinking", {agent:role, thinking:on}); }
+  catch(e){ /* the refusal is already on the telemetry log */ }
+  await loadCrew(true).catch(()=>{});
 }
 
 /* ---------- graph ---------- */

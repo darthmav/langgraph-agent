@@ -10,6 +10,7 @@ The only thing that runs on this machine is the embedding model, which belongs
 to GraphRAG rather than to any agent seat.
 """
 
+import functools
 import json
 import os
 import re
@@ -144,6 +145,50 @@ def list_ollama_models() -> list[str]:
     return tags
 
 
+_ollama_caps_cache: dict[str, tuple[float, list[str] | None]] = {}
+
+
+def ollama_model_capabilities(model: str) -> list[str] | None:
+    """What the daemon says a tag can do (`thinking`, `tools`, ...), cached 30s.
+
+    Asked of the daemon rather than kept as a list here, because the daemon
+    answers for every tag it can reach -- cloud tags that were never pulled
+    included -- and a list kept here would be wrong about the next tag someone
+    pulls.
+
+    `None` means no answer: the daemon is unreachable or has no such tag. That
+    is a different claim from a list without `thinking` in it, and the seat
+    card must not turn "could not ask" into "this model cannot think". Failures
+    are cached as well as answers: the status poll asks for every seat every
+    five seconds, and a dead daemon should cost one refused connection per
+    half-minute rather than four per poll.
+    """
+    now = time.monotonic()
+    cached = _ollama_caps_cache.get(model)
+    if cached and now - cached[0] < 30.0:
+        return cached[1]
+
+    request = urllib.request.Request(
+        f"{_ollama_base_url()}/api/show",
+        data=json.dumps({"model": model}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    caps: list[str] | None = None
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            payload = json.loads(response.read())
+        # A daemon too old to report capabilities answers without the field,
+        # which says nothing about the model -- so it stays None, not [].
+        listed = payload.get("capabilities")
+        if isinstance(listed, list):
+            caps = [str(cap) for cap in listed]
+    except Exception:
+        pass
+
+    _ollama_caps_cache[model] = (now, caps)
+    return caps
+
+
 # Why the last call to a seat failed, if it did. A key can be present and the
 # seat still unusable -- out of credits, expired, revoked, wrong workspace --
 # and only a real call finds that out. Recording the outcome here is what lets
@@ -234,6 +279,178 @@ def _accepts_temperature(provider: str, model: str) -> bool:
     return model.startswith("claude-3") or "-4-5" in model
 
 
+# Whether a seat thinks before it answers, until someone switches it. On,
+# because that is what the default seats were already doing: measured on
+# 2026-09-11, `qwen3.5:397b-cloud` given no flag spent 336 output tokens and
+# 4.4s answering "391" to 17*23, against 3 tokens and 1.3s told not to think --
+# and langchain_ollama discarded every token of the reasoning, so the cost was
+# paid and nothing showed it. Opus 5 and Sonnet 5 likewise think when the
+# parameter is left out. On those seats the switch makes the thinking visible
+# rather than changing it; a model that did not think by default -- Haiku 4.5
+# is one -- does now, and its card says so.
+DEFAULT_THINKING = True
+
+# The ceiling on a pre-4.6 Claude model's thinking, the only way those models
+# can be told to think at all. Anthropic's floor is 1024; this is kept low
+# because a whole node turn is bounded by NODE_DEADLINE_SECONDS and a single
+# call by LLM_TIMEOUT_SECONDS, and thinking tokens are spent inside both.
+THINKING_BUDGET_TOKENS = int(os.getenv("THINKING_BUDGET_TOKENS", "4096"))
+
+# Claude models that think on every call. Anthropic rejects an explicit
+# "disabled" on them, so the card shows the box ticked and locked rather than
+# offering a switch whose "off" would fail every call.
+_ALWAYS_THINKING_CLAUDE = ("claude-fable", "claude-mythos")
+
+# Both orders Anthropic has named models in (`claude-3-7-sonnet`,
+# `claude-opus-4-1`). The minor version is one or two digits, so a date suffix
+# is not read as one: `claude-sonnet-4-20250514` is 4.0, not 4.20250514.
+_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)?(\d+)(?:-(\d{1,2})(?!\d))?")
+
+ThinkingSupport = Literal["switch", "never", "always", "unknown"]
+
+
+def _claude_version(model: str) -> tuple[int, int] | None:
+    """(major, minor) of a Claude model id, or None if it is not one."""
+    match = _CLAUDE_VERSION.search(model)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2) or 0)
+
+
+def _claude_thinking(model: str, on: bool) -> dict[str, Any] | None:
+    """The `thinking` parameter that switches a Claude model on or off.
+
+    `None` means leave the parameter out. There are two request shapes, split
+    at 4.6. From there `adaptive` is the only way on, and `disabled` has to be
+    sent to mean off, because Opus 5 and Sonnet 5 think when the parameter is
+    absent. Before 4.6 a token budget is the only way on (and `budget_tokens`
+    is a 400 on Opus 5), while absence already means off.
+    """
+    version = _claude_version(model)
+    if version is None or model.startswith(_ALWAYS_THINKING_CLAUDE):
+        return None
+    if version >= (4, 6):
+        return {"type": "adaptive"} if on else {"type": "disabled"}
+    if on:
+        return {"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS}
+    return None
+
+
+@functools.lru_cache(maxsize=64)
+def _openai_reasons(model: str) -> bool | None:
+    """Whether the profile langchain_openai ships for this model says it reasons.
+
+    Building the chat model is the public way to read that profile and makes
+    no request -- nothing goes on the wire before `invoke` -- so a placeholder
+    key is enough. `None` when the package has no profile for the model.
+    Cached because profiles are data in the installed package and the status
+    poll asks every five seconds.
+    """
+    kwargs: dict[str, Any] = {"model": model, "api_key": SecretStr("unused")}
+    try:
+        from langchain_openai import ChatOpenAI
+
+        profile = ChatOpenAI(**kwargs).profile
+    except Exception:
+        return None
+    reasons = (profile or {}).get("reasoning_output")
+    return reasons if isinstance(reasons, bool) else None
+
+
+def thinking_support(provider: str, model: str) -> tuple[ThinkingSupport, str]:
+    """Whether a model can think, and whether the console may switch it.
+
+    Returns the verdict and, when the card cannot offer the switch, the reason
+    to show on hover. Each provider is asked the question the way it can
+    actually answer it:
+
+    - An Ollama tag answers for itself, through the daemon's capabilities.
+    - A Claude model is read off its version: thinking arrived with 3.7, and
+      every model since has it. Not langchain's profile, which has no entry
+      for 3.7 and none for a model released after the installed package, so it
+      would lock the switch on exactly the models someone just added.
+    - An OpenAI model is read off langchain's profile. Its reasoning is not
+      wired to this switch -- effort levels, not on and off -- so a model that
+      reasons reads `unknown` rather than claiming either state.
+
+    `unknown` is its own verdict, never folded into `never`: "could not ask" is
+    not "cannot think", and a daemon that is down for thirty seconds must not
+    read as four models that lost a capability.
+    """
+    if provider == "ollama":
+        caps = ollama_model_capabilities(model)
+        if caps is None:
+            return "unknown", (
+                f"Ollama did not describe {model}, so whether it can think is "
+                "unknown"
+            )
+        if "thinking" in caps:
+            return "switch", ""
+        return "never", f"{model} cannot think"
+
+    if provider == "anthropic":
+        if model.startswith(_ALWAYS_THINKING_CLAUDE):
+            return "always", f"{model} always thinks; it cannot be switched off"
+        version = _claude_version(model)
+        if version is None:
+            return "unknown", f"{model} is not a Claude model id this can read"
+        if version >= (3, 7):
+            return "switch", ""
+        return "never", f"{model} cannot think"
+
+    if provider == "openai":
+        reasons = _openai_reasons(model)
+        if reasons is False:
+            return "never", f"{model} cannot think"
+        return "unknown", (
+            f"{model}'s reasoning is not switchable from the console"
+        )
+
+    return "unknown", f"thinking is not switchable for {provider}"
+
+
+# Runtime per-agent thinking choices set from the console, for the life of the
+# process like `_agent_llm_overrides`. Kept per seat rather than per model, so
+# unticking the Builder survives moving the Builder to another model.
+_agent_thinking: dict[str, bool] = {}
+
+
+def get_agent_thinking(agent: str) -> bool:
+    """The thinking a seat asks for when its model can be switched."""
+    return _agent_thinking.get(agent, DEFAULT_THINKING)
+
+
+def set_agent_thinking(agent: str, on: bool) -> None:
+    """Switch one seat's thinking on or off, for the life of the process.
+
+    Refused for a seat whose model offers no switch, and said so, rather than
+    stored and ignored: a request that changes nothing should not come back
+    looking as though it worked.
+
+    Unlike moving a seat, this keeps any failure recorded against it. Thinking
+    fixes no credit balance, rate limit or unreachable daemon, and clearing
+    the chip here would let a dead seat be made to look live by clicking a box.
+    """
+    info = get_agent_model_info(cast("AgentName", agent))
+    support, reason = thinking_support(info["provider"], info["model"])
+    if support != "switch":
+        raise ValueError(f"Thinking cannot be switched on this seat: {reason}")
+    _agent_thinking[agent] = on
+
+
+def _thinking_for_call(agent: str) -> bool | None:
+    """The thinking flag the seat's next call sends, or None to send none.
+
+    Only a switchable model gets a flag. Ollama refuses `think` for a tag
+    without the capability, so sending the default to one would fail every
+    call; and when the capability is unknown, leaving the model to its own
+    default is exactly what every call did before the switch existed.
+    """
+    info = get_agent_model_info(cast("AgentName", agent))
+    support, _ = thinking_support(info["provider"], info["model"])
+    return get_agent_thinking(agent) if support == "switch" else None
+
+
 # Runtime per-agent LLM selections set from the console. These override the
 # environment-variable defaults for the lifetime of the process.
 _agent_llm_overrides: dict[str, dict[str, str]] = {}
@@ -267,6 +484,7 @@ def get_llm(
     base_url: str | None = None,
     api_key: str | None = None,
     timeout: float | None = None,
+    thinking: bool | None = None,
 ) -> Any:
     """Get an LLM instance.
 
@@ -280,6 +498,11 @@ def get_llm(
         timeout: Seconds one call may take; `LLM_TIMEOUT_SECONDS` if omitted.
                  Each provider spells this differently, hence the three
                  separate keyword names below.
+        thinking: Whether the model thinks before answering. `None` sends no
+                  flag and leaves it to the model, which is what every call
+                  did before the console could switch it. Pass a bool only for
+                  a model `thinking_support` calls switchable. Not wired for
+                  OpenAI, whose reasoning is set by effort, not on and off.
 
     Returns:
         Chat model instance, or `StubLLM` when the provider needs a key and
@@ -301,11 +524,18 @@ def get_llm(
         # tags, so there is nothing for this process to authenticate with.
         # `client_kwargs` reaches the httpx client the ollama SDK builds; there
         # is no `timeout` field on ChatOllama itself.
+        #
+        # `reasoning=True` rather than the model's own default when thinking
+        # is on: both think, but under the default langchain_ollama drops the
+        # daemon's `thinking` field, so the reasoning is paid for and thrown
+        # away. True keeps it in `additional_kwargs`, where the Builder's tool
+        # loop hands it back to the model on the next turn.
         return ChatOllama(
             model=str(model or os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud")),
             temperature=temperature,
             base_url=base_url or _ollama_base_url(),
             client_kwargs={"timeout": timeout},
+            reasoning=thinking,
         )
 
     if provider == "anthropic":
@@ -320,7 +550,15 @@ def get_llm(
             "api_key": SecretStr(key),
             "default_request_timeout": timeout,
         }
-        if _accepts_temperature("anthropic", model_name):
+        thinking_param = (
+            None if thinking is None else _claude_thinking(model_name, thinking)
+        )
+        if thinking_param is not None:
+            kwargs["thinking"] = thinking_param
+        # A model that is thinking takes no temperature: the families that
+        # still accept one reject anything but the default once thinking is on.
+        thinks = thinking_param is not None and thinking_param["type"] != "disabled"
+        if _accepts_temperature("anthropic", model_name) and not thinks:
             kwargs["temperature"] = temperature
         if base_url:
             kwargs["base_url"] = base_url
@@ -437,6 +675,7 @@ def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
             temperature=temperature,
             base_url=seat["base_url"],
             api_key=seat["api_key"],
+            thinking=_thinking_for_call(agent),
         ),
     )
 
@@ -489,6 +728,16 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
     # transport is local but the prompt still leaves the machine.
     remote = provider in ("anthropic", "openai") or model.endswith((":cloud", "-cloud"))
 
+    # `thinking` is what the next call will do, not what was asked for: a
+    # switchable model is always sent the flag, so the box cannot disagree
+    # with the seat. None when nobody can say -- see `thinking_support`.
+    support, thinking_note = thinking_support(provider, model)
+    thinking = {
+        "switch": get_agent_thinking(agent),
+        "always": True,
+        "never": False,
+    }.get(support)
+
     return {
         "provider": provider,
         "model": model,
@@ -497,6 +746,9 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
         "badge": badge,
         "stubbed": stubbed,
         "placement": "REMOTE" if remote else "LOCAL",
+        "thinking": thinking,
+        "thinking_switchable": support == "switch",
+        "thinking_note": thinking_note,
     }
 
 

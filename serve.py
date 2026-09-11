@@ -47,6 +47,7 @@ from langgraph_agent.config import (  # noqa: E402
     get_agent_status,
     list_ollama_models,
     set_agent_llm,
+    set_agent_thinking,
 )
 from langgraph_agent.control import ACTIVITY, RUN_CONTROL  # noqa: E402
 from langgraph_agent.corpus_health import (  # noqa: E402
@@ -406,6 +407,24 @@ def rpc_set_seat(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Provider and model are both required")
 
     set_agent_llm(agent, provider, model)
+    return {"ok": True, "role": agent, **get_agent_status(agent)}
+
+
+def rpc_set_thinking(params: dict[str, Any]) -> dict[str, Any]:
+    """Switch one seat's thinking on or off for the lifetime of this process.
+
+    `thinking` must be a JSON boolean. Anything else is refused rather than
+    coerced, because the obvious coercion reads the string "false" as on.
+    """
+    agent = str(params.get("agent") or params.get("role", ""))
+    thinking = params.get("thinking")
+
+    if agent not in AGENTS:
+        raise ValueError(f"Unknown agent: {agent!r}")
+    if not isinstance(thinking, bool):
+        raise ValueError("thinking must be true or false")
+
+    set_agent_thinking(agent, thinking)
     return {"ok": True, "role": agent, **get_agent_status(agent)}
 
 
@@ -973,6 +992,7 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "clear_corpus": rpc_clear_corpus,
     "list_seats": rpc_list_seats,
     "set_seat": rpc_set_seat,
+    "set_thinking": rpc_set_thinking,
     "llm_options": rpc_llm_options,
     "status": rpc_status,
     "run_goal": rpc_run_goal,

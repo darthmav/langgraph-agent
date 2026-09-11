@@ -608,7 +608,7 @@ def _rule_on_state(state: AgentState, reviewing: bool) -> dict[str, str]:
 
     llm = get_agent_llm("architect")
     response = llm.invoke(messages)
-    return _parse_architect_output(response.content, reviewing=reviewing)
+    return _parse_architect_output(_as_text(response.content), reviewing=reviewing)
 
 
 def architect_node(state: AgentState) -> AgentState:
@@ -726,7 +726,7 @@ def _make_plan(state: AgentState) -> dict[str, Any]:
     response = llm.invoke(messages)
 
     # Parse the structured output
-    return _parse_planner_output(response.content)
+    return _parse_planner_output(_as_text(response.content))
 
 
 # What a timed-out Planner leaves in `plan`. It must not be empty, and that is
@@ -795,18 +795,27 @@ def planner_node(state: AgentState) -> AgentState:
 
 
 def _as_text(content: Any) -> str:
-    """Flatten a message's content to text.
+    """Flatten a message's content to the text the model answered with.
 
     Providers differ: some return a plain string, some a list of content
     blocks. `len()` and the section regexes both read a list as truthy
     non-empty, so an answer that carried no text at all still looked like
     findings.
+
+    Every node reads its seat's reply through here, because a Claude model
+    that thinks answers with a list -- a `thinking` block, then the text --
+    and a regex handed that list raises, while `str()` of it is a Python repr
+    whose sections never match. Only `text` blocks are kept: the reasoning is
+    how the model got to its answer, not part of it, and a plan or verdict
+    parsed out of it would be one the model never gave.
     """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         parts = [
-            block.get("text", "") if isinstance(block, dict) else str(block)
+            (block.get("text", "") if block.get("type", "text") == "text" else "")
+            if isinstance(block, dict)
+            else str(block)
             for block in content
         ]
         return "\n".join(p for p in parts if p)
@@ -1326,7 +1335,7 @@ def _run_builder_tools(
         calls = list(getattr(response, "tool_calls", None) or [])
 
         if not calls:
-            return str(response.content), False, False, False
+            return _as_text(response.content), False, False, False
 
         messages.append(response)
 
@@ -1665,7 +1674,9 @@ def builder_node(state: AgentState) -> AgentState:
         content, stopped = "", True
     elif tool_llm is None:
         reply = _with_deadline(
-            lambda: str(llm.invoke(messages).content), loop_deadline.remaining(), None
+            lambda: _as_text(llm.invoke(messages).content),
+            loop_deadline.remaining(),
+            None,
         )
         out_of_time = reply is None
         content = reply or ""
