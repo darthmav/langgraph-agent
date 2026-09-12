@@ -56,11 +56,13 @@ from langgraph_agent.corpus_health import (  # noqa: E402
 )
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
+    INDEXABLE_SUFFIXES,
     NO_CORPUS_NOTE,
     GraphRAGKnowledgeBase,
     corpus_state,
     get_knowledge_base,
     index_project_files,
+    iter_project_files,
     open_knowledge_base,
     store_uploaded_document,
 )
@@ -75,6 +77,16 @@ graph = create_agent_graph()
 # anyone wanted a corpus. A corpus exists because someone indexed, or it does
 # not exist.
 kb: GraphRAGKnowledgeBase | None = None
+
+# Whether a run may build the corpus it is about to search, on a machine where
+# nobody has built one -- see `_index_the_project_before_the_run`. It switches
+# off the way `WEB_SEARCH_ENABLED` does, because the one caller that must never
+# have it on is the test suite: `tests/conftest.py` turns it off for every
+# test, or a suite run in a checkout with no `knowledge/` -- CI's, every time
+# -- would index the whole project once per test that starts a run.
+INDEX_PROJECT_BEFORE_RUN = os.getenv(
+    "INDEX_PROJECT_BEFORE_RUN", "1"
+).strip() not in {"0", "false", "no"}
 
 
 def _open_kb() -> GraphRAGKnowledgeBase | None:
@@ -260,15 +272,17 @@ def _refuse_while_a_run_is_in_flight(action: str) -> None:
     )
 
 
-def rpc_reindex(_: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild the knowledge base from the project files.
-
-    Refused mid-run: a rebuild clears the graph up front and re-adds documents
-    one at a time, so a Researcher searching while it runs would be answered
-    from a corpus that is neither the old one nor the new one.
-    """
-    _refuse_while_a_run_is_in_flight("rebuilt")
-    return index_project_files(_kb_for_indexing())
+# There is no `rpc_reindex`, and that is the design rather than an omission.
+# Rebuilding the corpus was a button on the Corpus tab, which made keeping the
+# corpus current a thing the operator had to know to do -- and the failure when
+# they did not know is silent: the search answers with whatever the store holds,
+# the seats plan around it, and every counter in the header stays non-zero and
+# self-consistent. `_index_the_project_before_the_run` does it on every run
+# instead, at the moment it matters and against the files as they are then.
+# Nor is there a script that does it, an install step, or anything else: two
+# things index, and both are a request for a corpus rather than housekeeping --
+# a run, which searches one, and embedding a document into the corpus from the
+# console, which is a request for a corpus to hold it.
 
 
 def rpc_upload_document(params: dict[str, Any]) -> dict[str, Any]:
@@ -459,6 +473,12 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
         # and it is not loaded until something indexes or searches.
         "embedding": embedding_model,
         "corpus": state,
+        # Whether a run would build the corpus itself from here. Reported
+        # rather than assumed by the console, which otherwise has to promise
+        # on the operator's behalf that the next run will index the project --
+        # a promise `INDEX_PROJECT_BEFORE_RUN=0` makes false, in the one place
+        # someone looks to find out why retrieval is empty.
+        "indexes_on_run": INDEX_PROJECT_BEFORE_RUN,
         "graphrag": state == "indexed",
         "llm": f"{architect['model']} ({architect['provider']})",
         "agents": seats,
@@ -715,6 +735,195 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     return {"exiting": True, "running": False, "detail": "The server is exiting."}
 
 
+def _index_the_project_before_the_run() -> dict[str, Any]:
+    """Make the corpus match the project, before any seat searches it.
+
+    A fresh install has no corpus, and nothing used to bring one into being
+    except the operator asking for it by name. Missing that costs nothing
+    visible: `search_knowledge_graph` answers `no_corpus`, `_gather_research`
+    falls through to the Researcher's own model, and the Builder works from
+    whatever that model remembers. Nothing raises, nothing is logged, and the
+    run reports itself finished. The same silence covers the other half of the
+    problem -- a corpus that was built once and has been drifting from the
+    project ever since. Measured here on 2026-09-09: 8 documents in the store
+    against a walk offering 103, every project query under
+    `RETRIEVAL_RELEVANCE_FLOOR`, and `rag_stats` reporting `indexed` with every
+    counter non-zero and consistent.
+
+    Both were left to a button. There is no button now: this runs on **every**
+    run, and it is why there is nothing left for anyone to press.
+
+    Five decisions in it are not interchangeable with the obvious
+    alternatives.
+
+    *It rebuilds every time rather than only when the corpus is missing.* That
+    is affordable because `index_project_files` keeps the vectors of documents
+    whose text still hashes to what the store holds -- measured warm on this
+    project, 52.0s to re-embed 77 files and 0.09s when nothing changed, with
+    the embedding model never loaded in the second case. A rebuild gated on
+    `absent`/`empty` would have been cheap in the same way and would have left
+    drift exactly where it was: the state that needs fixing most is the one
+    where every counter already looks right.
+
+    *It compares content, not the walk.* `corpus_staleness` answers the
+    header's question -- which documents are in one and not the other -- and it
+    cannot see an edit, because an edited file is in both. The Builder edits
+    files, so that is the common case here rather than the exotic one.
+
+    *It runs before the online research phase, not after.* That phase embeds
+    the pages it keeps and writes them under `research/web/`, which is inside
+    the walk -- so a rebuild afterwards would re-read them from disk, and a
+    rebuild before leaves them to be added on top. Going second also meant a
+    corpus holding nothing but fetched pages counted above zero. A test pins
+    the order.
+
+    *It counts the walk before it opens the door.* `_kb_for_indexing()` creates
+    the store, so calling it on a machine with nothing to index leaves an empty
+    corpus behind and every later poll reports `empty` where the truth is
+    `absent` -- and only one of those two means anything is wrong. That is
+    exactly the mistake `research_online` made by resolving its door on the way
+    in, one caller along, and it is guarded here the same way: ask what there
+    is to index first.
+
+    *And a run already stopped does not start one.* The check is before the
+    work rather than inside it, like every stop check guarding something that
+    cannot be half-done: `index_project_files` clears the graph up front, so a
+    rebuild abandoned midway is the half-finished corpus
+    `_refuse_while_a_run_is_in_flight` exists to stop anyone else from
+    manufacturing.
+
+    A discussion run still does it, where it never researches online. That
+    phase brings in material from outside and makes it a permanent corpus
+    member; this one embeds files already on disk into a runtime artifact a
+    reindex reproduces exactly, and adds nothing to the project. "Nothing was
+    changed" is a promise about the project, and it still holds.
+
+    Never raises. A corpus that could not be built makes for a worse run, not a
+    refused one, and the report says which of these happened.
+    """
+    state, _ = corpus_state()
+    if not INDEX_PROJECT_BEFORE_RUN:
+        return {"source": "disabled", "corpus": state}
+    if RUN_CONTROL.stopped():
+        return {"source": "stopped", "corpus": state}
+
+    files = iter_project_files()
+    if not files:
+        return {"source": "nothing_to_index", "corpus": state, "root": str(Path.cwd())}
+
+    # Said before the work rather than after it. A first index takes tens of
+    # seconds, and for all of them `running` is True with no node on the stack
+    # and no messages -- which is precisely what a wedged run looks like from
+    # the console. This is the same reason `#run-live` names the last stage
+    # instead of only counting seconds. A rebuild that changes nothing
+    # overwrites this line in under a second and nobody ever reads it.
+    with _run_lock:
+        _run_progress["messages"] = [
+            f"[Corpus] Checking {len(files)} project file(s) against the corpus "
+            "before the run starts."
+        ]
+
+    started = time.monotonic()
+    try:
+        report = index_project_files(_kb_for_indexing())
+    except Exception as exc:
+        return {"source": "error", "corpus": state, "note": str(exc)}
+
+    if state != "indexed":
+        source = "built"
+    elif report.get("embedded") or report.get("dropped"):
+        source = "updated"
+    else:
+        source = "current"
+    report.update(
+        source=source, corpus=state, elapsed_s=round(time.monotonic() - started, 1)
+    )
+    return report
+
+
+def _corpus_feed_line(report: dict[str, Any]) -> str | None:
+    """One line for the feed on every run that checked the corpus.
+
+    It used to say nothing when the corpus already matched the project, on the
+    argument that a line on every run is a line nobody reads by the third one.
+    That was wrong in a way worth recording, because the silence is
+    indistinguishable from the phase not having run: a rebuild that re-embeds
+    nothing takes ~0.1s and loads no model, so an operator watching a second
+    run sees the corpus line from the first one and then, for the rest of the
+    project's life, nothing -- and reasonably concludes no embedding ever
+    happens. That is the same failure `#run-live` fixed by naming the last
+    stage instead of only counting seconds: a working run and a run that
+    skipped the work must not look identical. The `current` line is therefore
+    the *cheapest* one to write and the most often read, and it says what it
+    checked rather than merely that it ran.
+
+    `disabled` is the one state that still says nothing, and for a reason that
+    does not apply above: it is a machine-level setting the operator chose,
+    which the console header already reports on every poll, rather than
+    something that happened to this run.
+    """
+    source = report.get("source", "")
+    if source == "disabled":
+        return None
+    if source == "current":
+        return (
+            f"[Corpus] The corpus already matched the project, so nothing was "
+            f"re-embedded: {report.get('indexed', 0)} document(s), "
+            f"{report.get('total_chunks', 0)} passage(s), checked in "
+            f"{report.get('elapsed_s', 0)}s. The Researcher searches it as it "
+            "stands."
+        )
+
+    errors = report.get("errors") or []
+    note = f" {len(errors)} file(s) failed to index." if errors else ""
+
+    if source == "built":
+        was = (
+            "There was no corpus on this machine"
+            if report.get("corpus") == "absent"
+            else "The corpus on this machine was empty"
+        )
+        if not report.get("indexed"):
+            return (
+                f"[Corpus] {was}, and indexing produced nothing: every file the "
+                f"walk offered was too large or unreadable.{note} The Researcher "
+                "has nothing to retrieve."
+            )
+        return (
+            f"[Corpus] {was}, so the project was indexed before the run: "
+            f"{report['indexed']} document(s), {report.get('total_chunks', 0)} "
+            f"passage(s) in {report.get('elapsed_s', 0)}s.{note} The Researcher "
+            "searches this like any other corpus."
+        )
+    if source == "updated":
+        changed = report.get("embedded", 0)
+        dropped = report.get("dropped", 0)
+        parts = []
+        if changed:
+            parts.append(f"{changed} document(s) re-read")
+        if dropped:
+            parts.append(f"{dropped} no longer in the project dropped")
+        return (
+            f"[Corpus] The corpus was behind the project, so it was brought up "
+            f"to date first: {', '.join(parts)}, {report.get('reused', 0)} "
+            f"unchanged, in {report.get('elapsed_s', 0)}s.{note} The Researcher "
+            "searches the project as it is now."
+        )
+    if source == "nothing_to_index":
+        return (
+            "[Corpus] There is nothing here to index -- no "
+            f"{', '.join(INDEXABLE_SUFFIXES)} files under "
+            f"{report.get('root', '.')}. The Researcher will find nothing; start "
+            "the console from the project you mean to work on."
+        )
+    if source == "error":
+        return (
+            f"[Corpus] The corpus could not be brought up to date: "
+            f"{report.get('note')}. The run continues against it as it stands."
+        )
+    return "[Corpus] Stopped before the corpus was checked."
+
+
 def _research_online_before_the_run(goal: str, requested: bool) -> dict[str, Any]:
     """Search the web for the goal and embed what earns a place. Never raises.
 
@@ -866,32 +1075,41 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             stopping=False,
         )
 
-    # Online research first, then the embedder, then the Architect opens --
-    # see `_research_online_before_the_run` for why that order is the only one
-    # that respects the corpus-write rule.
-    # Off unless the caller asks, the same shape as `expect_failures` below and
-    # for the same reason: what this turns on cannot be judged from the goal.
-    # A discussion run never researches online whatever the box says -- the
-    # phase writes pages under research/web/ and embeds them, which is a change
-    # to this machine and to every later run's corpus. "No actions" has to mean
-    # that too, so the two flags are resolved here rather than left to the
-    # operator to keep consistent.
+    # The corpus first, then online research, then the Architect opens. Both
+    # phases write to the corpus and both run outside `graph.stream`, because
+    # `_refuse_while_a_run_is_in_flight` forbids every other writer from
+    # touching it once the stream starts -- doing them here is not a way around
+    # that rule but the only ordering that obeys it. Which of the two goes
+    # first is itself load-bearing: see `_index_the_project_before_the_run`.
+    corpus_report = _index_the_project_before_the_run()
+    corpus_line = _corpus_feed_line(corpus_report)
+    if corpus_line:
+        print(f"[run] corpus -> {corpus_line}")
+
+    # Online research is off unless the caller asks, the same shape as
+    # `expect_failures` below and for the same reason: what this turns on
+    # cannot be judged from the goal. A discussion run never researches online
+    # whatever the box says -- the phase writes pages under research/web/ and
+    # embeds them, which is a change to this machine and to every later run's
+    # corpus. "No actions" has to mean that too, so the two flags are resolved
+    # here rather than left to the operator to keep consistent.
     discuss_only = bool(params.get("discuss_only", False))
     research_report = _research_online_before_the_run(
         goal, bool(params.get("research_web", False)) and not discuss_only
     )
     research_line = _research_feed_line(research_report)
     print(f"[run] research -> {research_line}")
+    opening = [line for line in (corpus_line, research_line) if line]
     with _run_lock:
-        _run_progress["messages"] = [research_line]
+        _run_progress["messages"] = list(opening)
 
     state: AgentState = {
         "goal": goal,
         # Seeded rather than pushed only to `_run_progress`, which every node
-        # update overwrites wholesale: the line has to survive into the final
-        # payload and the snapshot, because what the run was told is part of
-        # how its result should be read.
-        "messages": [research_line],
+        # update overwrites wholesale: these lines have to survive into the
+        # final payload and the snapshot, because what the run was told is part
+        # of how its result should be read.
+        "messages": list(opening),
         "architecture": "",
         "verdict": "",
         "plan": "",
@@ -1036,7 +1254,6 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "list_documents": rpc_list_documents,
     "query_graph": rpc_query_graph,
     "search_documents": rpc_search_documents,
-    "reindex": rpc_reindex,
     "upload_document": rpc_upload_document,
     "export_corpus": rpc_export_corpus,
     "clear_corpus": rpc_clear_corpus,

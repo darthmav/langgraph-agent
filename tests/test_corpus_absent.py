@@ -9,9 +9,13 @@ was enough to leave a store behind -- one that then reported itself as a
 knowledge base to everything that looked, having never been indexed.
 
 What is pinned here is the split that fixes it: `open_knowledge_base` reads,
-`get_knowledge_base` builds, and only an explicit index goes through the
-second one. The tests avoid the embedding model throughout, which is also the
-claim of the last one in the file.
+`get_knowledge_base` builds, and only an act of indexing goes through the
+second one. Three acts qualify -- the Reindex button, a page the online
+research phase keeps, and a run that finds nothing to search and indexes the
+project before it starts -- and each is pinned to the creating door, to the
+walk it must consult first, and to leaving no store behind when it turns out
+to have nothing to put in one. The tests avoid the embedding model throughout,
+which is also the claim of the last one in the file.
 """
 
 from __future__ import annotations
@@ -129,7 +133,12 @@ def test_the_reads_report_the_absence_rather_than_zeros(nowhere):
     stats = serve.rpc_rag_stats({})
     assert stats["corpus"] == "absent"
     assert stats["total_chunks"] == 0
-    assert "reindex" in stats["note"].lower()
+    # It has to say how a corpus comes to exist, and there are exactly two
+    # ways. Naming a script or a button here is how this note went stale once
+    # already: both were removed and the note went on recommending them.
+    note = stats["note"].lower()
+    assert "run" in note and "console" in note
+    assert "reindex.py" not in note and "reindex project" not in note
 
     assert serve.rpc_list_documents({})["corpus"] == "absent"
     assert serve.rpc_query_graph({"node_id": "serve.py"})["corpus"] == "absent"
@@ -157,24 +166,6 @@ def test_export_and_clear_refuse_rather_than_create_one_to_act_on(nowhere):
         serve.rpc_clear_corpus({})
 
     assert _touched(nowhere) == []
-
-
-def test_reindex_goes_through_the_creating_door(nowhere, monkeypatch):
-    """The console's Reindex button is the operator asking for a corpus.
-
-    It is the one method that may build one, so it is the one method wired to
-    `get_knowledge_base`. Had it read like the others it would be handed
-    `None` here and index into nothing.
-    """
-    built = object()  # stands in for a corpus that did not exist a moment ago
-    monkeypatch.setattr(serve, "get_knowledge_base", lambda: built)
-    monkeypatch.setattr(serve, "index_project_files", lambda kb: {"indexed": 3, "kb": kb})
-
-    result = serve.rpc_reindex({})
-
-    assert result["indexed"] == 3
-    assert result["kb"] is built
-    assert _touched(nowhere) == []  # the fake built it; nothing else did
 
 
 # ---------------------------------------------------------------------------
@@ -211,21 +202,189 @@ async def test_a_graph_query_with_no_corpus_is_empty_not_stubbed(nowhere):
 
 
 # ---------------------------------------------------------------------------
+# the run builds the corpus it is about to search
+# ---------------------------------------------------------------------------
+
+
+def _fake_index(calls, report=None):
+    """Stand in for `index_project_files`, recording the corpus it was given."""
+    def index(kb):
+        calls.append(kb)
+        return dict(report or {"indexed": 2, "embedded": 2, "reused": 0,
+                               "dropped": 0, "skipped": 0, "errors": [],
+                               "total_chunks": 7})
+    return index
+
+
+def test_a_first_run_builds_the_corpus_it_is_about_to_search(nowhere, monkeypatch):
+    """A fresh install has no corpus, and a run is a request to search one.
+
+    Nothing used to build one except the operator naming it -- an install
+    step, two indexing scripts, a Reindex button -- and missing all of them
+    cost nothing visible: the search answers `no_corpus`, the Researcher falls
+    through to its own model, and the run reports itself finished. All four are
+    gone; this is what replaced them.
+    """
+    (nowhere / "notes.md").write_text("the planner interprets goals", encoding="utf-8")
+    built = object()  # stands in for a corpus that did not exist a moment ago
+    indexed = []
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
+    monkeypatch.setattr(serve, "get_knowledge_base", lambda: built)
+    monkeypatch.setattr(serve, "index_project_files", _fake_index(indexed))
+
+    result = serve.rpc_run_goal({"goal": "Do a thing"})
+
+    assert indexed == [built]  # through the creating door, once
+    assert any("[Corpus]" in message and "indexed before the run" in message
+               for message in result["messages"])
+    # The fake built it and nothing else did: no second path constructs a
+    # store, which is what `get_knowledge_base` being the only door means.
+    assert "knowledge" not in _touched(nowhere)
+
+
+def test_an_emptied_corpus_is_rebuilt_too_not_only_a_missing_one(nowhere, monkeypatch):
+    """`empty` and `absent` are different states and the same problem here.
+
+    A store an install step created and then failed to fill answers a search
+    exactly as badly as no store at all, so the condition is "nothing to
+    search", not "no directory".
+    """
+    (nowhere / "notes.md").write_text("x", encoding="utf-8")
+    indexed = []
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
+    monkeypatch.setattr(serve, "corpus_state", lambda: ("empty", "m"))
+    monkeypatch.setattr(serve, "get_knowledge_base", lambda: object())
+    monkeypatch.setattr(serve, "index_project_files", _fake_index(indexed))
+
+    result = serve.rpc_run_goal({"goal": "Do a thing"})
+
+    assert len(indexed) == 1
+    assert any("was empty" in message for message in result["messages"])
+
+
+def test_a_run_brings_a_corpus_that_is_behind_the_project_up_to_date(nowhere, monkeypatch):
+    """Drift used to be the operator's job, and the failure is silent.
+
+    A corpus that holds documents reports `indexed` with every counter
+    non-zero and self-consistent while retrieval quietly stops finding the
+    project -- measured here at 8 documents against a walk of 103. The rebuild
+    is affordable on every run because it keeps the vectors of documents whose
+    text has not changed.
+    """
+    (nowhere / "notes.md").write_text("x", encoding="utf-8")
+    indexed = []
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
+    monkeypatch.setattr(serve, "corpus_state", lambda: ("indexed", "m"))
+    monkeypatch.setattr(serve, "index_project_files", _fake_index(
+        indexed, {"indexed": 9, "embedded": 2, "reused": 7, "dropped": 1,
+                  "skipped": 0, "errors": []}))
+
+    result = serve.rpc_run_goal({"goal": "Do a thing"})
+
+    assert len(indexed) == 1
+    line = next(m for m in result["messages"] if m.startswith("[Corpus]"))
+    assert "2 document(s) re-read" in line and "1 no longer in the project" in line
+
+
+def test_a_rebuild_that_changed_nothing_still_says_so(nowhere, monkeypatch):
+    """This asserted the silence until 2026-09-12, and the silence misread.
+
+    The argument for saying nothing was that the phase runs on every run and
+    usually does nothing, so a line about it is a line nobody reads. What it
+    actually produced is a console that mentions the corpus once, on the run
+    that builds it, and never again -- and a rebuild that re-embeds nothing
+    takes ~0.1s and loads no model, so there is no other sign it happened. The
+    operator's reading was that no embedding occurs at all, which is the
+    failure `#run-live` already fixed once: a run that did the work and a run
+    that skipped it must not look identical.
+    """
+    (nowhere / "notes.md").write_text("x", encoding="utf-8")
+    indexed = []
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
+    monkeypatch.setattr(serve, "corpus_state", lambda: ("indexed", "m"))
+    monkeypatch.setattr(serve, "index_project_files", _fake_index(
+        indexed, {"indexed": 9, "embedded": 0, "reused": 9, "dropped": 0,
+                  "skipped": 0, "errors": []}))
+
+    result = serve.rpc_run_goal({"goal": "Do a thing"})
+
+    assert len(indexed) == 1  # it still ran; it just had nothing to do
+    line = next(m for m in result["messages"] if m.startswith("[Corpus]"))
+    assert "already matched the project" in line
+    assert "9 document(s)" in line
+
+
+def test_indexing_switched_off_is_the_one_state_that_says_nothing(nowhere, monkeypatch):
+    """`INDEX_PROJECT_BEFORE_RUN=0` is the operator's own machine-level choice,
+    reported by the console header on every poll rather than by a run. It is
+    also the one state where the phase genuinely did not run, so the line above
+    would be false here -- nothing was checked and nothing matched."""
+    (nowhere / "notes.md").write_text("x", encoding="utf-8")
+    indexed = []
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", False)
+    monkeypatch.setattr(serve, "corpus_state", lambda: ("indexed", "m"))
+    monkeypatch.setattr(serve, "index_project_files", _fake_index(indexed, {}))
+
+    result = serve.rpc_run_goal({"goal": "Do a thing"})
+
+    assert not indexed
+    assert not [m for m in result["messages"] if m.startswith("[Corpus]")]
+
+
+def test_the_corpus_is_built_before_the_online_phase_and_not_after(nowhere, monkeypatch):
+    """The order is load-bearing, not stylistic.
+
+    The online phase embeds the pages it keeps, so a corpus holding nothing
+    but fetched pages counts above zero and reads `indexed` -- and the
+    project's own files would then never be indexed at all, on this run or any
+    later one.
+    """
+    (nowhere / "notes.md").write_text("x", encoding="utf-8")
+    order: list[str] = []
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
+    monkeypatch.setattr(serve, "get_knowledge_base", lambda: object())
+
+    def index(kb):
+        order.append("corpus")
+        return {"indexed": 1, "skipped": 0, "errors": [], "total_chunks": 1}
+
+    def research(factory, goal):
+        order.append("web")
+        return {"source": "duckduckgo", "documents": 0, "considered": 0}
+
+    monkeypatch.setattr(serve, "index_project_files", index)
+    monkeypatch.setattr(serve, "research_online", research)
+
+    serve.rpc_run_goal({"goal": "Do a thing", "research_web": True})
+
+    assert order == ["corpus", "web"]
+
+
+# ---------------------------------------------------------------------------
 # the online research phase
 # ---------------------------------------------------------------------------
 
 
-def test_a_run_leaves_no_corpus_behind_when_the_phase_stores_nothing(nowhere):
-    """The first run on a fresh machine must not invent a knowledge base.
+def test_a_run_leaves_no_corpus_behind_when_there_is_nothing_to_put_in_one(
+    nowhere, monkeypatch
+):
+    """The first run on a fresh machine must not invent an empty knowledge base.
 
-    `_research_online_before_the_run` is allowed to build one -- storing a page
-    is indexing -- but it used to resolve that door on the way in, as the
-    argument to `research_online`, before it knew whether the phase would run
-    at all. The phase is off in every test and on any machine without
-    `WEB_SEARCH_ENABLED`, so a run that never fetched a page still created an
-    empty store, and `rag_stats` read `empty` from then on where the truth was
-    `absent`. Only one of those two means "press Reindex".
+    Two phases could, and both are on here. `_research_online_before_the_run`
+    is allowed to build one -- storing a page is indexing -- but it used to
+    resolve that door on the way in, as the argument to `research_online`,
+    before it knew whether the phase would run at all: the phase is off in
+    every test and on any machine without `WEB_SEARCH_ENABLED`, so a run that
+    never fetched a page still created an empty store. The corpus bootstrap
+    has the same shape one caller along, and counts the walk before it opens
+    the door for exactly that reason -- here the walk offers nothing, so
+    nothing is built.
+
+    `rag_stats` would otherwise read `empty` from then on where the truth is
+    `absent`, and only one of those two means "press Reindex".
     """
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
+
     serve.rpc_run_goal({"goal": "Do a thing"})
 
     assert "knowledge" not in _touched(nowhere)

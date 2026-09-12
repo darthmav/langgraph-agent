@@ -110,6 +110,16 @@ CANDIDATES: tuple[Candidate, ...] = (
               "Large reasoner; held Researcher until it probed empty"),
     Candidate("gemma", "ollama", "gemma4:cloud",
               "Researcher before nemotron; also probes empty"),
+    # Local, not proxied: the tag has no `:cloud` suffix, so the daemon runs it
+    # on this machine and the seat costs nothing per call. That is the whole
+    # reason to probe it, and also why throughput is the thing to read off the
+    # result -- measured on this machine at 5.4 tok/s against a 9B Q4, against
+    # 0.9 for the 27B, so a seat here is bounded by LLM_TIMEOUT_SECONDS in a way
+    # no cloud seat is. `paid` is False for the opposite reason to the Ollama
+    # Cloud tags above: there is no account behind it at all.
+    Candidate("dolphin-9b", "ollama",
+              "hf.co/mradermacher/Notaires_dolphin-2.9.1-yi-1.5-9b-GGUF:Q4_K_M",
+              "Local 9B Q4 on this machine; no cloud call"),
     Candidate("opus", "anthropic", "claude-opus-5", "Paid control", paid=True),
     Candidate("sonnet", "anthropic", "claude-sonnet-5", "Paid control", paid=True),
     Candidate("haiku", "anthropic", "claude-haiku-4-5", "Paid control", paid=True),
@@ -182,6 +192,30 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
          "researcher": "qwen", "builder": "kimi-code"},
         "Baseline with a code-specialised Builder. The Builder is the only "
         "seat that calls tools, so it is where specialisation should pay.",
+    ),
+    TeamConfig(
+        "local-planner",
+        {"architect": "qwen", "planner": "dolphin-9b",
+         "researcher": "qwen", "builder": "qwen"},
+        "Baseline with the Planner moved off the cloud entirely. That seat is "
+        "the one worth moving: it calls out every cycle, while the Researcher's "
+        "model is not consulted at all whenever retrieval clears "
+        "RETRIEVAL_RELEVANCE_FLOOR. Read against baseline, and read the "
+        "*plan* rather than the verdict -- a 9B is the size at which holding "
+        "the `## Steps` format stops being free, and an unreadable plan is now "
+        "caught rather than silently emptied.",
+    ),
+    TeamConfig(
+        "local-pair",
+        {"architect": "qwen", "planner": "dolphin-9b",
+         "researcher": "dolphin-9b", "builder": "qwen"},
+        "Both tool-free seats local: the two that can be moved without giving "
+        "up tool calling, which dolphin-9b does not advertise. The Researcher "
+        "is the riskier of the two -- probed four times it filled 2/3 sections "
+        "three times, always dropping `## Recommendations for Builder` -- and "
+        "with the corpus empty it is consulted on every run rather than "
+        "bypassed by retrieval. Run this on `offcorpus`, the one exercise "
+        "where that seat's model is the variable.",
     ),
     TeamConfig(
         "heavy-gate",
@@ -1140,7 +1174,9 @@ def write_report(
         lines += [
             "> **The corpus was empty for these runs.** Every Researcher fell "
             "back to its model, which reads exactly like a bad Researcher "
-            "seat. Re-run after `python scripts/reindex.py` before drawing any "
+            "seat. These exercises call the seats directly rather than through "
+            "`rpc_run_goal`, so nothing built the corpus for them: start one "
+            "run from the console and re-run this before drawing any "
             "conclusion about retrieval or about the `research` exercise.",
             "",
         ]
@@ -1293,9 +1329,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def show_catalogue() -> None:
     rule("candidates")
+    # The model column is sized to the longest tag rather than fixed: a local
+    # `hf.co/...` tag is over twice the width of a `:cloud` one and ran straight
+    # into the note, which read as a note about the wrong model.
+    width = max(len(c.model) for c in CANDIDATES) + 2
     for c in CANDIDATES:
         tag = red(" paid") if c.paid else ""
-        print(f"  {c.key:<12}{c.provider:<11}{c.model:<26}{dim(c.note)}{tag}")
+        print(f"  {c.key:<12}{c.provider:<11}{c.model:<{width}}{dim(c.note)}{tag}")
     print()
     rule("team configurations")
     for cfg in TEAM_CONFIGS:
@@ -1502,8 +1542,8 @@ def main(argv: list[str]) -> int:
             print(yellow(f"failed: {excerpt(exc, 120)}"))
             print(wrap(yellow(
                 "Team runs will continue, but the Researcher will fall back to "
-                "the model for every query. Run scripts/reindex.py first if "
-                "you meant to test retrieval."), indent="  "))
+                "the model for every query. Start one run from the console "
+                "first if you meant to test retrieval."), indent="  "))
 
         # An empty corpus does not raise: retrieval simply returns nothing, the
         # Researcher falls through to the model, and the run reads exactly like
@@ -1516,8 +1556,9 @@ def main(argv: list[str]) -> int:
                 "The corpus is empty, so every Researcher will find nothing and "
                 "fall back to its model. That looks identical to a bad "
                 "Researcher seat, and the `research` exercise is measuring "
-                "nothing. Run `python scripts/reindex.py` first if you meant to "
-                "test retrieval."), indent="  "))
+                "nothing. These exercises drive the seats directly, so nothing "
+                "here indexes: start one run from the console first if you "
+                "meant to test retrieval."), indent="  "))
             print()
 
     probes: list[ProbeResult] = []

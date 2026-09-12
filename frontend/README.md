@@ -7,9 +7,6 @@ graph.
 ## Quick Start
 
 ```bash
-# Build the knowledge graph — the Graph tab is empty without it
-python scripts/reindex.py
-
 python serve.py
 # Open: http://localhost:8080
 ```
@@ -178,8 +175,9 @@ Port: `PORT=3000 python serve.py`.
 
 ## Troubleshooting
 
-**Graph tab is empty** — run `python scripts/reindex.py`, or press *Reindex
-project* on the Corpus tab. Check `rag_stats` reports non-zero nodes.
+**Graph tab is empty** — nothing has been indexed here yet. Start a run: the
+corpus is built before the Architect opens. Check `rag_stats` reports non-zero
+nodes afterwards.
 
 **A seat shows NO KEY** — it is pointed at Anthropic or OpenAI and that
 provider's key is unset. The default seats are all Ollama; if those are the

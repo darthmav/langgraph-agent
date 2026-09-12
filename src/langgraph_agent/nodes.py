@@ -762,6 +762,53 @@ _PLANNER_TIMED_OUT = (
 )
 
 
+# What a Planner that *answered* off-format leaves in `plan`, and it is
+# load-bearing for exactly the reason `_PLANNER_TIMED_OUT` is. `plan` was
+# whatever `## Steps` matched, so a reply that skipped the heading -- prose, a
+# bare list, a JSON object -- set it to the empty string while the feed still
+# said "Plan created", and the gate counts a step only while a plan exists -- so
+# the cycle ran uncounted. Measured with this guard removed: a whole run through
+# such a seat ends at `step_count` 0, which is the state that lets Planner ->
+# Builder -> Architect repeat until LangGraph's recursion limit kills the run by
+# exception, discarding every message it produced, whenever the gate does not
+# approve. That is the same failure the timeout fallback exists to prevent,
+# reached through the one door that was unguarded: the seat replying rather than
+# stalling. Worded apart from the timeout, and from a plan that really is
+# unplannable, because all three arrive with no steps and only this one means
+# the model cannot hold the seat -- the same distinction `_RESEARCH_EMPTY`
+# draws for the Researcher.
+_PLANNER_NO_STEPS = (
+    "1. The Planner's seat replied without a readable `## Steps` section, so "
+    "this goal was never broken into steps.\n"
+    "2. Do not guess at the plan. Report the goal as unplanned and set that as "
+    "a blocker, saying the Planner's reply could not be read as a plan -- this "
+    "is a seat that cannot hold its format, not a goal that resists "
+    "planning.\n"
+)
+
+
+# The stable openings of the two placeholders above, without the parts that
+# vary -- `_PLANNER_TIMED_OUT` carries the deadline, and neither is worth
+# reconstructing at a call site.
+_PLACEHOLDER_PLAN_OPENINGS = (
+    "1. The Planner did not respond within",
+    "1. The Planner's seat replied without a readable",
+)
+
+
+def plan_is_placeholder(plan: str) -> bool:
+    """Is this `plan` a note about the Planner failing, rather than a plan?
+
+    Both placeholders exist so `plan` is never empty -- see
+    `_PLANNER_NO_STEPS` for why that emptiness was load-bearing -- and both are
+    written on a path that also forces `next_agent` to Builder, deliberately.
+    So anything that wants to *override* that routing has to be able to tell
+    the two apart, and `_route_from_planner` is that caller: a plan nobody
+    wrote is not a query worth searching on, and the seat already stalled once.
+    """
+    return plan.lstrip().startswith(_PLACEHOLDER_PLAN_OPENINGS)
+
+
 def planner_node(state: AgentState) -> AgentState:
     """Planner: Interpret goal, create structured plan, choose next agent.
 
@@ -804,8 +851,31 @@ def planner_node(state: AgentState) -> AgentState:
         )
         return state
 
+    plan = parsed.get("plan", "")
+    if not plan.strip():
+        # The seat answered and the answer carried no steps -- see
+        # `_PLANNER_NO_STEPS` for why an empty `plan` cannot be written here.
+        # An existing plan beats the placeholder, as on the timeout path: a
+        # revise cycle already holds a real one, and re-running it is better
+        # information than a note about the seat.
+        state["plan"] = state.get("plan") or _PLANNER_NO_STEPS
+        # Builder rather than whatever the reply routed to, which is a second
+        # reason this cannot be left alone: `_gather_research` searches on
+        # `plan`, so a Researcher hop with no plan is a search for the empty
+        # string, and retrieval that thin is precisely what falls through to
+        # the Researcher's own model. The Builder is also the shorter path back
+        # to the Architect, the only node that can end the run.
+        state["next_agent"] = "Builder"
+        # Named in the feed the way the silent Researcher is, because changing
+        # the seat's model is the only thing that fixes it.
+        state["messages"].append(
+            "[Planner] Seat returned no plan steps; routing to Builder "
+            "(check the Planner's model)"
+        )
+        return state
+
     # Update state
-    state["plan"] = parsed.get("plan", "")
+    state["plan"] = plan
     state["next_agent"] = parsed.get("next_agent", "Builder")
     state["messages"].append(f"[Planner] Plan created. Next agent: {state['next_agent']}")
 

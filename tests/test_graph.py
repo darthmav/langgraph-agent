@@ -152,20 +152,75 @@ def test_research_status_enum():
     assert ResearchStatus.NO_RELEVANT_KNOWLEDGE.value == "no_relevant_knowledge"
 
 
-def test_simple_task_skips_research(agent_graph):
-    """Test that a straightforward file-creation task skips research.
+def test_a_fully_specified_task_still_retrieves_once(agent_graph):
+    """Even a task that needs no research reads the corpus before building.
 
-    Per the documentation happy-path diagram, the Planner should route a
-    fully-specified task directly to the Builder.
+    This test asserted the opposite until 2026-09-12: a fully-specified goal
+    went Planner -> Builder and `research` stayed empty, which is what the
+    documentation's happy path described. What that path actually produced was
+    a run that built a 77-document corpus, embedded 8 fetched web pages into
+    it, and then consulted none of it -- so the assertion is inverted rather
+    than deleted. The opening cycle retrieves; every later one routes as the
+    Planner asks.
     """
     state = initial_state("Create a hello.txt file containing 'Hello World'")
 
     result = agent_graph.invoke(state)
 
     assert result["plan"] != ""
-    assert result["research"] == ""
-    assert result["next_agent"] == "Builder"
+    assert result["research"] != ""
+    assert result["research_status"] != ""
     assert result["step_count"] > 0
+
+
+def test_the_forced_hop_is_only_the_first_one(agent_graph):
+    """A Planner naming the Builder is obeyed once the Researcher has run.
+
+    The override is about the corpus never being read, not about overruling the
+    Planner, so it has to stop after one hop -- otherwise a revise cycle
+    re-searches the same corpus with the same plan every time round the loop.
+    `research_status` is the marker, and this is the test that would catch it
+    being read from `research` instead: a seat that answers with nothing leaves
+    findings empty and a status set.
+    """
+    from langgraph_agent.graph import _route_from_planner
+
+    fresh = initial_state("Create a hello.txt file")
+    fresh["next_agent"] = "Builder"
+    fresh["plan"] = "1. Write the file."
+    assert _route_from_planner(fresh) == "researcher"
+
+    been_round = dict(fresh)
+    been_round["research"] = ""
+    been_round["research_status"] = ResearchStatus.NO_RELEVANT_KNOWLEDGE.value
+    assert _route_from_planner(been_round) == "builder"
+
+
+def test_a_planner_that_failed_is_not_sent_to_research(agent_graph):
+    """The two placeholder plans keep their route to the Builder.
+
+    Both are written when the Planner did not produce steps -- a stall, or a
+    reply that could not be read -- and both pick the Builder deliberately: it
+    is the shorter path back to the Architect, the only node that can end a run
+    whose seats are already failing. Searching on a plan nobody wrote is also
+    the thin retrieval that falls through to the Researcher's own model, which
+    is the second slow seat such a run least needs.
+    """
+    from langgraph_agent.graph import _route_from_planner
+    from langgraph_agent.nodes import (
+        _PLANNER_NO_STEPS,
+        _PLANNER_TIMED_OUT,
+        NODE_DEADLINE_SECONDS,
+    )
+
+    for placeholder in (
+        _PLANNER_TIMED_OUT.format(seconds=int(NODE_DEADLINE_SECONDS)),
+        _PLANNER_NO_STEPS,
+    ):
+        state = initial_state("Create a hello.txt file")
+        state["next_agent"] = "Builder"
+        state["plan"] = placeholder
+        assert _route_from_planner(state) == "builder"
 
 
 def test_state_injection_shows_empty():
@@ -1686,6 +1741,149 @@ def test_a_hung_planner_keeps_a_real_plan_over_the_placeholder(monkeypatch):
         release.set()
 
     assert result["plan"] == "1. The plan from the previous cycle"
+
+
+class _OffFormatPlannerLLM:
+    """Answers the Planner in prose, with no `## Steps` heading to match.
+
+    The shape a weak seat actually produces: it responds, at length, and the
+    parser finds nothing in it. Every other seat keeps StubLLM.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        return AIMessage(
+            content=(
+                "Sure! To do this you would want to start by looking at the "
+                "indexer, then add the retry, and finally write a test for it."
+            )
+        )
+
+
+def _off_format_planner(monkeypatch):
+    """Point the Planner seat at a model that answers without the headings."""
+    from langgraph_agent import nodes
+
+    llm = _OffFormatPlannerLLM()
+    real = nodes.get_agent_llm
+    monkeypatch.setattr(
+        nodes,
+        "get_agent_llm",
+        lambda agent, temperature=0.1: (
+            llm if agent == "planner" else real(agent, temperature)
+        ),
+    )
+    return llm
+
+
+def test_a_planner_that_answers_off_format_still_leaves_a_plan(monkeypatch):
+    """The other door onto the uncounted loop: the seat replies, unreadably.
+
+    `plan` was whatever `## Steps` matched, so an answer without that heading
+    emptied it while the feed said "Plan created" -- and step_count is
+    incremented only while a plan exists, so the cycle ran uncounted. Measured
+    with the guard removed: a whole run through this seat ends at step_count 0,
+    which is the state that lets the loop run to LangGraph's recursion limit
+    whenever the gate does not approve.
+    """
+    from langgraph_agent import nodes
+
+    llm = _off_format_planner(monkeypatch)
+    result = nodes.planner_node(initial_state("Do the thing"))
+
+    assert llm.calls == 1                      # the seat really answered
+    assert result["plan"]                      # the load-bearing part
+    assert "never broken into steps" in result["plan"]
+    assert result["next_agent"] == "Builder"
+    assert any("no plan steps" in m for m in result["messages"])
+    # A seat that produced no plan must not be reported as one that planned.
+    assert not any("Plan created" in m for m in result["messages"])
+
+
+def test_an_off_format_planner_is_not_described_as_a_hung_one(monkeypatch):
+    """A seat that replied and a seat that stalled call for different fixes.
+
+    Asserted in both directions so the guard cannot be satisfied by routing
+    this case through the timeout fallback, which would report a model that
+    answered in 0.2s as one that never answered.
+    """
+    from langgraph_agent import nodes
+
+    _off_format_planner(monkeypatch)
+    result = nodes.planner_node(initial_state("Do the thing"))
+
+    assert any("no plan steps" in m for m in result["messages"])
+    assert not any("No response within" in m for m in result["messages"])
+    assert "did not respond" not in result["plan"]
+
+
+def test_an_off_format_planner_keeps_a_real_plan_over_the_placeholder(monkeypatch):
+    """As on the timeout path: a previous cycle's plan is better information."""
+    from langgraph_agent import nodes
+
+    _off_format_planner(monkeypatch)
+    state = initial_state("Do the thing")
+    state["plan"] = "1. The plan from the previous cycle"
+    result = nodes.planner_node(state)
+
+    assert result["plan"] == "1. The plan from the previous cycle"
+    assert result["next_agent"] == "Builder"
+
+
+def test_an_off_format_planner_never_routes_to_the_researcher(monkeypatch):
+    """An empty plan is an empty search: `_gather_research` queries on `plan`.
+
+    A Researcher hop with no plan searches for the empty string, and retrieval
+    that thin is exactly what falls through to the Researcher's own model.
+    """
+    from langgraph_agent import nodes
+
+    llm = _OffFormatPlannerLLM()
+
+    def _routes_to_researcher(messages):
+        from langchain_core.messages import AIMessage
+
+        llm.calls += 1
+        return AIMessage(content="## Next Agent\nResearcher\n\n## Notes\nGo look.")
+
+    llm.invoke = _routes_to_researcher
+    real = nodes.get_agent_llm
+    monkeypatch.setattr(
+        nodes,
+        "get_agent_llm",
+        lambda agent, temperature=0.1: (
+            llm if agent == "planner" else real(agent, temperature)
+        ),
+    )
+
+    result = nodes.planner_node(initial_state("Do the thing"))
+
+    assert result["next_agent"] == "Builder"
+
+
+def test_an_off_format_planner_run_still_terminates(monkeypatch):
+    """End to end: the property every fallback above exists to give.
+
+    Nothing hangs here -- the Planner answers instantly and unreadably, which
+    is the shape that used to loop fastest of all. `step_count >= 1` is the
+    assertion that fails without the guard: the run reached the end having
+    counted no cycle at all.
+    """
+    from langgraph_agent import graph as graph_module
+
+    _off_format_planner(monkeypatch)
+    result = create_agent_graph().invoke(
+        initial_state("Do the thing"),
+        {"recursion_limit": graph_module.RECURSION_LIMIT},
+    )
+
+    assert result["step_count"] >= 1           # the loop was counted at all
+    assert result["step_count"] <= graph_module.MAX_STEPS
 
 
 def test_a_stalling_architect_run_still_terminates(monkeypatch):

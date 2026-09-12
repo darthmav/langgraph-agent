@@ -8,11 +8,12 @@ Usage:
 With no flags this runs only the steps that leave the project alone: the
 dependency and seat checks, a GraphRAG search, and the test suite.
 
-Two steps are held back from that default because they are not read-only.
-`--index` rebuilds the corpus, and `--run-example` is a live agent run that
-writes files into the repository -- so plain `verify_and_test.py` used to
-reindex the knowledge base and leave several new files behind, which is not
-what "verify" reads as. Ask for them by name, or with `--all`.
+One step is held back from that default because it is not read-only:
+`--run-example` is a live agent run that writes files into the repository, so
+plain `verify_and_test.py` used to leave several new files behind, which is not
+what "verify" reads as. Ask for it by name, or with `--all`. Nothing here
+rebuilds the corpus any more -- that is a run's job and an upload's, and it was
+a third writer this script had no business being.
 """
 
 import argparse
@@ -128,40 +129,16 @@ def check_seats() -> bool:
     return all_live
 
 
-def index_knowledge_base() -> bool:
-    """Index project files into GraphRAG."""
-    print_header("STEP 2: Indexing Knowledge Base")
-
-    script_path = Path(__file__).parent / "index_knowledge.py"
-    if not script_path.exists():
-        print(f"  ✗ Index script not found: {script_path}")
-        return False
-
-    try:
-        result = subprocess.run(
-            [sys.executable, str(script_path)],
-            cwd=Path(__file__).parent.parent,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        print(result.stdout)
-        if result.stderr:
-            print("Warnings:", result.stderr)
-
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        print("  ✗ Indexing timed out (>2 minutes)")
-        return False
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        return False
+# There is no indexing step here any more. Two things build a corpus -- a run,
+# which rebuilds before the Architect opens, and embedding a document into the
+# corpus from the console -- and a verification script is neither. It checks
+# that search works against whatever this machine holds, and says plainly when
+# that is nothing.
 
 
 def test_graphrag_search() -> bool:
     """Test GraphRAG search functionality."""
-    print_header("STEP 3: Testing GraphRAG Search")
+    print_header("STEP 2: Testing GraphRAG Search")
 
     try:
         from langgraph_agent.graphrag_server import open_knowledge_base
@@ -173,7 +150,8 @@ def test_graphrag_search() -> bool:
         kb = open_knowledge_base()
         if kb is None:
             print("  \u2717 No corpus has been indexed; nothing to search.")
-            print("    Run: python scripts/index_knowledge.py")
+            print("    Start one run from the console: it indexes this")
+            print("    directory before the Architect opens.")
             return False
 
         print_step("Testing search queries")
@@ -206,7 +184,7 @@ def test_graphrag_search() -> bool:
 
 def run_example_usage() -> bool:
     """Run the example usage script."""
-    print_header("STEP 4: Running Example Usage")
+    print_header("STEP 3: Running Example Usage")
 
     example_path = Path(__file__).parent.parent / "example_usage.py"
     if not example_path.exists():
@@ -238,7 +216,7 @@ def run_example_usage() -> bool:
 
 def run_tests() -> bool:
     """Run the test suite."""
-    print_header("STEP 5: Running Tests")
+    print_header("STEP 4: Running Tests")
 
     try:
         import pytest
@@ -276,11 +254,6 @@ def main():
         description="Verify and test the 4-Agent System"
     )
     parser.add_argument(
-        "--index",
-        action="store_true",
-        help="Rebuild the knowledge base (writes to knowledge/)",
-    )
-    parser.add_argument(
         "--test-graphrag",
         action="store_true",
         help="Test GraphRAG search",
@@ -298,17 +271,17 @@ def main():
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run every step, including the two that write",
+        help="Run every step, including the one that writes",
     )
 
     args = parser.parse_args()
 
-    # No flags runs the read-only steps. The two that write are reached only by
-    # naming them or by --all: a verification script that reindexes the corpus
-    # and commits a live agent run to the working tree on a bare invocation is
-    # a trap, and the caller has no way to find out before it happens.
+    # No flags runs the read-only steps. The one that writes is reached only by
+    # naming it or by --all: a verification script that commits a live agent run
+    # to the working tree on a bare invocation is a trap, and the caller has no
+    # way to find out before it happens.
     read_only = args.all or not any(
-        [args.index, args.test_graphrag, args.run_example, args.run_tests]
+        [args.test_graphrag, args.run_example, args.run_tests]
     )
 
     # Every step runs even after one fails -- one broken step should not hide
@@ -327,25 +300,19 @@ def main():
     # steps below are worth reading either way. It reports; it does not judge.
     check_seats()
 
-    # Step 2: Index knowledge base
-    if args.index or args.all:
-        if not index_knowledge_base():
-            print("\n⚠ Indexing failed, continuing anyway...")
-            failed.append("indexing")
-
-    # Step 3: Test GraphRAG
+    # Step 2: Test GraphRAG
     if args.test_graphrag or read_only:
         if not test_graphrag_search():
             print("\n⚠ GraphRAG test failed, continuing anyway...")
             failed.append("GraphRAG search")
 
-    # Step 4: Run example
+    # Step 3: Run example
     if args.run_example or args.all:
         if not run_example_usage():
             print("\n⚠ Example failed, continuing anyway...")
             failed.append("example run")
 
-    # Step 5: Run tests
+    # Step 4: Run tests
     if args.run_tests or read_only:
         if not run_tests():
             print("\n⚠ Some tests failed")

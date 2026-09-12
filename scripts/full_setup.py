@@ -3,9 +3,10 @@
 
 This script:
 1. Fixes the GraphRAG server API (MCP compatibility)
-2. Re-indexes all project files into GraphRAG
-3. Verifies all components work
-4. Runs tests
+2. Verifies all components work
+3. Runs tests
+
+It does not build the corpus. Nothing does but a run and an upload.
 
 Usage:
     python scripts/full_setup.py
@@ -47,37 +48,14 @@ def test_graphrag_import():
         return False
 
 
-def reindex_knowledge():
-    """Re-index all project files.
-
-    Delegates to `index_project_files` rather than walking the tree itself.
-    The copy this used to keep had drifted from the canonical one in three
-    ways, none of which raises anything. Its excludes are matched as plain
-    substrings, so `"*.egg-info"` matched nothing and indexed four build
-    artifacts, while a bare `"build"` matched `prompts/builder.txt` and kept
-    the Builder's own system prompt out of the corpus. And it *accumulated*
-    where a reindex is supposed to rebuild: nothing cleared the graph or
-    pruned Chroma rows that no longer qualify, so a file that was renamed,
-    deleted or newly excluded went on answering searches.
-    """
-    print("\nIndexing project files into GraphRAG...")
-
-    from langgraph_agent.graphrag_server import (
-        get_knowledge_base,
-        index_project_files,
-    )
-
-    kb = get_knowledge_base()
-    root = Path(__file__).parent.parent
-
-    report = index_project_files(kb, str(root))
-
-    for error in report["errors"]:
-        print(f"  ! {error}")
-    if report["skipped"]:
-        print(f"  Skipped {report['skipped']} file(s) over the size limit")
-    print(f"  ✓ Indexed {report['indexed']} files")
-    return report["indexed"] > 0
+# There is no `reindex_knowledge` here any more, and nothing in this script
+# builds a corpus. Two things index: a run, which rebuilds before the Architect
+# opens, and embedding a document into the corpus from the console. A setup
+# script was a third, and it is the one that most looks like housekeeping and
+# least looks like a decision -- it fixes how fresh the corpus is on a machine
+# nobody has run anything on, which the first run decides correctly by itself.
+# `test_search` below therefore reports an absent corpus as a fact about this
+# machine rather than as a failure of setup.
 
 
 def test_search():
@@ -86,11 +64,12 @@ def test_search():
 
     from langgraph_agent.graphrag_server import open_knowledge_base
 
-    # Opened, not created. The reindex above is what builds the corpus; if it
-    # built nothing, this must say so rather than quietly make an empty store.
+    # Opened, never created. Nothing in this script builds a corpus, so an
+    # absent one is reported rather than quietly made -- a store that appeared
+    # because something looked at it is a corpus nobody asked for.
     kb = open_knowledge_base()
     if kb is None:
-        print("  \u2717 No corpus was built, so there is nothing to search")
+        print("  - No corpus on this machine yet; a run builds one")
         return False
 
     results = kb.search("Planner agent", top_k=2)
@@ -134,14 +113,10 @@ def main():
         print("\n✗ Setup failed at import stage")
         sys.exit(1)
 
-    # Step 3: Re-index knowledge
-    if not reindex_knowledge():
-        print("\n⚠ No files indexed (knowledge base may be empty)")
-
-    # Step 4: Test search
+    # Step 3: Test search
     test_search()
 
-    # Step 5: Run tests
+    # Step 4: Run tests
     run_tests()
 
     # Summary
@@ -150,8 +125,8 @@ def main():
     print("=" * 60)
     print("\nReady to use:")
     print("  python example_usage.py")
-    print("\nRe-index anytime:")
-    print("  python scripts/reindex.py")
+    print("\nThe corpus builds itself: start a run from the console and it is")
+    print("indexed before the Architect opens.")
 
 
 if __name__ == "__main__":

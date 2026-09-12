@@ -337,34 +337,23 @@ def test_rpc_clear_is_refused_while_a_run_is_in_flight(console_kb):
     assert console_kb.collection.count() == 2
 
 
-def test_rpc_reindex_is_refused_while_a_run_is_in_flight(console_kb, monkeypatch):
-    """Same hazard as the clear, and it does not even need to finish to cause it.
+def test_there_is_no_way_to_ask_the_console_for_a_rebuild(console_kb):
+    """The Reindex button is gone, and so is the method behind it.
 
-    A rebuild clears the graph up front and re-adds documents one at a time, so
-    a search landing partway through is answered from a corpus that is neither
-    the old one nor the new one -- and is answered, not failed.
+    A rebuild mid-run was the same hazard as a clear and did not even need to
+    finish to cause it -- the graph is cleared up front and documents re-added
+    one at a time, so a search landing partway through is answered from a
+    corpus that is neither the old one nor the new one, and is *answered*, not
+    failed. That refusal is no longer needed because the request cannot be
+    made: `_index_the_project_before_the_run` rebuilds on every run, before
+    the Architect opens and while nothing is searching.
+
+    Pinned as an absence because an RPC method is one line to add back, and
+    adding it back would restore both the hazard and the thing it existed for
+    -- an operator who has to remember to press something.
     """
-    called = []
-    monkeypatch.setattr(serve, "index_project_files", lambda kb: called.append(kb))
-
-    with serve._run_lock:
-        serve._run_progress.update(running=True, goal="build the thing")
-
-    with pytest.raises(ValueError, match="run is in flight"):
-        serve.rpc_reindex({})
-
-    assert called == []  # refused before it touched the corpus
-    assert console_kb.graph.number_of_nodes() == 3
-    assert console_kb.collection.count() == 2
-
-
-def test_rpc_reindex_runs_when_nothing_is_in_flight(console_kb, monkeypatch):
-    """The guard must not be a permanent block on the button."""
-    monkeypatch.setattr(
-        serve, "index_project_files", lambda kb: {"indexed": 7, "errors": []}
-    )
-
-    assert serve.rpc_reindex({})["indexed"] == 7
+    assert "reindex" not in serve.RPC_METHODS
+    assert not hasattr(serve, "rpc_reindex")
 
 
 def test_the_refusal_names_the_run_it_is_protecting(console_kb):
@@ -1212,35 +1201,40 @@ def test_the_excludes_are_substrings_that_actually_match_what_they_name():
     assert not excluded("src/langgraph_agent/graphrag_server.py")
 
 
-def test_the_index_script_selects_the_same_files_as_the_canonical_walk():
-    """`get_project_files` delegates rather than reimplementing.
+def test_nothing_but_a_run_and_an_upload_builds_a_corpus():
+    """Two acts index, and the guard is that no third one exists.
 
-    Behavioural rather than source inspection: the failure was a *duplicate
-    that disagreed*, so what has to hold is that the two agree on this repo.
-    """
-    import sys
+    There were four: an install step, two indexing scripts under `scripts/`,
+    and the setup and verification scripts calling them. Each looked like
+    housekeeping rather than a decision, and each
+    decided how fresh the corpus was on a machine nobody had run anything on --
+    a question the first run answers correctly by itself. They are gone, and
+    what is left is a rule worth a build failure: the creating door opens for a
+    run, and for a document being embedded into the corpus.
 
-    sys.path.insert(0, "scripts")
-    try:
-        from index_knowledge import get_project_files
-    finally:
-        sys.path.pop(0)
-    from langgraph_agent.graphrag_server import iter_project_files
-
-    assert get_project_files(".") == iter_project_files(".")
-
-
-def test_the_setup_script_reindexes_through_the_canonical_path():
-    """A reindex rebuilds; `full_setup` used to accumulate.
-
-    It walked the tree itself and called `add_document` in a loop, so nothing
-    cleared the graph or pruned Chroma rows that no longer qualify -- a file
-    renamed, deleted or newly excluded went on answering searches. Delegating
-    to `index_project_files` is what makes it a reindex rather than an append.
+    Recomputed from the tree rather than listed, so a script added next month
+    is caught by the same test. `iter_project_files` is fine anywhere: reading
+    the walk is not indexing.
     """
     from pathlib import Path
 
-    source = Path("scripts/full_setup.py").read_text(encoding="utf-8")
+    builders = ("get_knowledge_base", "index_project_files", "GraphRAGKnowledgeBase(")
+    offenders = []
+    for path in [*Path("scripts").glob("*.py"), Path("install.sh"),
+                 Path("launch_console.sh"), Path("example_usage.py")]:
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        # A comment saying the script does not index is not the script indexing.
+        code = "\n".join(
+            line for line in source.splitlines()
+            if not line.lstrip().startswith(("#", "//"))
+        )
+        hits = [name for name in builders if name in code]
+        if hits:
+            offenders.append(f"{path}: {', '.join(hits)}")
 
-    assert "index_project_files" in source
-    assert "__pycache__" not in source, "it is re-listing the excludes again"
+    assert not offenders, (
+        "these build a corpus outside a run and outside an upload, which is the "
+        "third writer this rule exists to refuse:\n  " + "\n  ".join(offenders)
+    )

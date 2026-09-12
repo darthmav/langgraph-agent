@@ -17,7 +17,6 @@
 #   ./install.sh                everything below
 #   ./install.sh --minimal      skip the optional developer tools
 #   ./install.sh --no-system    skip pacman entirely (no sudo); Python side only
-#   ./install.sh --no-index     do not build the corpus
 #   ./install.sh --no-checks    skip ruff / mypy / pytest
 #   ./install.sh --no-desktop   do not add the console to the app launcher
 #   ./install.sh --yes          never prompt (pacman --noconfirm, no sign-in)
@@ -28,12 +27,11 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 VENV="$ROOT/.venv"
 
-MINIMAL=0 SYSTEM=1 INDEX=1 CHECKS=1 DESKTOP=1 ASSUME_YES=0
+MINIMAL=0 SYSTEM=1 CHECKS=1 DESKTOP=1 ASSUME_YES=0
 for arg in "$@"; do
     case "$arg" in
         --minimal)    MINIMAL=1 ;;
         --no-system)  SYSTEM=0 ;;
-        --no-index)   INDEX=0 ;;
         --no-checks)  CHECKS=0 ;;
         --no-desktop) DESKTOP=0 ;;
         --yes|-y)     ASSUME_YES=1 ;;
@@ -292,17 +290,13 @@ print(f"  ✓ {EMBEDDING_MODEL_NAME} cached")
 PY
 then :; else problem "could not fetch the embedding model; see /tmp/ambiguity-embedder.log"; fi
 
-if [ "$INDEX" -eq 1 ]; then
-    step "Corpus (python scripts/reindex.py)"
-    # A reindex rebuilds from the files on disk, so running it again is safe:
-    # uploads/ and research/web/ are files in the walk and come back with it.
-    if "$PY" scripts/reindex.py >/tmp/ambiguity-reindex.log 2>&1; then
-        ok "$(grep -m1 'Indexed' /tmp/ambiguity-reindex.log | sed 's/^[^A-Za-z]*//')"
-        ok "$(grep -m1 '^Graph:' /tmp/ambiguity-reindex.log)"
-    else
-        problem "reindex failed; see /tmp/ambiguity-reindex.log"
-    fi
-fi
+# The corpus is not built here, and there is no step that builds one. Two
+# things index: a run, which rebuilds before the Architect opens, and embedding
+# a document into the corpus from the console. An install-time index was a
+# third, and a third is one too many -- it is the one that decides how fresh
+# the corpus is on a machine nobody has run anything on yet, which is a
+# question the first run answers correctly by itself. The model above is
+# fetched so that first run is an index and not also a download.
 
 # ---------------------------------------------------------------------------
 # 6. Checks

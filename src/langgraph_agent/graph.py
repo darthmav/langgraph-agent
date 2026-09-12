@@ -15,6 +15,7 @@ from langgraph_agent.control import ACTIVITY
 from langgraph_agent.nodes import (
     architect_node,
     builder_node,
+    plan_is_placeholder,
     planner_node,
     researcher_node,
 )
@@ -55,13 +56,52 @@ def _route_from_architect(state: AgentState) -> Literal["planner", "researcher",
 
 
 def _route_from_planner(state: AgentState) -> Literal["researcher", "builder"]:
-    """Respect the Planner's explicit routing decision on every turn.
+    """Respect the Planner's routing, except for the first hop of a run.
 
     The Planner chooses Researcher when knowledge is needed and Builder when
-    the task is already fully specified.
+    the task is already fully specified -- and on every later cycle that choice
+    stands. The opening cycle is different: the run retrieves once before the
+    Builder ever acts, whatever the Planner asked for.
+
+    That override exists because the alternative was measured and it is the
+    corpus never being read at all. Nothing else forces retrieval: a run
+    rebuilds the corpus before the Architect opens, the web phase may embed
+    pages into it, and then the Researcher runs only if the Planner's reply
+    happens to name it. A seat that writes a confident plan names the Builder
+    instead, so on the run of 2026-09-12 -- 77 documents and 1,659 passages
+    built in 77.3s, 8 fetched pages embedded in 25.8s -- both cycles went
+    Planner -> Builder and the run ended with `research` empty and
+    `research_status` unset. Every seat worked; the knowledge base was simply
+    never consulted, and nothing in the record said so.
+
+    It is close to free where it is redundant, which is why it can be
+    unconditional: `_gather_research` calls GraphRAG first and returns those
+    chunks without invoking the Researcher's model at all whenever the top hit
+    clears `RETRIEVAL_RELEVANCE_FLOOR` -- so on a goal the corpus answers, the
+    hop costs a search. It is the goal the corpus *cannot* answer that reaches
+    the seat, and that case routes on to the Builder anyway.
+
+    Two states are exempt, and both are the Planner having failed rather than
+    chosen. `plan_is_placeholder` catches them: a plan nobody wrote is not a
+    query worth searching on -- `_gather_research` searches on `plan`, and
+    retrieval that thin is exactly what falls through to the Researcher's own
+    model -- and those paths pick the Builder precisely because it is the
+    shorter way back to the Architect, which is the only node that can end a
+    run whose seats are already stalling.
     """
     next_agent = state.get("next_agent", "Researcher")
-    if next_agent.lower() == "builder":
+    if next_agent.lower() != "builder":
+        return "researcher"
+
+    # `research_status` is the marker for "the Researcher has run", not
+    # `research`: the seat can legitimately come back with nothing to say, and
+    # a run forced round again on an empty findings string would ask the same
+    # question of the same corpus every cycle. Every exit from
+    # `researcher_node` sets a status except the emergency stop, which is
+    # ending the run regardless.
+    if state.get("research_status"):
+        return "builder"
+    if plan_is_placeholder(state.get("plan", "")):
         return "builder"
     return "researcher"
 
@@ -116,7 +156,9 @@ def create_agent_graph() -> CompiledStateGraph[AgentState, Any, AgentState, Agen
 
     Routing logic:
     - Architect opens with `plan`, then rules on the Builder's report
-    - Planner chooses Researcher (needs knowledge) or Builder (task is clear)
+    - Planner chooses Researcher (needs knowledge) or Builder (task is clear),
+      except on the opening cycle, which always retrieves once before the
+      Builder acts -- see `_route_from_planner`
     - Researcher sets status: ready_for_builder | need_replan | no_relevant_knowledge
     - Builder always reports back to the Architect; it does not decide it is done
     - Stops on an `approved` verdict, or at MAX_STEPS
