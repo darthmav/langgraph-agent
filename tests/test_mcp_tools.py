@@ -51,21 +51,102 @@ async def test_list_tools(client: MCPClient):
 
 
 @pytest.mark.asyncio
-async def test_filesystem_write_and_read(client: MCPClient):
-    """Builder can write and read files through MCP tools."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / "test.txt"
-        content = "Hello from MCP filesystem tool"
+async def test_filesystem_write_and_read(client: MCPClient, tmp_path, monkeypatch):
+    """Builder can write and read files through MCP tools.
 
-        write_result = await client.call_tool(
-            "filesystem_write", {"path": str(path), "content": content}
-        )
-        assert write_result["success"]
-        assert path.read_text(encoding="utf-8") == content
+    The write happens inside the project root, because `_resolve_write_path`
+    refuses anything else -- so the test moves the root rather than writing to
+    a temp directory beside it, which is what it used to do.
+    """
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "test.txt"
+    content = "Hello from MCP filesystem tool"
 
-        read_result = await client.call_tool("filesystem_read", {"path": str(path)})
-        assert read_result["success"]
-        assert read_result["content"] == content
+    write_result = await client.call_tool(
+        "filesystem_write", {"path": "test.txt", "content": content}
+    )
+    assert write_result["success"]
+    assert path.read_text(encoding="utf-8") == content
+
+    read_result = await client.call_tool("filesystem_read", {"path": str(path)})
+    assert read_result["success"]
+    assert read_result["content"] == content
+
+
+@pytest.mark.asyncio
+async def test_filesystem_write_refuses_an_absolute_path_outside_the_project(
+    client: MCPClient, tmp_path, monkeypatch
+):
+    """The run of 2026-09-11 wrote `/tmp/gen_doc.py` while working on this checkout.
+
+    A file outside the root is invisible to the reindex, to `corpus_staleness`
+    and to git, and it makes the console's "changed this machine" notice name a
+    path the operator cannot find from the project.
+    """
+    monkeypatch.chdir(tmp_path)
+    outside = tmp_path.parent / "escaped.py"
+
+    result = await client.call_tool(
+        "filesystem_write", {"path": str(outside), "content": "print('nope')"}
+    )
+
+    assert not result["success"]
+    assert "outside the project" in result["error"]
+    assert not outside.exists(), "the refusal has to happen before the write"
+
+
+@pytest.mark.asyncio
+async def test_filesystem_write_refuses_a_dotdot_escape(
+    client: MCPClient, tmp_path, monkeypatch
+):
+    """`..` is the other spelling of the same escape, and `resolve()` is what sees it."""
+    monkeypatch.chdir(tmp_path)
+
+    result = await client.call_tool(
+        "filesystem_write", {"path": "../escaped.py", "content": "print('nope')"}
+    )
+
+    assert not result["success"]
+    assert "outside the project" in result["error"]
+    assert not (tmp_path.parent / "escaped.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_write_refuses_a_symlinked_parent(
+    client: MCPClient, tmp_path, monkeypatch
+):
+    """Resolution, not string matching, is what catches this one.
+
+    `project/link/x` is under the root as a string and outside it on disk. A
+    check on the literal path would pass it.
+    """
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path.parent / "elsewhere"
+    target.mkdir()
+    (tmp_path / "link").symlink_to(target)
+
+    result = await client.call_tool(
+        "filesystem_write", {"path": "link/escaped.py", "content": "print('nope')"}
+    )
+
+    assert not result["success"]
+    assert "outside the project" in result["error"]
+    assert not (target / "escaped.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_write_creates_parent_directories_inside_the_project(
+    client: MCPClient, tmp_path, monkeypatch
+):
+    """Containment must not cost the Builder the ability to make a subdirectory."""
+    monkeypatch.chdir(tmp_path)
+
+    result = await client.call_tool(
+        "filesystem_write", {"path": "reports/nested/out.md", "content": "ok"}
+    )
+
+    assert result["success"]
+    assert (tmp_path / "reports" / "nested" / "out.md").read_text(encoding="utf-8") == "ok"
 
 
 @pytest.mark.asyncio
@@ -607,14 +688,13 @@ async def test_run_tests(client: MCPClient):
         assert "passed" in result.get("stdout", "")
 
 
-def test_sync_tool_call():
+def test_sync_tool_call(tmp_path, monkeypatch):
     """The sync helper in nodes.py can call MCP tools."""
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import _call_mcp_tool_sync
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / "sync.txt"
-        result = _call_mcp_tool_sync(
-            "filesystem_write", {"path": str(path), "content": "sync ok"}
-        )
-        assert result["success"]
-        assert path.read_text(encoding="utf-8") == "sync ok"
+    result = _call_mcp_tool_sync(
+        "filesystem_write", {"path": "sync.txt", "content": "sync ok"}
+    )
+    assert result["success"]
+    assert (tmp_path / "sync.txt").read_text(encoding="utf-8") == "sync ok"

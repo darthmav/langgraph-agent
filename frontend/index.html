@@ -312,6 +312,12 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <label class="optout" title="A file that does not run is still executed and still reported — it just stops blocking the Architect's approval. For goals whose product is a failing file.">
             <input type="checkbox" id="eng-expect-fail"> expect failures
           </label>
+          <label class="optout" title="Search the web for this goal before the run and embed what it finds into the corpus, permanently. Off by default: whether a goal wants the web cannot be judged from its wording — a goal about your own checkout reads to a search engine like a request for generic advice, and the pages it returns then answer your searches from then on. Tick it when the goal really is about something outside this project. Ignored on a discussion-only run.">
+            <input type="checkbox" id="eng-research-web"> research online
+          </label>
+          <label class="optout" title="The four seats reason about the goal and produce a proposal, without changing anything. The Builder is offered read-only tools only — it can read files and inspect git to ground what it says, but cannot write a file, run a command, run tests, or research online. Nothing on this machine and nothing in the corpus is touched.">
+            <input type="checkbox" id="eng-discuss-only"> discussion only
+          </label>
           <label class="go" title="Embed a document into the corpus, so the Researcher can retrieve it on this run and every one after. It is written under uploads/ and indexed from there, which is what makes it survive a reindex. Text only — .md, .py, .rst, .txt. You can also drop files straight onto the transcript.">
             <input type="file" id="eng-upload" multiple accept=".md,.txt,.py,.rst" hidden><span>Attach</span></label>
           <button class="go" id="eng-send">Run</button>
@@ -356,7 +362,12 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
 
   <section class="panel" data-p="corpus">
     <div class="bar">
-      <button class="go" id="rebtn">Reindex project</button>
+      <!-- No "Reindex project" button. Keeping the corpus current was the
+           operator's job here, and the failure when they forgot is silent:
+           the search answers from whatever the store holds and every counter
+           on the header stays non-zero and self-consistent. Every run now
+           brings the corpus up to date before the Architect opens, against
+           the files as they are then, so there is nothing to press. -->
       <!-- The same upload the Engineer tab offers, reachable from where the
            corpus is actually managed. One RPC behind both. -->
       <label class="go" id="up-label" title="Embed documents into the corpus. They are written under uploads/ and indexed from there, so a reindex re-reads them rather than pruning them. Text only — .md, .py, .rst, .txt; there is no extractor for PDFs here.">
@@ -449,13 +460,28 @@ $$(".tab").forEach(t => t.onclick = () => {
 /* ---------- crew ---------- */
 let OPTIONS = [], OLLAMA_TAGS = [];
 
-async function loadCrew(quiet){
+// `force` repaints even while the operator is using the panel. The 5s poll
+// never forces; an action that changed a seat always does.
+//
+// The repaint throws every seat card away and builds new ones, and the model
+// <select> lives on one of those cards -- so an open dropdown was destroyed
+// under whoever was reading it, closing itself about five seconds after it
+// opened. That reads exactly like a timer on the control, and the seat list is
+// long enough that choosing from it takes longer than the poll leaves. The
+// panel is left alone while focus is inside it: a focused <select> is an
+// operator part-way through a choice, and the repaint can wait for them to
+// finish. It resumes on the next poll after focus leaves, so the live/stubbed
+// chips stay current the rest of the time.
+async function loadCrew(quiet, force){
   const [seatData, optData] = await Promise.all([
     rpc("list_seats", {}, quiet),
     rpc("llm_options", {}, quiet),
   ]);
   OPTIONS = optData.options || [];
   OLLAMA_TAGS = optData.ollama_tags || [];
+
+  const panel = $("#seats");
+  if(!force && panel.contains(document.activeElement)) return;
 
   const seats = seatData.seats || [];
   $("#crewn").textContent = seats.length;
@@ -537,7 +563,7 @@ function optionsHtml(seat){
 async function setSeat(role, value){
   const {provider, model} = JSON.parse(value);
   await rpc("set_seat", {agent:role, provider, model});
-  await loadCrew(true);
+  await loadCrew(true, true);
 }
 
 // The box shows what the seat's next call will do, not a wish: a switchable
@@ -559,7 +585,7 @@ async function setThinking(role, on){
   // leave the box showing a state the seat is not in.
   try{ await rpc("set_thinking", {agent:role, thinking:on}); }
   catch(e){ /* the refusal is already on the telemetry log */ }
-  await loadCrew(true).catch(()=>{});
+  await loadCrew(true, true).catch(()=>{});
 }
 
 /* ---------- graph ---------- */
@@ -629,8 +655,10 @@ function draw(ns, es){
   const svg = $("#g"), W = svg.clientWidth || 900, H = svg.clientHeight || 520;
   $("#gempty").style.display = ns.length ? "none" : "grid";
   if(!ns.length) $("#gempty").innerHTML = CORPUS === "absent"
-    ? "No corpus &mdash; nothing is indexed until you ask for it.<br>Run <code>python scripts/reindex.py</code>, or press Reindex project on the Corpus tab."
-    : "No graph yet &mdash; run <code>python scripts/reindex.py</code>,<br>or press Reindex project on the Corpus tab.";
+    ? "No corpus &mdash; nothing is indexed until something asks for it."
+      + (BUILDS_ON_RUN ? "<br>Start a run: it indexes the project before the Architect opens."
+                       : "<br><code>INDEX_PROJECT_BEFORE_RUN</code> is off, so nothing will.")
+    : "No graph yet &mdash; start a run and the corpus is rebuilt before it.";
 
   NODES = ns.map((n, i) => ({...n,
     x: W/2 + Math.cos(i/ns.length*6.283) * Math.min(W,H)*.3,
@@ -776,6 +804,11 @@ $("#q").onkeydown = e => { if(e.key === "Enter") search().catch(()=>{}); };
 // are meaningless against `absent`, so they are disabled rather than left to
 // fail: creating a store in order to empty it is the opposite of the ask.
 let CORPUS = "absent";
+// Whether a run would index the project itself from here, reported by the
+// server rather than assumed. `INDEX_PROJECT_BEFORE_RUN=0` makes the promise
+// false, and the absent state is the one place someone looks to find out why
+// retrieval came back with nothing.
+let BUILDS_ON_RUN = true;
 function setCorpusState(state){
   CORPUS = state;
   const absent = state === "absent";
@@ -796,8 +829,8 @@ async function loadDocs(){
   $("#docs").innerHTML = docs.length ? docs.map(d =>
     `<div class="doc" data-id="${esc(d.id)}"><span>${esc(d.title)}</span><span>${esc(d.id)}</span></div>`).join("")
     : (CORPUS === "absent"
-        ? `<div class="muted">no corpus — nothing is indexed until you press Reindex project</div>`
-        : `<div class="muted">corpus is empty — press Reindex project</div>`);
+        ? `<div class="muted">no corpus — ${BUILDS_ON_RUN ? "the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will build one"}</div>`
+        : `<div class="muted">corpus is empty — ${BUILDS_ON_RUN ? "the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will rebuild it"}</div>`);
   $$("#docs .doc").forEach(el => el.onclick = () => {
     $("#gnode").value = el.dataset.id;
     $$(".tab").find(t => t.dataset.p === "graph").click();
@@ -805,19 +838,6 @@ async function loadDocs(){
   });
 }
 $("#rfbtn").onclick = () => loadDocs().catch(()=>{});
-$("#rebtn").onclick = async () => {
-  const b = $("#rebtn"); b.disabled = true; b.textContent = "Reindexing…";
-  $("#restat").textContent = "";
-  try{
-    const r = await rpc("reindex", {});
-    $("#restat").textContent = `${r.indexed} indexed · ${r.total_nodes} nodes · ${r.total_edges} edges`
-      + (r.errors?.length ? ` · ${r.errors.length} failed` : "");
-    await Promise.all([loadDocs(), poll(true)]);
-    NODES = [];                       // force a rebuild from the new graph
-  }catch(e){ $("#restat").textContent = "failed: " + e.message; }
-  finally{ b.disabled = false; b.textContent = "Reindex project"; }
-};
-
 $("#exbtn").onclick = async () => {
   const b = $("#exbtn"); b.disabled = true; b.textContent = "Exporting…";
   $("#restat").textContent = "";
@@ -1149,7 +1169,7 @@ const ENGINEER_EMPTY = {
 function clearEngineerView(){
   $("#director").innerHTML = ENGINEER_EMPTY.director;
   $("#state-dump").textContent = ENGINEER_EMPTY.state;
-  // The typed goal and the expect-failures box are inputs, not transcript, and
+  // The typed goal and the three checkboxes are inputs, not transcript, and
   // are deliberately left alone.
   setClearButton();
 }
@@ -1285,10 +1305,14 @@ async function run(){
   if(!goal) return;
   // Read once, at submit: toggling the box mid-run must not change the run.
   const expectFail = $("#eng-expect-fail").checked;
+  const researchWeb = $("#eng-research-web").checked;
+  const discussOnly = $("#eng-discuss-only").checked;
   CURRENT.inflight = true; CURRENT.stopping = false; CURRENT.runId = "";
   setRunButtons();
   $("#director").innerHTML += `<div class="msg user">${esc(goal)}`
     + (expectFail ? ` <span class="badge">expect failures</span>` : "")
+    + (researchWeb && !discussOnly ? ` <span class="badge">research online</span>` : "")
+    + (discussOnly ? ` <span class="badge">discussion only</span>` : "")
     + `</div>`
     + `<div class="msg sys" id="run-live"><b>Running</b></div>`;
   $("#eng-prompt").value = "";
@@ -1345,7 +1369,7 @@ async function run(){
   }, 1000);
 
   try{
-    const r = await rpc("run_goal", {goal, expect_failures: expectFail});
+    const r = await rpc("run_goal", {goal, expect_failures: expectFail, research_web: researchWeb, discuss_only: discussOnly});
     renderRun(r);
   }catch(e){
     const live = $("#run-live");
@@ -1563,20 +1587,21 @@ function healthChip(stats){
 }
 
 
-// The corpus is a function of what is on disk and nothing rebuilds it, so it
-// drifts in silence: every counter beside this one stays non-zero and
-// internally consistent while retrieval quietly stops finding the project.
-// This is the only thing on the header that says "press Reindex" for a corpus
-// that already exists, so it names the numbers rather than just glowing.
+// The corpus is a function of what is on disk, so it drifts the moment anything
+// is written: every counter beside this one stays non-zero and internally
+// consistent while retrieval quietly stops finding the project. The next run
+// heals it -- this says so, and says what is out of step in the meantime,
+// because between runs the drift is real and this is the only thing that
+// reports it.
 function staleChip(stats){
   const s = stats.staleness;
   if(!s) return "";
   // Reported apart from staleness on purpose: an oversized file is correctly
-  // absent and Reindex will not change that, so asking for one would be a
-  // permanent warning with nothing behind it. It still has to be visible --
+  // absent and no rebuild will change that, so filing it under drift would be
+  // a permanent warning with nothing behind it. It still has to be visible --
   // a source file growing past the limit drops out of the corpus in silence.
   const big = s.oversized_count
-    ? `<span class="stale" title="${("Too large to index, so absent from the corpus. Reindexing will not "
+    ? `<span class="stale" title="${("Too large to index, so absent from the corpus. Rebuilding will not "
         + "change this - split the file or raise MAX_INDEXABLE_BYTES.\n\n"
         + (s.oversized || []).join("\n")).replace(/"/g,"&quot;")}">${s.oversized_count} too large</span>`
     : "";
@@ -1586,7 +1611,7 @@ function staleChip(stats){
   if(s.extra_count) parts.push(`${s.extra_count} no longer on disk`);
   const sample = [].concat(s.missing || [], s.extra || []).slice(0, 8).join("\n");
   const title = `The corpus does not match the project: ${s.indexed} documents indexed, `
-    + `${s.expected} in the walk. Press Reindex project on the Corpus tab.`
+    + `${s.expected} in the walk. The next run brings it up to date before the Architect opens.`
     + (sample ? `\n\n${sample}` : "");
   return `<span class="stale" title="${title.replace(/"/g,"&quot;")}">stale: ${parts.join(", ")}</span>`+big;
 }
@@ -1599,12 +1624,13 @@ async function poll(quiet){
       rpc("rag_stats", {}, true),
     ]);
     $("#embed-model").textContent = st.embedding;
+    BUILDS_ON_RUN = st.indexes_on_run !== false;
     setCorpusState(stats.corpus || (stats.total_chunks ? "indexed" : "empty"));
     // Four zeros read as a knowledge base that happens to be empty. When none
     // has been built there is nothing to count, and saying so is the honest
     // reading -- it is also the only one that tells the operator what to do.
     $("#stats").innerHTML = CORPUS === "absent"
-      ? `<span class="nocorpus">no corpus &mdash; nothing indexed</span>`
+      ? `<span class="nocorpus">no corpus &mdash; ${BUILDS_ON_RUN ? "the next run indexes the project" : "nothing indexed"}</span>`
       : `<span>docs <b>${stats.total_documents}</b></span>`+
         `<span>chunks <b>${stats.total_chunks}</b></span>`+
         `<span>nodes <b>${stats.total_nodes}</b></span>`+

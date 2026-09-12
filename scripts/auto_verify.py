@@ -55,7 +55,7 @@ def main():
         # that puts a corpus on a machine that had none.
         kb = open_knowledge_base()
         if kb is None:
-            results.append("- GraphRAG has no corpus (run scripts/reindex.py)")
+            results.append("- GraphRAG has no corpus (a run builds one)")
         else:
             kb.search("test", top_k=1)
             results.append("✓ GraphRAG working")
@@ -85,8 +85,7 @@ def main():
     # Quick usage example
     print("\nQuick test (set ANTHROPIC_API_KEY or OPENAI_API_KEY for real runs):")
     print("  python example_usage.py")
-    print("\nRe-index knowledge:")
-    print("  python scripts/reindex.py")
+    print("\nThe corpus builds itself on the first run; nothing else builds one.")
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from langgraph_agent.graphrag_server import (
     ENTITY_STOPWORDS,
     GraphRAGKnowledgeBase,
     _chunk_windows,
+    _content_sha,
     _document_id_of,
     index_project_files,
 )
@@ -536,3 +537,125 @@ def test_the_stopword_list_is_lowercase_ascii():
     """It is matched with `token.lower()`, so an entry with a capital in it is
     dead weight that reads as coverage."""
     assert all(w == w.lower() and w.isascii() for w in ENTITY_STOPWORDS)
+
+
+# ---------------------------------------------------------------------------
+# reuse: a rebuild re-embeds what changed and nothing else
+# ---------------------------------------------------------------------------
+
+
+class _CountingEmbedder(_FakeEmbedder):
+    """The fake embedder, counting the calls that would cost real time."""
+
+    def __init__(self, piece: int = 4) -> None:
+        super().__init__(piece)
+        self.batches = 0
+
+    def encode(self, text: str | list[str]) -> Any:
+        if isinstance(text, list):
+            self.batches += 1
+        return super().encode(text)
+
+
+@pytest.fixture
+def counting_kb(tmp_path):
+    kb = _make_kb(tmp_path)
+    kb._embedder = _CountingEmbedder()  # type: ignore[assignment]
+    return kb
+
+
+def _project(tmp_path, **files: str):
+    root = tmp_path / "project"
+    root.mkdir(exist_ok=True)
+    for name, text in files.items():
+        (root / name.replace("_", ".")).write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_rebuild_re_embeds_only_what_changed(counting_kb, tmp_path):
+    """This is what lets a rebuild happen on every run instead of on a button.
+
+    Embedding is the only expensive part of indexing this project: measured
+    warm on the real store, 52.0s to re-embed 77 files and 1,618 chunks, and
+    0.09s for the same rebuild when nothing had changed -- reading every file,
+    hashing it, fetching the store's metadata and rebuilding the entire entity
+    graph together account for 0.1s of that. Take the reuse away and keeping
+    the corpus current goes back to being something a person has to remember.
+    """
+    root = _project(tmp_path,
+                    a_md="The Planner interprets goals and routes onward.",
+                    b_md="The Architect rules on the plan it was given.")
+
+    first = index_project_files(counting_kb, str(root))
+    assert (first["indexed"], first["embedded"], first["reused"]) == (2, 2, 0)
+    after_first = counting_kb._embedder.batches
+    assert after_first  # it really did embed
+
+    second = index_project_files(counting_kb, str(root))
+    assert (second["indexed"], second["embedded"], second["reused"]) == (2, 0, 2)
+    assert counting_kb._embedder.batches == after_first  # not one batch more
+
+    (root / "a.md").write_text("The Planner now routes to the Researcher.",
+                               encoding="utf-8")
+    third = index_project_files(counting_kb, str(root))
+    assert (third["indexed"], third["embedded"], third["reused"]) == (2, 1, 1)
+    assert counting_kb._embedder.batches == after_first + 1
+
+
+def test_a_document_whose_vectors_were_reused_is_still_in_the_graph(counting_kb, tmp_path):
+    """`index_project_files` clears the graph up front, so the cheap half has
+    to run for a reused document too.
+
+    Skipping it entirely would leave a corpus that answers searches perfectly
+    and has no graph at all -- and the graph is what `neighborhood`,
+    `query_graph`, `topics` and every spectral diagnostic read.
+    """
+    root = _project(tmp_path, a_md="The Planner interprets goals.")
+    index_project_files(counting_kb, str(root))
+
+    report = index_project_files(counting_kb, str(root))
+
+    assert report["reused"] == 1
+    path = str(root / "a.md")
+    assert counting_kb.graph.nodes[path]["type"] == "document"
+    assert counting_kb.graph.has_edge(path, "Planner")
+
+
+def test_a_document_that_left_the_project_is_dropped_and_counted_once(
+    counting_kb, tmp_path
+):
+    """`dropped` counts documents, not rows.
+
+    A file is many chunks, so counting the pruned ids would report "9 dropped"
+    for one deleted file -- and this number is the only evidence that a
+    rebuild which re-read nothing still did something.
+    """
+    root = _project(tmp_path,
+                    a_md="The Planner interprets goals. " * 40,
+                    b_md="The Architect rules on the plan.")
+    first = index_project_files(counting_kb, str(root))
+    assert first["dropped"] == 0
+    assert len([i for i in counting_kb.collection.rows if "a.md" in i]) > 1
+
+    (root / "a.md").unlink()
+    report = index_project_files(counting_kb, str(root))
+
+    assert report["dropped"] == 1
+    assert report["indexed"] == 1
+    assert str(root / "a.md") not in counting_kb.graph
+    assert not [i for i in counting_kb.collection.rows if "a.md" in i]
+
+
+def test_the_fingerprint_is_written_by_the_store_not_by_the_caller(counting_kb):
+    """Every chunk carries it, whichever door the document came in through.
+
+    Computed inside `add_document` for the reason `doc_id` and `chunk_count`
+    are: an upload, a fetched page and the walk all reach it, and one caller
+    forgetting to pass a fingerprint would cost that document its reuse
+    silently -- it would simply be re-embedded on every run for ever.
+    """
+    text = "The Architect rules on the plan. " * 20
+    counting_kb.add_document("notes.md", text, {"path": "notes.md"})
+
+    shas = {row[1]["sha"] for row in counting_kb.collection.rows.values()}
+    assert shas == {_content_sha(text)}

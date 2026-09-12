@@ -65,7 +65,7 @@ def test_research_finishes_before_the_first_superstep(monkeypatch, graph):
     seen: list[str] = []
     _research(monkeypatch, FOUND, seen)
 
-    result = serve.rpc_run_goal({"goal": "build a retrieval gate"})
+    result = serve.rpc_run_goal({"goal": "build a retrieval gate", "research_web": True})
 
     assert seen == ["build a retrieval gate"]
     assert graph.streamed
@@ -84,7 +84,7 @@ def test_the_feed_line_survives_into_the_payload(monkeypatch, graph):
     """
     _research(monkeypatch, FOUND)
 
-    result = serve.rpc_run_goal({"goal": "g"})
+    result = serve.rpc_run_goal({"goal": "g", "research_web": True})
 
     line = next(m for m in result["messages"] if "[Research]" in m)
     assert "embedded 2" in line and "5 page(s)" in line
@@ -97,7 +97,7 @@ def test_a_research_failure_does_not_take_the_run_down(monkeypatch, graph):
     monkeypatch.setattr(serve, "research_online", boom)
     monkeypatch.setattr(serve, "_kb_for_indexing", lambda: object())
 
-    result = serve.rpc_run_goal({"goal": "g"})
+    result = serve.rpc_run_goal({"goal": "g", "research_web": True})
 
     assert graph.streamed
     assert result["web_research"]["source"] == "error"
@@ -113,7 +113,7 @@ def test_reading_pages_and_keeping_none_is_not_reported_as_a_failure(monkeypatch
     """
     _research(monkeypatch, {**FOUND, "documents": 0, "chunks": 0, "considered": 6})
 
-    result = serve.rpc_run_goal({"goal": "g"})
+    result = serve.rpc_run_goal({"goal": "g", "research_web": True})
 
     line = next(m for m in result["messages"] if "[Research]" in m)
     assert "kept none" in line
@@ -153,7 +153,7 @@ def test_a_stop_arriving_before_the_phase_skips_it(monkeypatch):
     serve.RUN_CONTROL.arm("probe")
     serve.RUN_CONTROL.stop()
 
-    report = serve._research_online_before_the_run("g")
+    report = serve._research_online_before_the_run("g", True)
 
     assert called == []
     assert report["source"] == "stopped"
@@ -180,10 +180,99 @@ def test_a_stop_after_approval_does_not_deny_the_verdict(monkeypatch):
     monkeypatch.setattr(serve, "graph", _Approves())
     _research(monkeypatch, FOUND)
 
-    result = serve.rpc_run_goal({"goal": "g"})
+    result = serve.rpc_run_goal({"goal": "g", "research_web": True})
 
     assert result["stopped"]
     assert result["verdict"] == "approved"
     stop_line = next(m for m in result["messages"] if "[Graph] Stopped" in m)
     assert "without an approved verdict" not in stop_line
     assert "already ruled approved" in stop_line
+
+
+def test_the_phase_does_not_run_unless_the_run_asked_for_it(monkeypatch):
+    """Off by default, and the caller is the operator -- never an agent.
+
+    Three gates were built to decide relevance from the goal text and all three
+    were graded wrong against thirteen hand-labelled pages; see
+    `_research_online_before_the_run` for the numbers. The deciding information
+    is the operator's intent, so the switch is theirs, exactly as
+    `expect_failures` is.
+    """
+    called: list[str] = []
+    _research(monkeypatch, FOUND, called)
+
+    report = serve._research_online_before_the_run("g", False)
+
+    assert called == [], "the phase must not reach the network unasked"
+    assert report["source"] == "not_requested"
+    assert report["documents"] == 0
+
+
+def test_the_phase_runs_when_the_run_does_ask(monkeypatch):
+    """The opt-in has to actually opt in, or the feature is merely deleted."""
+    called: list[str] = []
+    _research(monkeypatch, FOUND, called)
+
+    report = serve._research_online_before_the_run("g", True)
+
+    assert called, "asking for online research must reach the phase"
+    assert report["source"] != "not_requested"
+
+
+def test_not_requested_reads_differently_from_switched_off(monkeypatch):
+    """"This run did not ask" and "this machine has it off" are different facts.
+
+    The same reason `search_web` keeps its three empty outcomes apart: they call
+    for different things from the operator and an empty count reads identically
+    in all of them.
+    """
+    not_asked = serve._research_feed_line({"source": "not_requested", "considered": 0, "documents": 0})
+    switched_off = serve._research_feed_line({"source": "disabled", "considered": 0, "documents": 0})
+
+    assert not_asked != switched_off
+    assert "not requested" in not_asked
+    assert "switched off" in switched_off
+
+
+def test_run_goal_does_not_research_online_by_default(monkeypatch, graph):
+    """The default reaches through `rpc_run_goal`, not just the helper."""
+    called: list[str] = []
+    _research(monkeypatch, FOUND, called)
+
+    serve.rpc_run_goal({"goal": "write me a document about all the local project data"})
+
+    assert called == []
+
+
+def test_run_goal_researches_online_when_the_caller_asks(monkeypatch, graph):
+    called: list[str] = []
+    _research(monkeypatch, FOUND, called)
+
+    serve.rpc_run_goal({"goal": "something the web knows", "research_web": True})
+
+    assert called
+
+
+def test_a_discussion_run_never_researches_online(monkeypatch, graph):
+    """"No actions" has to cover the corpus too.
+
+    The phase writes pages under research/web/ and embeds them, which changes
+    this machine and every later run's retrieval. So the box being ticked is
+    not enough on a discussion run, and the two flags are resolved in
+    `rpc_run_goal` rather than left to the operator to keep consistent.
+    """
+    called: list[str] = []
+    _research(monkeypatch, FOUND, called)
+
+    serve.rpc_run_goal({"goal": "g", "research_web": True, "discuss_only": True})
+
+    assert called == []
+
+
+def test_a_discussion_run_reaches_the_seats_as_state(monkeypatch, graph):
+    """The flag has to arrive in AgentState; the Builder reads it from there."""
+    _research(monkeypatch, FOUND)
+
+    result = serve.rpc_run_goal({"goal": "g", "discuss_only": True})
+
+    assert result["discuss_only"] is True

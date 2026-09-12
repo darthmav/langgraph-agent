@@ -211,6 +211,93 @@ def _unexpanded_hint(argv: list[str], stderr: str) -> str | None:
     return None
 
 
+# The base every filesystem tool resolves a relative path against: the server's
+# working directory, which is the project root. Named here so `_resolve_cwd`,
+# `filesystem_read` and `filesystem_write` cannot drift into three bases -- one
+# relative path has to mean one place across the whole tool belt.
+def _project_root() -> Path:
+    return Path.cwd().resolve()
+
+
+# Stages of the `git_dwell` pipeline, in the only order they work in. Named
+# here so the tool can report which one it reached: a pipeline that fails
+# somewhere has to say where, or the caller retries the whole thing and re-runs
+# the parts that already succeeded.
+DWELL_STAGES = ("survey", "branch", "stage", "commit", "push", "pr", "merge")
+
+# What `git_dwell` runs when the caller names no stages. `merge` is absent, and
+# that absence is the design -- see `_git_dwell`.
+DWELL_DEFAULT_STAGES = ("survey", "branch", "stage", "commit", "push", "pr")
+
+
+def _branch_name_from(message: str) -> str:
+    """Derive a branch name from a commit message's first line.
+
+    Only used when the caller did not name one. Conservative on purpose: the
+    name reaches a remote, so it is reduced to the characters git is happy with
+    rather than cleverly abbreviated.
+    """
+    head = (message.splitlines() or [""])[0].lower()
+    # Drop a conventional-commit prefix: `fix: contain writes` is a better
+    # branch as `contain-writes` than as `fix-contain-writes`, and the type is
+    # already carried by the commit itself.
+    head = re.sub(r"^(feat|fix|docs|test|chore|refactor|ci|perf)(\([^)]*\))?:\s*", "", head)
+    slug = re.sub(r"[^a-z0-9]+", "-", head).strip("-")[:48].strip("-")
+    return f"agent/{slug or 'change'}"
+
+
+def _resolve_write_path(requested: Any) -> tuple[Path | None, str | None]:
+    """Resolve a requested write path to `(path, error)`, refusing to escape the project.
+
+    An error is returned *instead of* a path, never alongside one, the same
+    shape `_resolve_cwd` uses and for the same reason: the caller must not be
+    able to act on half an answer.
+
+    This is containment, not safety theatre. `filesystem_write` took its
+    argument raw and called `Path(path).write_text()` behind a
+    `parent.mkdir(parents=True)`, so an absolute path, a `..` or a symlink put
+    the Builder's writes anywhere the account could reach -- and it did: the
+    run of 2026-09-11 wrote `/tmp/gen_doc.py` and `/tmp/gen_overview.py` while
+    working on a goal about this checkout. Two costs, and the second is the one
+    that bites. The obvious cost is a file left outside the project that no
+    reindex, no `corpus_staleness` and no `git status` will ever mention. The
+    quiet one is that `files_changed` feeds the console's "changed this
+    machine" notice, so a write outside the root makes that notice name a path
+    the operator cannot find from the project -- the same false account as a
+    Builder claiming a file it never wrote, which this project already guards
+    in `_report_path_key`, pointing the other way.
+
+    The path is resolved *before* the write rather than checked after, and
+    `resolve()` is what does it: a check on the literal string would pass
+    `project/link/x` where `link` points at `/etc`, because only resolution
+    knows where a symlink lands. The parent is resolved rather than the file
+    itself, since the file is usually about to be created and
+    `strict=False` resolution of a missing leaf is exactly what we want.
+
+    `~` is not expanded, for the reason `_resolve_cwd` gives: there is no shell
+    here, and a path that quietly expanded what an argument on the same line
+    would not is a worse surprise than a refusal naming the path.
+    """
+    if not isinstance(requested, str) or not requested.strip():
+        return None, f"Invalid path: {requested!r}. Pass a file path inside the project."
+    root = _project_root()
+    candidate = Path(requested)
+    # Resolve the parent, not the leaf: the leaf normally does not exist yet,
+    # and a symlinked *parent* is the way out of the root that matters.
+    resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None, (
+            f"Refusing to write outside the project: {requested!r} resolves to "
+            f"{resolved}, which is not under {root}. Write inside the project; "
+            "a file outside it is invisible to the reindex, to corpus staleness "
+            "and to git, and makes the run's 'changed this machine' notice name "
+            "a path nobody can find."
+        )
+    return resolved, None
+
+
 def _resolve_cwd(requested: Any) -> tuple[str | None, str | None]:
     """Resolve a requested working directory to `(cwd, error)`.
 
@@ -305,6 +392,7 @@ class MCPClient:
         tools["filesystem_write"] = self._filesystem_write
         tools["git_status"] = self._git_status
         tools["git_diff"] = self._git_diff
+        tools["git_dwell"] = self._git_dwell
         tools["terminal_execute"] = self._terminal_execute
         tools["run_tests"] = self._run_tests
 
@@ -409,11 +497,18 @@ class MCPClient:
             return {"success": False, "error": str(e), "path": path}
 
     async def _filesystem_write(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Write file contents, creating parent directories if needed."""
+        """Write file contents inside the project, creating parent directories if needed.
+
+        The path goes through `_resolve_write_path` first, which refuses
+        anything landing outside the project root -- see it for why a raw
+        `Path(path).write_text()` here was worth closing.
+        """
         path = args.get("path", "")
         content = args.get("content", "")
+        file_path, error = _resolve_write_path(path)
+        if error is not None or file_path is None:
+            return {"success": False, "error": error, "path": path}
         try:
-            file_path = Path(path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return {"success": True, "path": path, "bytes_written": len(content)}
@@ -447,6 +542,171 @@ class MCPClient:
             return {"success": True, "diff": result.stdout or "No changes"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # The ordered git pipeline (`git_dwell`)
+
+    def _run_vcs(self, *argv: str, timeout: float = 60.0) -> tuple[bool, str]:
+        """One git/gh invocation. Returns `(ok, output)` with stderr folded in.
+
+        stderr is kept because git says the useful part there -- "nothing to
+        commit", "no upstream branch", a rejected push -- and a stage that
+        failed with an empty message is a stage nobody can act on. No shell,
+        for the reason `_terminal_execute` has none: the arguments are argv
+        entries, so a commit message containing `;` or `&&` is a message.
+        """
+        try:
+            done = subprocess.run(
+                list(argv), capture_output=True, text=True,
+                timeout=timeout, stdin=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return False, f"{argv[0]} is not installed on this machine"
+        except subprocess.TimeoutExpired:
+            return False, f"{' '.join(argv)} timed out after {timeout:g}s"
+        return done.returncode == 0, ((done.stdout or "") + (done.stderr or "")).strip()
+
+    def _default_branch(self) -> str:
+        """The branch a PR targets. `origin/HEAD` first, then the usual names."""
+        ok, out = self._run_vcs("git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+        if ok and out:
+            return out.rsplit("/", 1)[-1]
+        for name in ("main", "master"):
+            ok, _ = self._run_vcs("git", "show-ref", "--verify", f"refs/heads/{name}")
+            if ok:
+                return name
+        return "main"
+
+    async def _git_dwell(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run the git pipeline in order, stopping at the first stage that fails.
+
+        Every stage is a real command whose output is recorded, so the result
+        is an account of what happened rather than a claim that it did -- the
+        rule `files_changed` already follows, one level up. A stage that fails
+        leaves the ones after it unrun and names itself in `stopped_at`, since
+        a pipeline that reports only "failed" gets retried whole and re-runs
+        the parts that already worked.
+
+        Two refusals are deliberate, and neither is safety theatre.
+
+        *It will not commit onto the default branch.* Committing straight onto
+        `main` is exactly what the branch-then-PR flow exists to prevent, and
+        an agent doing it has removed the review point before anyone could use
+        it. So `branch` creates one when HEAD is the default, naming it from
+        the message when the caller did not.
+
+        *It will not merge unless the caller names `merge` in `stages`.* The
+        default pipeline stops at `pr`, and that stop is the point of the tool:
+        a pull request the same agent opens and immediately merges is not a
+        review, it is two commands in a row. Nothing infers the intent to
+        merge from the goal, the plan or the message.
+        """
+        message = str(args.get("message") or "").strip()
+        requested = [str(x) for x in (args.get("stages") or DWELL_DEFAULT_STAGES)]
+        unknown = [x for x in requested if x not in DWELL_STAGES]
+        if unknown:
+            return {"success": False, "error":
+                    f"Unknown stage(s): {', '.join(unknown)}. "
+                    f"Valid stages, in order: {', '.join(DWELL_STAGES)}."}
+        # Run in the canonical order whatever order they arrived in: these are
+        # pipeline phases, not a script, so "push then commit" is a typo rather
+        # than an instruction to do it backwards.
+        stages = [x for x in DWELL_STAGES if x in requested]
+
+        log: list[dict[str, Any]] = []
+
+        def record(stage: str, ok: bool, detail: str) -> None:
+            log.append({"stage": stage, "ok": ok, "detail": detail[:2000]})
+
+        def stop(stage: str, detail: str) -> dict[str, Any]:
+            record(stage, False, detail)
+            return {"success": False, "error": f"{stage}: {detail}",
+                    "stopped_at": stage, "stages": log}
+
+        default = self._default_branch()
+        ok, branch = self._run_vcs("git", "rev-parse", "--abbrev-ref", "HEAD")
+        if not ok:
+            return stop("survey", f"cannot read the current branch: {branch}")
+
+        if "survey" in stages:
+            ok, dirty = self._run_vcs("git", "status", "--porcelain")
+            if not ok:
+                return stop("survey", dirty)
+            record("survey", True, f"on {branch} (default {default}); "
+                                   f"{len(dirty.splitlines())} path(s) changed")
+
+        if "branch" in stages:
+            if branch == default:
+                wanted = str(args.get("branch") or "").strip() or _branch_name_from(message)
+                ok, out = self._run_vcs("git", "checkout", "-b", wanted)
+                if not ok:
+                    return stop("branch", out)
+                branch = wanted
+                record("branch", True, f"created {branch} off {default}")
+            else:
+                record("branch", True, f"already on {branch}, which is not {default}")
+        elif branch == default and {"commit", "push", "pr", "merge"} & set(stages):
+            return stop("branch", f"refusing to commit onto {default}; include the "
+                                  "'branch' stage, or check out a branch first")
+
+        if "stage" in stages:
+            paths = [str(x) for x in (args.get("paths") or [])]
+            ok, out = self._run_vcs("git", "add", *(paths or ["-A"]))
+            if not ok:
+                return stop("stage", out)
+            record("stage", True, f"staged {', '.join(paths) if paths else 'all changes'}")
+
+        if "commit" in stages:
+            if not message:
+                return stop("commit", "no message given; pass `message`")
+            ok, staged = self._run_vcs("git", "diff", "--cached", "--name-only")
+            if ok and not staged.strip():
+                # Not a failure. A pass with nothing to commit is an ordinary
+                # outcome, and failing here would send the Builder off
+                # repairing a repository that is simply already clean -- the
+                # false accusation this module keeps having to design against.
+                # The stages that only make sense after a commit are dropped.
+                record("commit", True, "nothing staged to commit")
+                stages = [x for x in stages if x not in ("push", "pr", "merge")]
+            else:
+                ok, out = self._run_vcs("git", "commit", "-m", message)
+                if not ok:
+                    return stop("commit", out)
+                record("commit", True, out.splitlines()[0] if out else "committed")
+
+        if "push" in stages:
+            ok, out = self._run_vcs("git", "push", "-u", "origin", branch, timeout=120)
+            if not ok:
+                return stop("push", out)
+            record("push", True, f"pushed {branch} to origin")
+
+        if "pr" in stages:
+            ok, existing = self._run_vcs("gh", "pr", "view", "--json", "url", "-q", ".url")
+            if ok and existing.strip().startswith("http"):
+                # A branch already carrying a PR is the ordinary case on the
+                # second pass of a run; opening a second one would fail anyway.
+                record("pr", True, f"already open: {existing.strip()}")
+            else:
+                title = (message.splitlines() or ["Automated change"])[0]
+                ok, out = self._run_vcs(
+                    "gh", "pr", "create", "--base", default, "--head", branch,
+                    "--title", title,
+                    "--body", message or "Opened by the dwell pipeline.",
+                    timeout=120,
+                )
+                if not ok:
+                    return stop("pr", out)
+                record("pr", True, out.splitlines()[-1] if out else "pull request opened")
+
+        if "merge" in stages:
+            ok, out = self._run_vcs("gh", "pr", "merge", "--squash", "--delete-branch",
+                                    timeout=120)
+            if not ok:
+                return stop("merge", out)
+            record("merge", True, out.splitlines()[-1] if out else "merged")
+
+        return {"success": True, "branch": branch, "default_branch": default,
+                "stages": log,
+                "summary": "; ".join(f"{e['stage']}: {e['detail']}" for e in log)}
 
     # Terminal / test tools
 

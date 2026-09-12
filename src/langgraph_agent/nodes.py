@@ -333,7 +333,25 @@ def _get_state_injection(state: AgentState) -> str:
             return ", ".join(str(v) for v in value)
         return str(value)
 
-    return f"""## Current state
+    # Every seat has to know, and the Architect above all. It is the gate: it
+    # rules on whether the work is done, and on a discussion run there is no
+    # work to find -- `files_changed` is empty by construction and the Builder
+    # reports what it *would* do. Without this line the gate judged a proposal
+    # by build standards and could never be satisfied, so the run went round
+    # Researcher -> Builder -> Architect until the step ceiling: measured at 8
+    # cycles, every one of them reporting "proposal ready, nothing was
+    # changed". The mode is in the shared injection rather than the Architect's
+    # prompt alone so the Planner stops planning edits and the Builder is told
+    # twice, which costs one line.
+    mode = (
+        "\nMode: DISCUSSION ONLY -- no tools, nothing on this machine will be "
+        "changed. The product of this run is the proposal itself: rule on "
+        "whether it answers the goal, not on whether files exist."
+        if state.get("discuss_only")
+        else ""
+    )
+
+    return f"""## Current state{mode}
 Goal: {_fmt("goal")}
 Architecture: {_fmt("architecture")}
 Verdict: {_fmt("verdict")}
@@ -744,6 +762,53 @@ _PLANNER_TIMED_OUT = (
 )
 
 
+# What a Planner that *answered* off-format leaves in `plan`, and it is
+# load-bearing for exactly the reason `_PLANNER_TIMED_OUT` is. `plan` was
+# whatever `## Steps` matched, so a reply that skipped the heading -- prose, a
+# bare list, a JSON object -- set it to the empty string while the feed still
+# said "Plan created", and the gate counts a step only while a plan exists -- so
+# the cycle ran uncounted. Measured with this guard removed: a whole run through
+# such a seat ends at `step_count` 0, which is the state that lets Planner ->
+# Builder -> Architect repeat until LangGraph's recursion limit kills the run by
+# exception, discarding every message it produced, whenever the gate does not
+# approve. That is the same failure the timeout fallback exists to prevent,
+# reached through the one door that was unguarded: the seat replying rather than
+# stalling. Worded apart from the timeout, and from a plan that really is
+# unplannable, because all three arrive with no steps and only this one means
+# the model cannot hold the seat -- the same distinction `_RESEARCH_EMPTY`
+# draws for the Researcher.
+_PLANNER_NO_STEPS = (
+    "1. The Planner's seat replied without a readable `## Steps` section, so "
+    "this goal was never broken into steps.\n"
+    "2. Do not guess at the plan. Report the goal as unplanned and set that as "
+    "a blocker, saying the Planner's reply could not be read as a plan -- this "
+    "is a seat that cannot hold its format, not a goal that resists "
+    "planning.\n"
+)
+
+
+# The stable openings of the two placeholders above, without the parts that
+# vary -- `_PLANNER_TIMED_OUT` carries the deadline, and neither is worth
+# reconstructing at a call site.
+_PLACEHOLDER_PLAN_OPENINGS = (
+    "1. The Planner did not respond within",
+    "1. The Planner's seat replied without a readable",
+)
+
+
+def plan_is_placeholder(plan: str) -> bool:
+    """Is this `plan` a note about the Planner failing, rather than a plan?
+
+    Both placeholders exist so `plan` is never empty -- see
+    `_PLANNER_NO_STEPS` for why that emptiness was load-bearing -- and both are
+    written on a path that also forces `next_agent` to Builder, deliberately.
+    So anything that wants to *override* that routing has to be able to tell
+    the two apart, and `_route_from_planner` is that caller: a plan nobody
+    wrote is not a query worth searching on, and the seat already stalled once.
+    """
+    return plan.lstrip().startswith(_PLACEHOLDER_PLAN_OPENINGS)
+
+
 def planner_node(state: AgentState) -> AgentState:
     """Planner: Interpret goal, create structured plan, choose next agent.
 
@@ -786,8 +851,31 @@ def planner_node(state: AgentState) -> AgentState:
         )
         return state
 
+    plan = parsed.get("plan", "")
+    if not plan.strip():
+        # The seat answered and the answer carried no steps -- see
+        # `_PLANNER_NO_STEPS` for why an empty `plan` cannot be written here.
+        # An existing plan beats the placeholder, as on the timeout path: a
+        # revise cycle already holds a real one, and re-running it is better
+        # information than a note about the seat.
+        state["plan"] = state.get("plan") or _PLANNER_NO_STEPS
+        # Builder rather than whatever the reply routed to, which is a second
+        # reason this cannot be left alone: `_gather_research` searches on
+        # `plan`, so a Researcher hop with no plan is a search for the empty
+        # string, and retrieval that thin is precisely what falls through to
+        # the Researcher's own model. The Builder is also the shorter path back
+        # to the Architect, the only node that can end the run.
+        state["next_agent"] = "Builder"
+        # Named in the feed the way the silent Researcher is, because changing
+        # the seat's model is the only thing that fixes it.
+        state["messages"].append(
+            "[Planner] Seat returned no plan steps; routing to Builder "
+            "(check the Planner's model)"
+        )
+        return state
+
     # Update state
-    state["plan"] = parsed.get("plan", "")
+    state["plan"] = plan
     state["next_agent"] = parsed.get("next_agent", "Builder")
     state["messages"].append(f"[Planner] Plan created. Next agent: {state['next_agent']}")
 
@@ -1157,6 +1245,60 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "git_dwell",
+            "description": (
+                "Run the whole git flow in order: survey, branch, stage, "
+                "commit, push, open a pull request. Prefer this over a series "
+                "of terminal git commands -- it runs the stages in the only "
+                "order that works, stops at the first failure and says which "
+                "stage stopped it. It never commits onto the default branch: "
+                "it creates a branch instead. It does NOT merge unless you put "
+                "'merge' in stages, and you should only do that if the goal "
+                "explicitly asked for the change to be merged."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": (
+                            "Commit message; its first line becomes the pull "
+                            "request title and the whole message its body. "
+                            "Required for the commit stage."
+                        ),
+                    },
+                    "stages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Stages to run, from: survey, branch, stage, "
+                            "commit, push, pr, merge. They always run in that "
+                            "order. Defaults to everything except merge."
+                        ),
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Paths to stage. Defaults to every change in the "
+                            "working tree; name paths to commit only your own."
+                        ),
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": (
+                            "Branch to create when HEAD is the default branch. "
+                            "Derived from the message when omitted."
+                        ),
+                    },
+                },
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "terminal_execute",
             "description": (
                 "Run one program in the project. There is no shell: the command is "
@@ -1227,6 +1369,38 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
 
 BUILDER_TOOL_NAMES = {tool["function"]["name"] for tool in BUILDER_TOOLS}
 
+# A `discuss_only` run gets **no** tools at all. This briefly allowed the three
+# read-only ones -- `filesystem_read`, `git_status`, `git_diff` -- on the
+# argument that reading changes nothing and grounds the discussion. The
+# operator asked for zero, and zero is the stronger guarantee to state: "the
+# Builder was offered no tools" needs no argument about which reads are
+# harmless, and it cannot be weakened later by a tool added to the read-only
+# set that turns out to do more than read.
+#
+# It is an empty set rather than a shorter list because the tools are then not
+# bound at all -- `builder_node` takes the same path as a seat whose model
+# cannot call tools, which already exists and is already tested. So there is no
+# tool loop to reason about on a discussion run, and the guarantee is
+# structural rather than a filter that has to be right.
+DISCUSSION_TOOL_NAMES: frozenset[str] = frozenset()
+
+DISCUSSION_TOOLS: list[dict[str, Any]] = []
+
+# Appended to the Builder's prompt on a discussion run. Without it the seat
+# spends its turns discovering the refusals one at a time: it is told to
+# implement the plan, reaches for `filesystem_write`, is refused, and tries
+# again -- `MAX_BUILDER_TOOL_TURNS` is 8, and a pass can exhaust it learning
+# what it was never going to be allowed to do. The same reason `cwd` went into
+# the tool schema rather than being left to an error message.
+DISCUSSION_NOTE = (
+    "\n\nThis run is DISCUSSION ONLY. You have no tools: you cannot read "
+    "files, write files, run commands or run tests. Work from the plan and the "
+    "research findings you were given. Do not report work as done and do not "
+    "list files under '## Files Modified' -- describe what you would change, "
+    "which files it would touch, and what you would need to verify it. That "
+    "description is the product of this run."
+)
+
 # How many times the Builder may think-and-call before the node gives up. Each
 # turn is a cloud round trip. The default leans on the Architect gate getting
 # another cycle anyway -- which holds only when a pass finishes a unit of work.
@@ -1295,6 +1469,7 @@ def _run_builder_tools(
     files_changed: list[str],
     tool_log: list[str],
     deadline: _Deadline,
+    allowed: frozenset[str] | set[str] = BUILDER_TOOL_NAMES,
 ) -> tuple[str, bool, bool, bool]:
     """Let the Builder call tools until it stops asking for them.
 
@@ -1343,14 +1518,21 @@ def _run_builder_tools(
             name = str(call.get("name", ""))
             args = dict(call.get("args") or {})
 
-            if name not in BUILDER_TOOL_NAMES:
+            if name not in allowed:
                 # Refused rather than run: the tool split is the whole point,
                 # and a Researcher tool reaching the Builder is a real bug
                 # worth surfacing in the report instead of silently serving.
-                result: Any = {
-                    "success": False,
-                    "error": f"{name} is not a Builder tool",
-                }
+                # Checked here as well as withheld from the offered list,
+                # because the two answer different questions: the list is what
+                # the model is told about, and this is what actually runs. On a
+                # discussion run that difference is the whole guarantee, so it
+                # does not rest on the model having read its tool schema.
+                why = (
+                    "cannot run on a discussion-only run"
+                    if name in BUILDER_TOOL_NAMES
+                    else "is not a Builder tool"
+                )
+                result: Any = {"success": False, "error": f"{name} {why}"}
             else:
                 try:
                     result = _call_mcp_tool_sync(name, args)
@@ -1377,7 +1559,24 @@ def _run_builder_tools(
             if not ok:
                 reason = _failure_reason(result)
                 outcome = f"failed: {reason}" if reason else "failed"
-            tool_log.append(f"{name}({target}){where} -> {outcome}")
+            if name == "git_dwell":
+                # This one call is a whole pipeline, and `ok` alone hides which
+                # part of it ran. A push that failed after a commit succeeded
+                # is a different situation from one that never committed, and
+                # the Architect rules on this line. So the stages are named,
+                # and the argument shown is the stage list rather than a path
+                # -- `git_dwell()` would otherwise log an empty target for the
+                # most consequential call the Builder can make.
+                target = ",".join(str(x) for x in (args.get("stages") or [])) or "default"
+                done = [
+                    e["stage"] for e in (result.get("stages") or [])
+                    if isinstance(e, dict) and e.get("ok")
+                ]
+                reached = f" [{' -> '.join(done)}]" if done else ""
+                outcome = outcome if ok else f"{outcome} at {result.get('stopped_at', '?')}"
+                tool_log.append(f"{name}({target}){reached} -> {outcome}")
+            else:
+                tool_log.append(f"{name}({target}){where} -> {outcome}")
 
             payload = json.dumps(result, default=str)
             if len(payload) > MAX_TOOL_RESULT_CHARS:
@@ -1650,8 +1849,15 @@ def builder_node(state: AgentState) -> AgentState:
         max(0.0, BUILDER_DEADLINE_SECONDS - VERIFY_RESERVE_SECONDS)
     )
 
+    # Set by the caller and never by an agent, like `expect_failures`. A seat
+    # cannot vote itself the right to act.
+    discuss_only = bool(state.get("discuss_only"))
+    allowed = DISCUSSION_TOOL_NAMES if discuss_only else BUILDER_TOOL_NAMES
+
     messages: list[Any] = [
-        SystemMessage(content=BUILDER_PROMPT),
+        SystemMessage(
+            content=BUILDER_PROMPT + (DISCUSSION_NOTE if discuss_only else "")
+        ),
         HumanMessage(
             content=f"{state_injection}\n\nPlan to implement:\n{plan}\n\n"
             f"Research findings:\n{research}"
@@ -1660,7 +1866,12 @@ def builder_node(state: AgentState) -> AgentState:
 
     llm = get_agent_llm("builder")
     try:
-        tool_llm = llm.bind_tools(BUILDER_TOOLS)
+        # Nothing is bound on a discussion run, which puts this node on the
+        # no-tool path below -- the same one a seat whose model cannot call
+        # tools already takes. There is then no tool loop at all, so "took no
+        # action" is a property of the code that ran rather than of a filter
+        # having been complete.
+        tool_llm = None if discuss_only else llm.bind_tools(BUILDER_TOOLS)
     except AttributeError:
         # A seat whose model cannot call tools at all -- StubLLM, or a tag
         # without tool support. It still reports; it just cannot change a file.
@@ -1682,7 +1893,7 @@ def builder_node(state: AgentState) -> AgentState:
         content = reply or ""
     else:
         content, exhausted, out_of_time, stopped = _run_builder_tools(
-            tool_llm, messages, files_changed, tool_log, loop_deadline
+            tool_llm, messages, files_changed, tool_log, loop_deadline, allowed
         )
 
     # Every runnable file the Builder wrote is executed before it gets to claim
@@ -1784,6 +1995,40 @@ def builder_node(state: AgentState) -> AgentState:
             + ", ".join(claimed)
         )
 
+    # A path the run wrote and something later removed is not a file on disk,
+    # and `files_changed` is read as though every entry were one -- by the
+    # console's "changed this machine" notice, and by the Architect through the
+    # state injection block. The run of 2026-09-11 ended naming four paths of
+    # which three did not exist: `gen_overview.py` and two under `/tmp`,
+    # written on one pass and deleted with `rm` on a later one, with nothing
+    # retracting them. That is the mirror of "described but not written" -- the
+    # report's harshest claim, which this function guards in the other
+    # direction a dozen lines above -- and it was unguarded.
+    #
+    # Dropped from the record rather than carried, because the record's readers
+    # take it for what is on disk now: a run whose every product was deleted
+    # has produced nothing, and reporting that plainly is the accurate account,
+    # not the empty one CLAUDE.md warns about. Named in the report rather than
+    # dropped silently, for the reason `_research_snippet` announces a cut --
+    # an entry that simply vanishes is indistinguishable from one that was
+    # never made, and the report is where the Architect finds out.
+    #
+    # This runs *after* `written`, deliberately. `written` is what answers the
+    # "described but not written" accusation, and it has to keep seeing the
+    # whole record: a file this pass wrote and then removed did come from a
+    # successful write call, and naming it in the report is not a lie.
+    removed_paths = [path for path in all_files_changed if not Path(path).exists()]
+    if removed_paths:
+        all_files_changed = [
+            path for path in all_files_changed if path not in removed_paths
+        ]
+        builder_report += (
+            "\n\nWritten earlier and no longer on disk: "
+            + ", ".join(removed_paths)
+            + ". Dropped from the run's file record, which names what is on "
+            "disk now."
+        )
+
     blockers = _clean_blockers(parsed.get("next_steps_blockers", ""))
 
     # A failed verification outranks whatever the model concluded: it wrote a
@@ -1861,6 +2106,12 @@ def builder_node(state: AgentState) -> AgentState:
             f"Stopped at the {int(BUILDER_DEADLINE_SECONDS)}s deadline. "
             f"Files: {len(files_changed)}"
         )
+    elif discuss_only:
+        # Never "Implementation complete" -- nothing was implemented, and the
+        # Architect rules on this line. The same rule the stop and the deadline
+        # already follow: a pass that could not act must not read as one that
+        # acted.
+        summary = "Discussion only: proposal ready, nothing was changed"
     else:
         summary = f"Implementation complete. Files: {len(files_changed)}"
     # Every count above is this pass, which is what just happened and so what

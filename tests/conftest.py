@@ -12,6 +12,9 @@ quietly mutating the developer's corpus as a side effect of running the suite.
 It took the suite from 28s to 138s and broke a stop test whose five-second wait
 had been generous. Tests that mean to exercise the phase turn it back on and
 answer it with `MockTransport`.
+
+The corpus bootstrap is switched off here for the same reason -- see
+`_no_corpus_bootstrap`.
 """
 
 from __future__ import annotations
@@ -67,3 +70,19 @@ def _no_online_research(monkeypatch):
     every request from a mock transport.
     """
     monkeypatch.setattr(_web_research, "WEB_SEARCH_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def _no_corpus_bootstrap(monkeypatch):
+    """No test builds a corpus, and none rebuilds the developer's.
+
+    `rpc_run_goal` indexes the project when there is nothing to search, which
+    is what makes a fresh install work. Left on, every test that starts a run
+    would index the whole checkout -- once per test, and in CI every time,
+    since `knowledge/` is not committed and so every test there starts from
+    `absent`. Switched off here for the same reason and with the same force as
+    the online phase above; the tests that mean to exercise it turn it back on
+    and hand it fakes.
+    """
+    import serve
+    monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", False)

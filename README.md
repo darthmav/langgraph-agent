@@ -13,9 +13,6 @@ embedding model.
 ## 🎨 Web Console
 
 ```bash
-# Build the knowledge graph first — the Graph tab is empty without it
-python scripts/reindex.py
-
 # Quick launch
 ./launch_console.sh
 
@@ -27,7 +24,7 @@ python serve.py
 Five tabs: **Engineer** (give the Architect a goal, watch the stages),
 **Graph** (the knowledge graph as a force-directed map — press *Sweep all*),
 **Retrieval** (semantic search plus an RPC telemetry log), **Corpus**
-(the indexed documents, and buttons to upload, reindex, export or clear them),
+(the indexed documents, and buttons to upload, export or clear them),
 and **State** (the raw `AgentState`).
 
 *Attach* — in the Engineer tab, beside Run — puts a document of your own into
@@ -55,19 +52,30 @@ reindex regenerates them.
 holding an empty index — the same shape a reindex leaves behind. It arms on the
 first click and disarms itself after a few seconds.
 
-**Nothing builds a corpus but you.** A fresh checkout has none, starting the
-console does not make one, and neither does polling it, searching it or asking
-whether it exists — the reads report `no corpus — nothing indexed` and leave
-the disk alone. Indexing is the only act that creates the store, which is why
-the header keeps three states apart: *absent* (nobody has indexed here),
+**Every run brings the corpus up to date, and there is nothing to press.**
+There is no Reindex button. A run indexes the project before the Architect
+opens — building the corpus when there is none, and re-reading whatever has
+changed since when there is — so the seats always search the project as it is
+now. That is affordable because a document whose text has not changed keeps the
+vectors it already has: measured on this project, 52.0s to embed all 77 files
+and 0.09s for a rebuild with nothing to do. Without it a fresh install runs
+happily against no corpus at all — the search answers "no corpus", each
+Researcher falls back to its own model, and nothing reports a problem — and a
+corpus built once drifts from the project in exactly the same silence. Two things index and nothing else does — a run, and embedding a document into
+the corpus from the console; there is no script, no install step and no button.
+Set `INDEX_PROJECT_BEFORE_RUN=0` for a machine that wants its corpus frozen.
+Indexing being the only act that creates the store is why the header keeps
+three states apart: *absent* (nobody has indexed here),
 *empty* (a corpus that exists and holds nothing — what *Clear corpus* leaves),
 and the counts, once there is something to count. *Export* and *Clear* are
 disabled while it is absent; creating a store in order to empty it would leave
 behind the thing you were asking to be rid of. The local embedding model loads
 on the first index or search, not at startup.
 
-*Clear corpus*, *Reindex project* and an upload are all refused while a run is
-in flight, and the refusal says which run. The Researcher searches this corpus, and
+*Clear corpus* and an upload are both refused while a run is in flight, and
+the refusal says which run. (The rebuild is the exception that proves it: it
+happens *before* the run starts, which is the only ordering that obeys the same
+rule rather than needing an exemption from it.) The Researcher searches this corpus, and
 changing it underneath a run does not fail its search — an emptied corpus
 answers "nothing found", and one midway through a rebuild answers from the part
 of itself that exists so far. The run would plan around an absence that was
@@ -124,6 +132,15 @@ START → Architect → Planner → (Researcher | Builder) → Architect → END
 The Architect runs twice per cycle: once to set direction before anything is
 planned, and again as the approval gate. The Builder does not decide the work is
 finished — it reports, and the authority that set the constraints rules on it.
+
+**The opening cycle always reaches the Researcher**, whichever agent the Planner
+named. A run rebuilds the corpus before the Architect opens and may embed
+fetched web pages into it, and nothing else forces anything to read it: the
+Researcher ran only when a plan happened to route there, so a confidently
+written plan meant a run that built a corpus and consulted none of it. On a goal
+the corpus answers, that hop costs a search and no model call at all — retrieval
+returns straight from GraphRAG whenever the top hit clears the relevance floor.
+Later cycles route as the Planner asks.
 
 ### The Four Agents
 
@@ -308,10 +325,11 @@ Team runs let the Builder write files, so each one runs in its own sandbox
 directory (a `chdir`), never in the project. Reports land in
 `reports/diagnostics/<timestamp>/` as both `report.md` and `results.json`.
 
-> Run `python scripts/reindex.py` first if you care about the results. Against
-> an empty corpus every Researcher falls back to its model, which reads exactly
-> like a bad Researcher seat — the script warns when it finds one, and records
-> the corpus size in the report.
+> Start one run from the console first if you care about the results: these
+> exercises call the seats directly rather than through `rpc_run_goal`, so
+> nothing builds the corpus for them. Against an empty corpus every Researcher
+> falls back to its model, which reads exactly like a bad Researcher seat — the
+> script warns when it finds one, and records the corpus size in the report.
 
 Nothing here is a benchmark. One short exercise per configuration is a data
 point against non-deterministic models, not a ranking.
@@ -377,6 +395,7 @@ unified MCP-style interface:
 | `filesystem_write` | Builder | Write a file |
 | `git_status` | Builder | `git status --porcelain` |
 | `git_diff` | Builder | `git diff` |
+| `git_dwell` | Builder | The whole git flow in order: survey, branch, stage, commit, push, open a PR. Never commits onto the default branch, and never merges unless `merge` is named in `stages` |
 | `terminal_execute` | Builder | Run one program, no shell (killed after `TERMINAL_TIMEOUT_SECONDS`, default 60; pass `timeout` to raise) |
 | `run_tests` | Builder | Run `pytest` |
 
@@ -411,8 +430,6 @@ tool name to the external server.
 ├── tests/
 │   └── test_graph.py           # Graph tests
 ├── scripts/
-│   ├── reindex.py              # Rebuild the GraphRAG corpus
-│   ├── index_knowledge.py      # First-time indexing
 │   └── diagnose_seats.py       # Which model works in which seat
 ├── example_usage.py            # Demo script
 ├── test_cloud.py               # Cloud LLM end-to-end test

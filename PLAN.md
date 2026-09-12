@@ -33,7 +33,7 @@ The implementation follows the documented architecture: Architect, Planner, Rese
 4. **Researcher tool boundary** — `researcher_node` calls GraphRAG through the MCP-style client (`search_knowledge_graph`, `query_knowledge_graph`), not by importing the knowledge base directly.
 5. **Builder tool boundary** — `builder_node` uses `filesystem_write` (and the other builder tools) through the MCP-style client. The Architect and Planner get no tools.
 6. **State injection** — empty fields render as `(empty)` on every turn.
-7. **GraphRAG read-only** — only `search_knowledge_graph` and `query_knowledge_graph` are exposed; indexing is done via `scripts/reindex.py` / `scripts/index_knowledge.py`.
+7. **GraphRAG read-only** — only `search_knowledge_graph` and `query_knowledge_graph` are exposed; indexing happens before a run starts, and when a document is embedded into the corpus.
 8. **Step limit** — `MAX_STEPS = 8` prevents infinite loops, counted at the Architect gate rather than at the Builder so that Planner/Researcher cycles cannot run uncounted. `RECURSION_LIMIT` is derived from it.
 9. **No `temperature` to modern Anthropic models** — sampling parameters were removed on the Opus 5 / Sonnet 5 / 4.6+ families and are rejected with a 400 that reads like an auth failure. `_accepts_temperature()` gates this.
 

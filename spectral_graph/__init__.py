@@ -11,6 +11,7 @@ Core functionality:
 - Fiedler vector and algebraic connectivity
 - Spectral clustering and embedding
 - Cheeger constant and bounds
+- Dolphin model mesh representation and spectral analysis
 
 Example usage:
     import networkx as nx
@@ -20,6 +21,18 @@ Example usage:
     L = laplacian_matrix(G)
     fiedler_val, fiedler_vec = fiedler_vector(G)
     labels = spectral_clustering(G, k=2)
+
+Example with DolphinModel:
+    import numpy as np
+    from spectral_graph import DolphinModel, SpectralAnalyzer
+
+    # Create a simple mesh
+    vertices = np.array([[i, 0, 0] for i in range(5)], dtype=float)
+    model = DolphinModel(vertices)
+    
+    # Analyze spectrally
+    analyzer = SpectralAnalyzer.from_dolphin_model(model)
+    eigenvalues = analyzer.get_sorted_eigenvalues()
 """
 
 from spectral_graph.clustering import (
@@ -27,6 +40,10 @@ from spectral_graph.clustering import (
     conductance,
     spectral_clustering,
     sweep_cut,
+)
+from spectral_graph.dolphin_model import (
+    DolphinModel,
+    SpectralAnalyzer,
 )
 from spectral_graph.embedding import (
     embed_and_normalize,
@@ -76,4 +93,7 @@ __all__ = [
     "conductance",
     "sweep_cut",
     "cheeger_bounds",
+    # Dolphin model and spectral analysis
+    "DolphinModel",
+    "SpectralAnalyzer",
 ]

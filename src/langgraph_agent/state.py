@@ -47,6 +47,11 @@ class AgentState(TypedDict):
         next_agent: Which agent runs next ("Researcher" | "Builder" | "END")
         research_status: Status from Researcher (ready_for_builder | need_replan | no_relevant_knowledge)
         blockers: What's blocking progress (set by Builder when stuck)
+        discuss_only: Set by the caller, never by an agent. The seats reason
+            about the goal and the Builder is offered read-only tools alone --
+            no write, no terminal, no tests -- so a run cannot change the
+            machine. The online research phase is off for the same reason: it
+            writes pages to disk and embeds them.
         files_changed: List of file paths modified by Builder
         failed_verification: Files the Builder wrote that did not run. Set by
             the Builder every pass, so it clears once a file is fixed. A
@@ -72,5 +77,6 @@ class AgentState(TypedDict):
     blockers: str
     files_changed: list[str]
     failed_verification: list[str]
+    discuss_only: bool
     expect_failures: bool
     step_count: int

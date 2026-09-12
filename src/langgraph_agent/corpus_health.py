@@ -17,11 +17,13 @@ side, which is what this does.
 
 It lives apart from `graphrag_server` rather than inside it for a reason worth
 recording: the code was written there first and pushed that module from 98,920
-characters to 104,582, past `MAX_INDEXABLE_BYTES` -- so the file that defines
-the corpus would have been dropped from the corpus by the next reindex, in
-silence, as the direct result of adding the check meant to catch exactly that.
-`graphrag_server` sits close enough to the limit that this is a live hazard for
-any edit, which is what `oversized` below is for.
+characters to 104,582, past the 100,000-character `MAX_INDEXABLE_BYTES` of the
+time -- so the file that defines the corpus would have been dropped from the
+corpus by the next reindex, in silence, as the direct result of adding the
+check meant to catch exactly that. That the limit, rather than the subject
+matter, decided where this module begins is why it was eventually raised; see
+`MAX_INDEXABLE_BYTES`. The split stands on its own merits and `oversized`
+below still reports a file the walk offers and the indexer must skip.
 
 Three states, and they are not the same request:
 

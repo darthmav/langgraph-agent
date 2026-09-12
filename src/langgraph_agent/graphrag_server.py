@@ -10,6 +10,7 @@ Or with stdio transport for MCP:
 """
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -96,9 +97,11 @@ RETRIEVAL_RELEVANCE_FLOOR = 0.37
 # belt, and the console -- and a corpus that reads as absent in one place and
 # as merely empty in another is the confusion this whole path exists to avoid.
 NO_CORPUS_NOTE = (
-    "No corpus has been indexed. Nothing is retrieved and nothing is loaded "
-    "until one is built: run `python scripts/reindex.py`, or press Reindex "
-    "project on the console's Corpus tab."
+    "No corpus has been indexed here, so there is nothing to retrieve. Two "
+    "things build one: a run, which indexes the project it was started from "
+    "before the Architect opens, and embedding a document into the corpus from "
+    "the console. Nothing else does. Reaching this note during a run means the "
+    "walk found nothing to index, or INDEX_PROJECT_BEFORE_RUN is off."
 )
 
 
@@ -163,6 +166,15 @@ NO_CORPUS_NOTE = (
 # exactly what the paragraph above refuses. `System`, `Search`, `State` and
 # `Verification` were nominated by rank and cleared by the count: `System`
 # alone carries 22 free capitals, so the entity is earned.
+#
+# It moved again on 2026-09-12, which is the point of the guard rather than a
+# surprise: `Reported` and `Computed` each crossed the four-document floor at
+# zero position-free capitals, as prose was written about what a phase reports
+# and about what is computed where. Both are the `Measured` case exactly -- the
+# writing-up of a change minting the entity -- and both joined the list by the
+# same count. The lesson is not the two words: it is that this list is a claim
+# about a vocabulary, and the vocabulary grows every time someone documents
+# something.
 ENTITY_STOPWORDS = frozenset(
     word.lower()
     for word in """
@@ -187,7 +199,7 @@ ENTITY_STOPWORDS = frozenset(
     Measured Initialize Dense Build Maximum Empty Skipping Dictionary Apply
     Refused Whether Split Asserted Degree Shared Based Demonstrates References
     Generate Extract Point Seconds Deliberately Named Built Asking Pinned
-    Insert Tests Write
+    Insert Tests Write Reported Computed Cached Complete Convert Dimension
     """.split()
 )
 
@@ -197,7 +209,7 @@ ENTITY_STOPWORDS = frozenset(
 # embedded badly, it is **silently truncated and the tail discarded**.
 #
 # That is what this constant exists to stop. A document used to be embedded
-# whole, in one `encode()` call, with `MAX_INDEXABLE_BYTES` allowing 100 KB --
+# whole, in one `encode()` call, with `MAX_INDEXABLE_BYTES` then allowing 100 KB --
 # so the vector for a 46 KB file was computed from its first ~1,000 characters
 # and nothing else. Measured on this project's own corpus before chunking: 73
 # of 77 documents over the limit, 224,809 tokens present and 19,147 embedded,
@@ -226,6 +238,27 @@ CHUNK_OVERLAP_TOKENS = 48
 # id is a project-relative path, which cannot contain "#" on any filesystem
 # this runs on, so the split back to a document is unambiguous.
 CHUNK_ID_SEPARATOR = "#"
+
+
+def _content_sha(content: str) -> str:
+    """A fingerprint of a document's text, stored on every chunk it becomes.
+
+    This is what lets a rebuild keep the vectors it already has. Embedding is
+    the only expensive part of indexing this project -- measured warm, a full
+    rebuild of 77 files and 1,618 chunks takes 52.0s, of which reading every
+    file, hashing it, fetching the store's metadata and rebuilding the whole
+    entity graph account for 0.1s. So a rebuild that re-embeds only what
+    changed costs what the change costs, and one where nothing changed costs
+    nothing at all and never loads the model.
+
+    A hash rather than an mtime: a checkout, a `git stash`, a file copied back
+    into place all move the timestamp without changing a byte, and re-embedding
+    a corpus because someone switched branches is the cost this exists to
+    avoid. Truncated to 16 hex characters because it is compared, never
+    trusted -- a collision re-uses a stale vector, which the next edit to that
+    file corrects, and 64 bits of it is not a risk anyone here will meet.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 # How many chunks to pull per requested result before collapsing them onto
 # their documents. A query that matches one document strongly can match several
@@ -510,6 +543,14 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
 
         if chunks:
             base = dict(metadata or {})
+            # The fingerprint rides on every chunk, so `index_project_files`
+            # can ask "is this document still the one I embedded?" from the
+            # metadata it already fetches to prune with. Computed here rather
+            # than passed in, for the reason `doc_id` and `chunk_count` are:
+            # it describes what the store did with the text, not what the
+            # caller knows about the file, and one caller forgetting it would
+            # silently cost that document its reuse.
+            base["sha"] = _content_sha(content)
             # Chunks are embedded in one batched call rather than one per
             # chunk: the model is the expensive thing on this machine and
             # batching is most of what makes a reindex of ~1,100 chunks
@@ -527,7 +568,29 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
                 ],
             )
 
-        # Add to graph as a node.
+        self._add_to_graph(doc_id, content, metadata)
+
+        # The lexical index describes a corpus that no longer exists. Dropped
+        # rather than amended: the next search rebuilds it from the store in
+        # milliseconds, and an index maintained in parallel with Chroma is a
+        # second account of the same corpus, free to disagree with it.
+        self._lexical_index = None
+
+        self._save_graph()
+        return len(chunks)
+
+    def _add_to_graph(
+        self, doc_id: str, content: str, metadata: dict[str, Any] | None = None
+    ) -> None:
+        """The half of `add_document` that costs nothing: node and entities.
+
+        Split out because a rebuild that keeps a document's vectors still has
+        to put it back in the graph -- `index_project_files` clears the graph
+        up front, so a document whose embeddings were reused would otherwise
+        vanish from it while staying perfectly searchable. Entity extraction is
+        a regex over the text and the whole graph rebuilds in 0.04s, so the
+        cheap half is simply always done.
+        """
         # `type` on a node is structural -- document vs entity -- and drives how
         # the console draws it. Metadata carries its own `type` (python,
         # markdown), which collides as a duplicate keyword and takes down the
@@ -585,15 +648,6 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         for entity in set(entities):
             self.graph.add_node(entity, type="entity")
             self.graph.add_edge(doc_id, entity, relation="mentions")
-
-        # The lexical index describes a corpus that no longer exists. Dropped
-        # rather than amended: the next search rebuilds it from the store in
-        # milliseconds, and an index maintained in parallel with Chroma is a
-        # second account of the same corpus, free to disagree with it.
-        self._lexical_index = None
-
-        self._save_graph()
-        return len(chunks)
 
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Search the knowledge base.
@@ -1190,9 +1244,9 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         }
 
 
-# Files worth indexing, and the directories that only add noise. Shared by
-# `scripts/reindex.py` and the console's reindex button so the two cannot drift
-# into indexing different corpora.
+# Files worth indexing, and the directories that only add noise. One list, so
+# the rebuild a run does and the walk `corpus_health` compares against cannot
+# drift into describing different corpora.
 PROJECT_INDEX_PATTERNS = ("**/*.py", "**/*.md", "**/*.txt", "**/*.rst")
 # Matched as plain substrings of the path, so no globs: "*.egg-info" never
 # matched anything and let build metadata (SOURCES.txt, top_level.txt) into
@@ -1211,9 +1265,34 @@ PROJECT_INDEX_EXCLUDES = (
     "reports/diagnostics/",
 )
 
-# Above this size a file is documentation of something else, not a unit of
-# knowledge, and it would dominate the embedding budget.
-MAX_INDEXABLE_BYTES = 100_000
+# Above this size a file is not a document at all -- a data dump, a minified
+# bundle, a log -- and reading it into the corpus indexes something nobody
+# wrote. It was 100,000, and that number outlived its own justification: it
+# said such a file "would dominate the embedding budget", which was true when
+# `add_document` embedded a whole file as ONE vector and a long document's
+# single embedding competed with everyone else's. Chunking ended that, and
+# `search` collapsing chunks back onto documents ended it twice -- a document
+# now takes exactly one result slot however many chunks it holds. Measured on
+# this corpus: CLAUDE.md carries 7.1% of all 1,687 chunks and returned in
+# exactly 1 of 5 slots on every query tried, never more.
+#
+# What the old number did instead was dictate the shape of the project.
+# `corpus_health.py` exists as a separate module because adding the staleness
+# check pushed `graphrag_server.py` from 98,920 characters to 104,582 -- the
+# module that defines the corpus would have dropped out of it. By 2026-09-11
+# `nodes.py` stood at 82% of the limit, `graphrag_server.py` at 75%,
+# `test_graph.py` at 73%, and CLAUDE.md had 13 characters left, so the next
+# paragraph anyone wrote would have silently cost the project its own
+# documentation. A constant that decides how files must be split is not
+# measuring anything about knowledge.
+#
+# The remaining real risk sets the ceiling, and it is why this is 250,000 and
+# not unbounded: `search` retrieves a window of chunks *before* collapsing
+# them, so a document holding a large enough share of the corpus can fill that
+# window with itself and starve every other source -- the case
+# `SEARCH_ESCALATION` widens the window for. At 7.1% the largest document here
+# is nowhere near it; a file several times this limit would be.
+MAX_INDEXABLE_BYTES = 250_000
 
 # Where a document uploaded from the console lands, relative to the project
 # root. An upload is written to disk *before* it is embedded, and that ordering
@@ -1409,28 +1488,45 @@ def index_project_files(
     # entire corpus on every reindex and rebuild it from scratch -- which
     # ends in the same place here, but would quietly become a full re-embed of
     # every document the moment anything reindexed a subset.
+    #
+    # The same pass reads each surviving row's fingerprint. A document whose
+    # text still hashes to what the store holds keeps the vectors it has: the
+    # rebuild is then proportional to what actually changed rather than to how
+    # big the corpus is, which is what makes it something a run can do for
+    # itself before the Architect opens. Measured warm on this project, 77
+    # files and 1,618 chunks: 52.0s re-embedding everything, 0.1s when nothing
+    # changed -- and in that case the embedding model is never loaded at all.
+    stored_sha: dict[str, str] = {}
     try:
         existing = kb.collection.get(include=["metadatas"])
         existing_ids = existing.get("ids") or []
         existing_metadatas = existing.get("metadatas") or []
-        stale = [
-            chunk_id
-            for i, chunk_id in enumerate(existing_ids)
-            if _document_id_of(
-                chunk_id,
-                existing_metadatas[i] if i < len(existing_metadatas) else None,
-            )
-            not in wanted
-        ]
+        stale: list[str] = []
+        stale_documents: set[str] = set()
+        for i, chunk_id in enumerate(existing_ids):
+            row = existing_metadatas[i] if i < len(existing_metadatas) else None
+            document = _document_id_of(chunk_id, row)
+            if document not in wanted:
+                stale.append(chunk_id)
+                stale_documents.add(document)
+            elif row and row.get("sha"):
+                stored_sha[document] = str(row["sha"])
+        # Counted in documents, not rows: "3 chunks pruned" is a fact about
+        # the store, and the caller wants to know how many *files* stopped
+        # answering searches. It is also the only half of a rebuild's work that
+        # `embedded` cannot see -- a pass that deleted a document and re-read
+        # nothing did something, and must not report itself as a no-op.
+        dropped = len(stale_documents)
         if stale:
             kb.collection.delete(ids=stale)
     except Exception as exc:  # pragma: no cover - Chroma unavailable
         errors_pre = [f"pruning stale documents: {exc}"]
+        dropped = 0
     else:
         errors_pre = []
     kb.graph.clear()
 
-    indexed, skipped = 0, 0
+    indexed = embedded = reused = skipped = 0
     errors: list[str] = list(errors_pre)
 
     for file_path in files:
@@ -1440,7 +1536,17 @@ def index_project_files(
                 skipped += 1
                 continue
 
-            kb.add_document(str(file_path), content, _document_metadata(file_path))
+            doc_id = str(file_path)
+            metadata = _document_metadata(file_path)
+            if stored_sha.get(doc_id) == _content_sha(content):
+                # Its chunks and their vectors are still correct and were not
+                # pruned above. Only the graph has to come back, because this
+                # function cleared it -- and that half is free.
+                kb._add_to_graph(doc_id, content, metadata)
+                reused += 1
+            else:
+                kb.add_document(doc_id, content, metadata)
+                embedded += 1
             indexed += 1
         except Exception as exc:
             errors.append(f"{file_path}: {exc}")
@@ -1458,7 +1564,18 @@ def index_project_files(
     kb._save_graph()
     kb._lexical_index = None
 
-    report: dict[str, Any] = {"indexed": indexed, "skipped": skipped, "errors": errors}
+    # `indexed` is how many documents the corpus now holds, which is what every
+    # caller has always printed. `embedded` and `reused` split that by cost --
+    # the only number that moves when a rebuild is nearly a no-op, and the one
+    # thing that says whether a rebuild did any work at all.
+    report: dict[str, Any] = {
+        "indexed": indexed,
+        "embedded": embedded,
+        "reused": reused,
+        "dropped": dropped,
+        "skipped": skipped,
+        "errors": errors,
+    }
     report.update(kb.stats())
     return report
 

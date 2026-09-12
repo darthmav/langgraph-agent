@@ -365,6 +365,42 @@ def test_every_file_the_walk_offers_is_indexable():
     )
 
 
+# The share of MAX_INDEXABLE_BYTES a file may reach before this suite starts
+# asking for it to be dealt with. It exists because the guard above is a cliff:
+# it fires the moment a file is already too large to index, which is the moment
+# the only remaining fix is emergency surgery. CLAUDE.md reached 13 characters
+# of headroom and nothing said a word until a paragraph would not fit, and
+# `graphrag_server.py` had already been split once for the same reason. 0.8
+# leaves a fifth of the budget to notice in, which on the current limit is
+# 50,000 characters -- room to plan a split rather than perform one.
+INDEXABLE_WARN_RATIO = 0.8
+
+
+def test_no_file_is_creeping_up_on_the_index_limit():
+    """The ramp the cliff above never gave anyone.
+
+    A file that crosses this is not broken and nothing is dropped yet -- it is
+    a file to split, move detail out of, or deliberately exclude, decided with
+    time in hand. Raise the limit only on the reasoning at
+    `MAX_INDEXABLE_BYTES` itself, never to silence this.
+    """
+    threshold = int(MAX_INDEXABLE_BYTES * INDEXABLE_WARN_RATIO)
+    creeping = sorted(
+        (
+            (len(t), p)
+            for p in iter_project_files(str(ROOT))
+            if (t := (ROOT / p).read_text(encoding="utf-8", errors="replace"))
+            and len(t) > threshold
+        ),
+        reverse=True,
+    )
+    assert not creeping, (
+        f"within {1 - INDEXABLE_WARN_RATIO:.0%} of MAX_INDEXABLE_BYTES "
+        f"({MAX_INDEXABLE_BYTES:,}): "
+        + ", ".join(f"{p} at {n:,} characters" for n, p in creeping)
+    )
+
+
 # A capital is forced when position explains it: the first word of a line, the
 # word after a full stop, the first cell of a table row. Anything else is a
 # capital the writer chose.

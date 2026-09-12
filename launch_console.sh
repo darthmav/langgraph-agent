@@ -86,8 +86,8 @@ fi
 echo ""
 echo "Starting frontend server on ${URL}..."
 
-echo "  (No corpus is loaded until you ask for one: press Reindex project"
-echo "   on the Corpus tab, or run python scripts/reindex.py)"
+echo "  (No corpus is loaded by starting the server. The first run indexes"
+echo "   this directory before the Architect opens.)"
 
 python serve.py > /tmp/ambiguity-console.log 2>&1 &
 SERVER_PID=$!

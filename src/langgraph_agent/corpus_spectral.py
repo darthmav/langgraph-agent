@@ -6,9 +6,9 @@ still writes `kb.topics()` and `stats()` still reaches `self.connectivity()`;
 nothing about the API moved.
 
 They live here because of a limit they were quietly breaking.
-`MAX_INDEXABLE_BYTES` is 100,000 characters and `graphrag_server` had grown to
-100,132 -- so the module defining the corpus was being **skipped by every
-reindex**, silently, and could not be retrieved by the Researcher that reads
+`MAX_INDEXABLE_BYTES` was 100,000 characters then and `graphrag_server` had
+grown to 100,132 -- so the module defining the corpus was being **skipped by
+every reindex**, silently, and could not be retrieved by the Researcher that reads
 this project's own code. It crossed the line twice in one afternoon, once from
 adding the staleness check and once from two one-line guards, which is what
 makes it structural rather than incidental: any edit to that file was a coin

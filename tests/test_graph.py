@@ -152,20 +152,75 @@ def test_research_status_enum():
     assert ResearchStatus.NO_RELEVANT_KNOWLEDGE.value == "no_relevant_knowledge"
 
 
-def test_simple_task_skips_research(agent_graph):
-    """Test that a straightforward file-creation task skips research.
+def test_a_fully_specified_task_still_retrieves_once(agent_graph):
+    """Even a task that needs no research reads the corpus before building.
 
-    Per the documentation happy-path diagram, the Planner should route a
-    fully-specified task directly to the Builder.
+    This test asserted the opposite until 2026-09-12: a fully-specified goal
+    went Planner -> Builder and `research` stayed empty, which is what the
+    documentation's happy path described. What that path actually produced was
+    a run that built a 77-document corpus, embedded 8 fetched web pages into
+    it, and then consulted none of it -- so the assertion is inverted rather
+    than deleted. The opening cycle retrieves; every later one routes as the
+    Planner asks.
     """
     state = initial_state("Create a hello.txt file containing 'Hello World'")
 
     result = agent_graph.invoke(state)
 
     assert result["plan"] != ""
-    assert result["research"] == ""
-    assert result["next_agent"] == "Builder"
+    assert result["research"] != ""
+    assert result["research_status"] != ""
     assert result["step_count"] > 0
+
+
+def test_the_forced_hop_is_only_the_first_one(agent_graph):
+    """A Planner naming the Builder is obeyed once the Researcher has run.
+
+    The override is about the corpus never being read, not about overruling the
+    Planner, so it has to stop after one hop -- otherwise a revise cycle
+    re-searches the same corpus with the same plan every time round the loop.
+    `research_status` is the marker, and this is the test that would catch it
+    being read from `research` instead: a seat that answers with nothing leaves
+    findings empty and a status set.
+    """
+    from langgraph_agent.graph import _route_from_planner
+
+    fresh = initial_state("Create a hello.txt file")
+    fresh["next_agent"] = "Builder"
+    fresh["plan"] = "1. Write the file."
+    assert _route_from_planner(fresh) == "researcher"
+
+    been_round = dict(fresh)
+    been_round["research"] = ""
+    been_round["research_status"] = ResearchStatus.NO_RELEVANT_KNOWLEDGE.value
+    assert _route_from_planner(been_round) == "builder"
+
+
+def test_a_planner_that_failed_is_not_sent_to_research(agent_graph):
+    """The two placeholder plans keep their route to the Builder.
+
+    Both are written when the Planner did not produce steps -- a stall, or a
+    reply that could not be read -- and both pick the Builder deliberately: it
+    is the shorter path back to the Architect, the only node that can end a run
+    whose seats are already failing. Searching on a plan nobody wrote is also
+    the thin retrieval that falls through to the Researcher's own model, which
+    is the second slow seat such a run least needs.
+    """
+    from langgraph_agent.graph import _route_from_planner
+    from langgraph_agent.nodes import (
+        _PLANNER_NO_STEPS,
+        _PLANNER_TIMED_OUT,
+        NODE_DEADLINE_SECONDS,
+    )
+
+    for placeholder in (
+        _PLANNER_TIMED_OUT.format(seconds=int(NODE_DEADLINE_SECONDS)),
+        _PLANNER_NO_STEPS,
+    ):
+        state = initial_state("Create a hello.txt file")
+        state["next_agent"] = "Builder"
+        state["plan"] = placeholder
+        assert _route_from_planner(state) == "builder"
 
 
 def test_state_injection_shows_empty():
@@ -307,6 +362,9 @@ class _ToolCallingLLM:
 
 def test_builder_writes_through_a_tool_call(monkeypatch, tmp_path):
     """The Builder's file changes come from real tool calls, not from prose."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "written.txt"
@@ -449,6 +507,9 @@ def test_builder_runs_the_python_it_writes(monkeypatch, tmp_path):
     This is the failure that shipped: a file written, reported complete, and
     approved -- which raised an AssertionError the first time it was run.
     """
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "broken.py"
@@ -471,6 +532,9 @@ def test_builder_runs_the_python_it_writes(monkeypatch, tmp_path):
 
 def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
     """A file that executes cleanly verifies, and sets no blocker."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "fine.py"
@@ -488,6 +552,9 @@ def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
 
 def test_builder_only_executes_runnable_files(monkeypatch, tmp_path):
     """Markdown has nothing to run; the verification pass must skip it."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "notes.md"
@@ -650,6 +717,9 @@ def test_a_later_pass_keeps_what_an_earlier_one_wrote(monkeypatch, tmp_path):
 
 def test_a_new_file_adds_to_the_record_rather_than_replacing_it(monkeypatch, tmp_path):
     """Two passes that each write a file end with both on the record."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     earlier = tmp_path / "earlier.py"
@@ -670,8 +740,154 @@ def test_a_new_file_adds_to_the_record_rather_than_replacing_it(monkeypatch, tmp
     assert result["files_changed"] == [str(earlier), str(target)]
 
 
+class _NoToolLLM:
+    """A Builder pass that calls no tools and names a path it wrote earlier.
+
+    Used for the retraction cases: the file is gone from disk, this pass did
+    not write anything, and the report still mentions it.
+    """
+
+    def __init__(self, named: str = "") -> None:
+        self._named = named
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content=(
+                "## Changes Made\nRemoved the scratch file.\n\n"
+                f"## Files Modified\n- {self._named}\n\n"
+                "## Next Steps / Blockers\nnone\n"
+            )
+        )
+
+
+def test_a_file_deleted_since_it_was_written_leaves_the_record(monkeypatch, tmp_path):
+    """The run of 2026-09-11 ended naming three paths that did not exist.
+
+    It wrote `gen_overview.py` and two scratch scripts under `/tmp` on one
+    pass, deleted them with `rm` on a later one, and nothing retracted them --
+    so the console's "changed this machine" notice, a safety notice about files
+    on disk, named three files nobody could find. That is the mirror of
+    "described but not written", and it was the unguarded direction.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"          # written by an earlier pass, since deleted
+    kept = tmp_path / "kept.py"             # written by an earlier pass, still there
+    kept.write_text("print('still here')\n")
+    target = tmp_path / "new.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesFileLLM(target, "print('ok')\n"),
+    )
+
+    state = initial_state("Carry on")
+    state["plan"] = "1. Write the new file"
+    state["files_changed"] = [str(gone), str(kept)]
+
+    result = builder_node(state)
+
+    assert str(gone) not in result["files_changed"]
+    assert result["files_changed"] == [str(kept), str(target)]
+
+
+def test_a_dropped_path_is_named_rather_than_vanishing(monkeypatch, tmp_path):
+    """A silent retraction is indistinguishable from an entry never made.
+
+    The Architect rules on this report, so the removal has to be legible there
+    -- the same reason `_research_snippet` announces a cut instead of trimming
+    quietly.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"
+    target = tmp_path / "new.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesFileLLM(target, "print('ok')\n"),
+    )
+
+    state = initial_state("Carry on")
+    state["plan"] = "1. Write the new file"
+    state["files_changed"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert "no longer on disk" in result["builder_report"]
+    assert str(gone) in result["builder_report"]
+
+
+def test_a_run_whose_every_file_was_deleted_reports_none(monkeypatch, tmp_path):
+    """Empty is the accurate account here, not the false one.
+
+    CLAUDE.md warns that an empty `files_changed` let a build with a file to
+    its name be approved as having produced none. This is the other case: the
+    run has no file to its name, because everything it wrote is gone, and
+    saying so is correct. The report still names what went.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _NoToolLLM(str(gone)),
+    )
+
+    state = initial_state("Tidy up")
+    state["plan"] = "1. Remove the scratch file"
+    state["files_changed"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert result["files_changed"] == []
+    assert str(gone) in result["builder_report"]
+
+
+def test_a_file_written_then_removed_is_not_called_a_lie(monkeypatch, tmp_path):
+    """The retraction must not manufacture the accusation it mirrors.
+
+    A path this pass wrote through a real tool call and something then removed
+    still came from a successful write, so naming it under `## Files Modified`
+    is not a claim about work that never happened. `written` is computed off
+    the whole record, before the retraction, precisely so this stays true --
+    CLAUDE.md calls a false version of this the report's harshest claim.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _NoToolLLM(str(gone)),
+    )
+
+    state = initial_state("Tidy up")
+    state["plan"] = "1. Remove the scratch file"
+    state["files_changed"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert "Described but not written" not in result["builder_report"]
+
+
 def test_a_rewritten_file_is_recorded_once(monkeypatch, tmp_path):
     """A path an earlier pass wrote and this one rewrote is not listed twice."""
+    # The Builder writes inside the project root (`_resolve_write_path`), so
+    # the root moves to the tmp dir rather than the write escaping it. Without
+    # this the write is refused, the file never lands, and the assertion below
+    # passes on the seeded path alone -- exercising nothing.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "again.py"
@@ -720,6 +936,9 @@ def test_a_deleted_file_clears_its_failure(monkeypatch, tmp_path):
 
 def test_a_fixed_file_clears_its_failure(monkeypatch, tmp_path):
     """Once the file actually runs, the failure is retired."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "broken.py"
@@ -765,6 +984,9 @@ def test_expect_failures_lets_the_gate_approve(monkeypatch):
 
 def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
     """The opt-out suppresses the block, not the check."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "fixture.py"
@@ -793,6 +1015,9 @@ def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
     that as a failure pinned failed_verification open on a working package and
     the gate rewrote every `approved` to `revise` until the step ceiling.
     """
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     pkg = tmp_path / "pkg"
@@ -817,6 +1042,9 @@ def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
 
 def test_a_root_level_script_is_still_executed(monkeypatch, tmp_path):
     """The skip is for package modules only; a loose script still has to run."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "verify_it.py"  # no __init__.py beside it
@@ -1115,6 +1343,9 @@ class _SlowToolCallingLLM(_ToolCallingLLM):
 
 def test_a_hung_builder_keeps_the_files_it_already_wrote(monkeypatch, tmp_path):
     """The deadline ends the turn; it does not discard completed work."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     import threading
 
     from langgraph_agent import nodes
@@ -1148,6 +1379,9 @@ def test_a_tool_call_is_never_abandoned_midway(monkeypatch, tmp_path):
     `filesystem_write` would go on writing into the project after the node had
     returned, which is worse than the hang the deadline exists to stop.
     """
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     import time
 
     from langgraph_agent import nodes
@@ -1509,6 +1743,149 @@ def test_a_hung_planner_keeps_a_real_plan_over_the_placeholder(monkeypatch):
     assert result["plan"] == "1. The plan from the previous cycle"
 
 
+class _OffFormatPlannerLLM:
+    """Answers the Planner in prose, with no `## Steps` heading to match.
+
+    The shape a weak seat actually produces: it responds, at length, and the
+    parser finds nothing in it. Every other seat keeps StubLLM.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        return AIMessage(
+            content=(
+                "Sure! To do this you would want to start by looking at the "
+                "indexer, then add the retry, and finally write a test for it."
+            )
+        )
+
+
+def _off_format_planner(monkeypatch):
+    """Point the Planner seat at a model that answers without the headings."""
+    from langgraph_agent import nodes
+
+    llm = _OffFormatPlannerLLM()
+    real = nodes.get_agent_llm
+    monkeypatch.setattr(
+        nodes,
+        "get_agent_llm",
+        lambda agent, temperature=0.1: (
+            llm if agent == "planner" else real(agent, temperature)
+        ),
+    )
+    return llm
+
+
+def test_a_planner_that_answers_off_format_still_leaves_a_plan(monkeypatch):
+    """The other door onto the uncounted loop: the seat replies, unreadably.
+
+    `plan` was whatever `## Steps` matched, so an answer without that heading
+    emptied it while the feed said "Plan created" -- and step_count is
+    incremented only while a plan exists, so the cycle ran uncounted. Measured
+    with the guard removed: a whole run through this seat ends at step_count 0,
+    which is the state that lets the loop run to LangGraph's recursion limit
+    whenever the gate does not approve.
+    """
+    from langgraph_agent import nodes
+
+    llm = _off_format_planner(monkeypatch)
+    result = nodes.planner_node(initial_state("Do the thing"))
+
+    assert llm.calls == 1                      # the seat really answered
+    assert result["plan"]                      # the load-bearing part
+    assert "never broken into steps" in result["plan"]
+    assert result["next_agent"] == "Builder"
+    assert any("no plan steps" in m for m in result["messages"])
+    # A seat that produced no plan must not be reported as one that planned.
+    assert not any("Plan created" in m for m in result["messages"])
+
+
+def test_an_off_format_planner_is_not_described_as_a_hung_one(monkeypatch):
+    """A seat that replied and a seat that stalled call for different fixes.
+
+    Asserted in both directions so the guard cannot be satisfied by routing
+    this case through the timeout fallback, which would report a model that
+    answered in 0.2s as one that never answered.
+    """
+    from langgraph_agent import nodes
+
+    _off_format_planner(monkeypatch)
+    result = nodes.planner_node(initial_state("Do the thing"))
+
+    assert any("no plan steps" in m for m in result["messages"])
+    assert not any("No response within" in m for m in result["messages"])
+    assert "did not respond" not in result["plan"]
+
+
+def test_an_off_format_planner_keeps_a_real_plan_over_the_placeholder(monkeypatch):
+    """As on the timeout path: a previous cycle's plan is better information."""
+    from langgraph_agent import nodes
+
+    _off_format_planner(monkeypatch)
+    state = initial_state("Do the thing")
+    state["plan"] = "1. The plan from the previous cycle"
+    result = nodes.planner_node(state)
+
+    assert result["plan"] == "1. The plan from the previous cycle"
+    assert result["next_agent"] == "Builder"
+
+
+def test_an_off_format_planner_never_routes_to_the_researcher(monkeypatch):
+    """An empty plan is an empty search: `_gather_research` queries on `plan`.
+
+    A Researcher hop with no plan searches for the empty string, and retrieval
+    that thin is exactly what falls through to the Researcher's own model.
+    """
+    from langgraph_agent import nodes
+
+    llm = _OffFormatPlannerLLM()
+
+    def _routes_to_researcher(messages):
+        from langchain_core.messages import AIMessage
+
+        llm.calls += 1
+        return AIMessage(content="## Next Agent\nResearcher\n\n## Notes\nGo look.")
+
+    llm.invoke = _routes_to_researcher
+    real = nodes.get_agent_llm
+    monkeypatch.setattr(
+        nodes,
+        "get_agent_llm",
+        lambda agent, temperature=0.1: (
+            llm if agent == "planner" else real(agent, temperature)
+        ),
+    )
+
+    result = nodes.planner_node(initial_state("Do the thing"))
+
+    assert result["next_agent"] == "Builder"
+
+
+def test_an_off_format_planner_run_still_terminates(monkeypatch):
+    """End to end: the property every fallback above exists to give.
+
+    Nothing hangs here -- the Planner answers instantly and unreadably, which
+    is the shape that used to loop fastest of all. `step_count >= 1` is the
+    assertion that fails without the guard: the run reached the end having
+    counted no cycle at all.
+    """
+    from langgraph_agent import graph as graph_module
+
+    _off_format_planner(monkeypatch)
+    result = create_agent_graph().invoke(
+        initial_state("Do the thing"),
+        {"recursion_limit": graph_module.RECURSION_LIMIT},
+    )
+
+    assert result["step_count"] >= 1           # the loop was counted at all
+    assert result["step_count"] <= graph_module.MAX_STEPS
+
+
 def test_a_stalling_architect_run_still_terminates(monkeypatch):
     """End to end: every seat hangs, and the run ends at the step ceiling.
 
@@ -1567,6 +1944,9 @@ class _StopsAfterWritingLLM(_ToolCallingLLM):
 
 def test_a_stopped_builder_keeps_the_files_it_already_wrote(monkeypatch, tmp_path):
     """The write in flight completes; the next turn never starts."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "half.txt"
@@ -1594,6 +1974,9 @@ def test_a_stopped_builder_is_not_described_as_out_of_time(monkeypatch, tmp_path
     The two are separate flags for exactly this reason: the report is the only
     place anyone finds out which of them happened.
     """
+    # Without this the write is refused by `_resolve_write_path` and the seat
+    # stops after writing nothing, which is not the case this test is named for.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import BUILDER_DEADLINE_SECONDS, builder_node
 
     llm = _StopsAfterWritingLLM(tmp_path / "half.txt")
@@ -1859,3 +2242,133 @@ def test_no_seat_is_working_once_the_run_is_over(agent_graph):
                        {"recursion_limit": RECURSION_LIMIT})
     assert ACTIVITY.current() == ""
     assert ACTIVITY.busy_for() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# discussion-only runs
+# ---------------------------------------------------------------------------
+
+
+class _TriesToWriteLLM(_ToolCallingLLM):
+    """A Builder that reaches for a write tool regardless of what it was offered.
+
+    Which is the case that matters: the guarantee cannot rest on the model
+    having read its tool schema.
+    """
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(content="", tool_calls=[{
+                "name": "filesystem_write",
+                "args": {"path": str(self._path), "content": "should never land\n"},
+                "id": "call_1",
+            }])
+        return AIMessage(content=(
+            "## Changes Made\nProposed.\n\n"
+            f"## Files Modified\n- {self._path}\n\n"
+            "## Next Steps / Blockers\nnone\n"
+        ))
+
+
+def test_a_discussion_run_is_offered_no_tools_at_all(monkeypatch, tmp_path):
+    """Zero, not a read-only subset.
+
+    Nothing is bound, so the node takes the same path as a seat whose model
+    cannot call tools and there is no tool loop to reason about. "Took no
+    action" is then a property of the code that ran rather than of a filter
+    having been complete.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    llm = _ToolCallingLLM(tmp_path / "x.txt")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    state = initial_state("Talk it through")
+    state["plan"] = "1. Consider it"
+    state["discuss_only"] = True
+    builder_node(state)
+
+    assert llm.bound is None, "a discussion run must bind no tools"
+
+
+def test_a_discussion_run_ignores_a_tool_call_it_was_never_given(monkeypatch, tmp_path):
+    """The case that matters: a seat that asks anyway.
+
+    The guarantee cannot rest on the model having read its tool schema, so this
+    drives one that emits `filesystem_write` regardless and asserts the file is
+    not there afterwards.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "never.py"
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _TriesToWriteLLM(target),
+    )
+
+    state = initial_state("Talk it through")
+    state["plan"] = "1. Consider it"
+    state["discuss_only"] = True
+    result = builder_node(state)
+
+    assert not target.exists(), "a discussion run must not write to disk"
+    assert result["files_changed"] == []
+
+
+def test_a_discussion_run_is_not_reported_as_implementation(monkeypatch, tmp_path):
+    """The Architect rules on this line; nothing was implemented."""
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+
+    state = initial_state("Talk it through")
+    state["plan"] = "1. Consider it"
+    state["discuss_only"] = True
+    result = builder_node(state)
+
+    assert "Implementation complete" not in result["messages"][-1]
+    assert "Discussion only" in result["messages"][-1]
+
+
+def test_the_full_belt_is_still_offered_when_the_box_is_off(monkeypatch, tmp_path):
+    """The default must not be quietly narrowed by adding the flag."""
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import BUILDER_TOOL_NAMES, builder_node
+
+    llm = _ToolCallingLLM(tmp_path / "x.txt")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    builder_node(initial_state("Do the thing"))
+
+    assert {tool["function"]["name"] for tool in llm.bound} == BUILDER_TOOL_NAMES
+
+
+def test_the_discussion_mode_reaches_every_seat_through_state(monkeypatch):
+    """The Architect is the gate, and it cannot rule on a mode it is not told.
+
+    Without this the run has no way to finish: `files_changed` is empty by
+    construction, so a gate judging by build standards sends it round until the
+    step ceiling -- measured at 8 cycles on a live run before the line existed.
+    """
+    from langgraph_agent.nodes import _get_state_injection
+
+    state = initial_state("Talk it through")
+    assert "DISCUSSION ONLY" not in _get_state_injection(state)
+
+    state["discuss_only"] = True
+    block = _get_state_injection(state)
+    assert "DISCUSSION ONLY" in block
+    assert "rule on" in block
