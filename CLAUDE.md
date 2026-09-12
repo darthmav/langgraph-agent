@@ -405,26 +405,25 @@ four the moment this file described the problem.
   caller (the console's *discussion only* box, or
   `run_goal({goal, discuss_only: true})`) and never by an agent -- the third
   flag of that shape, after `expect_failures` and `research_web`. The Builder
-  is offered `DISCUSSION_TOOLS` instead of the full belt: `filesystem_read`,
-  `git_status` and `git_diff`, which change nothing. Reading is not acting, and
-  a discussion grounded in what the files say beats one the seats invent.
-  `terminal_execute` and `run_tests` are withheld with the write tool because a
-  command's effect cannot be judged from its text -- `ls` and `rm -rf /` arrive
-  through the same argument, and a whitelist of safe-looking commands is the
-  character filter `terminal_execute` already threw out. Online research is
+  is offered **no tools at all**. It briefly got the three read-only ones on
+  the argument that reading changes nothing; zero is the stronger guarantee to
+  state, because it needs no argument about which reads are harmless and cannot
+  be weakened later by a tool added to that set which turns out to do more than
+  read. `DISCUSSION_TOOL_NAMES` is empty rather than short, so nothing is bound
+  and the node takes the path a seat whose model cannot call tools already
+  takes -- there is no tool loop on a discussion run, and "took no action" is a
+  property of the code that ran rather than of a filter having been complete.
+  Online research is
   forced off whatever its own box says, since the phase writes pages under
   `research/web/` and embeds them, which changes this machine and every later
-  run's retrieval. Two things make the guarantee more than a promise. The
-  refusal is enforced in `_run_builder_tools` as well as in the offered list,
-  because the two answer different questions -- what the model was told about,
-  and what actually runs -- so a seat that calls a tool it was never given is
-  still refused. And the feed line reads "Discussion only: proposal ready,
+  run's retrieval. `_run_builder_tools` still refuses against the set it was
+  given rather than the full one, so the guarantee holds on that path too if
+  anything ever routes there. And the feed line reads "Discussion only: proposal ready,
   nothing was changed" rather than "Implementation complete", for the reason
   the stop and the deadline have their own wording: the Architect rules on that
   line, and a pass that could not act must not read as one that acted. The
-  prompt carries `DISCUSSION_NOTE` so the seat is told up front; without it a
-  pass can spend all `MAX_BUILDER_TOOL_TURNS` discovering the refusals one at a
-  time.
+  prompt carries `DISCUSSION_NOTE` so the seat is told it has no tools and
+  works from the plan and research it was handed.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line

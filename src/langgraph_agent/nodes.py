@@ -333,7 +333,25 @@ def _get_state_injection(state: AgentState) -> str:
             return ", ".join(str(v) for v in value)
         return str(value)
 
-    return f"""## Current state
+    # Every seat has to know, and the Architect above all. It is the gate: it
+    # rules on whether the work is done, and on a discussion run there is no
+    # work to find -- `files_changed` is empty by construction and the Builder
+    # reports what it *would* do. Without this line the gate judged a proposal
+    # by build standards and could never be satisfied, so the run went round
+    # Researcher -> Builder -> Architect until the step ceiling: measured at 8
+    # cycles, every one of them reporting "proposal ready, nothing was
+    # changed". The mode is in the shared injection rather than the Architect's
+    # prompt alone so the Planner stops planning edits and the Builder is told
+    # twice, which costs one line.
+    mode = (
+        "\nMode: DISCUSSION ONLY -- no tools, nothing on this machine will be "
+        "changed. The product of this run is the proposal itself: rule on "
+        "whether it answers the goal, not on whether files exist."
+        if state.get("discuss_only")
+        else ""
+    )
+
+    return f"""## Current state{mode}
 Goal: {_fmt("goal")}
 Architecture: {_fmt("architecture")}
 Verdict: {_fmt("verdict")}
@@ -1227,20 +1245,22 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
 
 BUILDER_TOOL_NAMES = {tool["function"]["name"] for tool in BUILDER_TOOLS}
 
-# The tools that cannot change this machine, offered instead of the full belt
-# when a run is `discuss_only`. Reading is not acting: a discussion grounded in
-# what the files actually say beats one the seats invent, and none of these
-# three writes, spawns or stages anything. Everything else is withheld --
-# `filesystem_write` for the obvious reason, `run_tests` and `terminal_execute`
-# because a command's effect cannot be judged from its text. `ls` and
-# `rm -rf /` arrive through the same argument, and a whitelist of safe-looking
-# commands is the character filter `terminal_execute` already threw out.
-DISCUSSION_TOOL_NAMES = frozenset({"filesystem_read", "git_status", "git_diff"})
+# A `discuss_only` run gets **no** tools at all. This briefly allowed the three
+# read-only ones -- `filesystem_read`, `git_status`, `git_diff` -- on the
+# argument that reading changes nothing and grounds the discussion. The
+# operator asked for zero, and zero is the stronger guarantee to state: "the
+# Builder was offered no tools" needs no argument about which reads are
+# harmless, and it cannot be weakened later by a tool added to the read-only
+# set that turns out to do more than read.
+#
+# It is an empty set rather than a shorter list because the tools are then not
+# bound at all -- `builder_node` takes the same path as a seat whose model
+# cannot call tools, which already exists and is already tested. So there is no
+# tool loop to reason about on a discussion run, and the guarantee is
+# structural rather than a filter that has to be right.
+DISCUSSION_TOOL_NAMES: frozenset[str] = frozenset()
 
-DISCUSSION_TOOLS: list[dict[str, Any]] = [
-    tool for tool in BUILDER_TOOLS
-    if tool["function"]["name"] in DISCUSSION_TOOL_NAMES
-]
+DISCUSSION_TOOLS: list[dict[str, Any]] = []
 
 # Appended to the Builder's prompt on a discussion run. Without it the seat
 # spends its turns discovering the refusals one at a time: it is told to
@@ -1249,11 +1269,11 @@ DISCUSSION_TOOLS: list[dict[str, Any]] = [
 # what it was never going to be allowed to do. The same reason `cwd` went into
 # the tool schema rather than being left to an error message.
 DISCUSSION_NOTE = (
-    "\n\nThis run is DISCUSSION ONLY. You cannot change anything: no file "
-    "writes, no terminal commands, no tests. You may read files and inspect "
-    "git to ground what you say. Do not report work as done and do not list "
-    "files under '## Files Modified' -- describe what you would change, which "
-    "files it would touch, and what you would need to verify it. That "
+    "\n\nThis run is DISCUSSION ONLY. You have no tools: you cannot read "
+    "files, write files, run commands or run tests. Work from the plan and the "
+    "research findings you were given. Do not report work as done and do not "
+    "list files under '## Files Modified' -- describe what you would change, "
+    "which files it would touch, and what you would need to verify it. That "
     "description is the product of this run."
 )
 
@@ -1691,7 +1711,6 @@ def builder_node(state: AgentState) -> AgentState:
     # Set by the caller and never by an agent, like `expect_failures`. A seat
     # cannot vote itself the right to act.
     discuss_only = bool(state.get("discuss_only"))
-    offered = DISCUSSION_TOOLS if discuss_only else BUILDER_TOOLS
     allowed = DISCUSSION_TOOL_NAMES if discuss_only else BUILDER_TOOL_NAMES
 
     messages: list[Any] = [
@@ -1706,7 +1725,12 @@ def builder_node(state: AgentState) -> AgentState:
 
     llm = get_agent_llm("builder")
     try:
-        tool_llm = llm.bind_tools(offered)
+        # Nothing is bound on a discussion run, which puts this node on the
+        # no-tool path below -- the same one a seat whose model cannot call
+        # tools already takes. There is then no tool loop at all, so "took no
+        # action" is a property of the code that ran rather than of a filter
+        # having been complete.
+        tool_llm = None if discuss_only else llm.bind_tools(BUILDER_TOOLS)
     except AttributeError:
         # A seat whose model cannot call tools at all -- StubLLM, or a tag
         # without tool support. It still reports; it just cannot change a file.

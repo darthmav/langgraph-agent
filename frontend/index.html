@@ -455,13 +455,28 @@ $$(".tab").forEach(t => t.onclick = () => {
 /* ---------- crew ---------- */
 let OPTIONS = [], OLLAMA_TAGS = [];
 
-async function loadCrew(quiet){
+// `force` repaints even while the operator is using the panel. The 5s poll
+// never forces; an action that changed a seat always does.
+//
+// The repaint throws every seat card away and builds new ones, and the model
+// <select> lives on one of those cards -- so an open dropdown was destroyed
+// under whoever was reading it, closing itself about five seconds after it
+// opened. That reads exactly like a timer on the control, and the seat list is
+// long enough that choosing from it takes longer than the poll leaves. The
+// panel is left alone while focus is inside it: a focused <select> is an
+// operator part-way through a choice, and the repaint can wait for them to
+// finish. It resumes on the next poll after focus leaves, so the live/stubbed
+// chips stay current the rest of the time.
+async function loadCrew(quiet, force){
   const [seatData, optData] = await Promise.all([
     rpc("list_seats", {}, quiet),
     rpc("llm_options", {}, quiet),
   ]);
   OPTIONS = optData.options || [];
   OLLAMA_TAGS = optData.ollama_tags || [];
+
+  const panel = $("#seats");
+  if(!force && panel.contains(document.activeElement)) return;
 
   const seats = seatData.seats || [];
   $("#crewn").textContent = seats.length;
@@ -543,7 +558,7 @@ function optionsHtml(seat){
 async function setSeat(role, value){
   const {provider, model} = JSON.parse(value);
   await rpc("set_seat", {agent:role, provider, model});
-  await loadCrew(true);
+  await loadCrew(true, true);
 }
 
 // The box shows what the seat's next call will do, not a wish: a switchable
@@ -565,7 +580,7 @@ async function setThinking(role, on){
   // leave the box showing a state the seat is not in.
   try{ await rpc("set_thinking", {agent:role, thinking:on}); }
   catch(e){ /* the refusal is already on the telemetry log */ }
-  await loadCrew(true).catch(()=>{});
+  await loadCrew(true, true).catch(()=>{});
 }
 
 /* ---------- graph ---------- */

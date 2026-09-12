@@ -2075,10 +2075,16 @@ class _TriesToWriteLLM(_ToolCallingLLM):
         ))
 
 
-def test_a_discussion_run_offers_only_read_only_tools(monkeypatch, tmp_path):
-    """No write, no terminal, no tests -- and the three that remain change nothing."""
+def test_a_discussion_run_is_offered_no_tools_at_all(monkeypatch, tmp_path):
+    """Zero, not a read-only subset.
+
+    Nothing is bound, so the node takes the same path as a seat whose model
+    cannot call tools and there is no tool loop to reason about. "Took no
+    action" is then a property of the code that ran rather than of a filter
+    having been complete.
+    """
     monkeypatch.chdir(tmp_path)
-    from langgraph_agent.nodes import DISCUSSION_TOOL_NAMES, builder_node
+    from langgraph_agent.nodes import builder_node
 
     llm = _ToolCallingLLM(tmp_path / "x.txt")
     monkeypatch.setattr(
@@ -2090,16 +2096,15 @@ def test_a_discussion_run_offers_only_read_only_tools(monkeypatch, tmp_path):
     state["discuss_only"] = True
     builder_node(state)
 
-    offered = {tool["function"]["name"] for tool in llm.bound}
-    assert offered == set(DISCUSSION_TOOL_NAMES)
-    assert not offered & {"filesystem_write", "terminal_execute", "run_tests"}
+    assert llm.bound is None, "a discussion run must bind no tools"
 
 
-def test_a_discussion_run_refuses_a_write_it_was_not_offered(monkeypatch, tmp_path):
-    """The guarantee is enforced where tools run, not only where they are listed.
+def test_a_discussion_run_ignores_a_tool_call_it_was_never_given(monkeypatch, tmp_path):
+    """The case that matters: a seat that asks anyway.
 
-    A model that calls a tool it was never given must still be refused, or
-    "takes no actions" rests on the seat's good manners.
+    The guarantee cannot rest on the model having read its tool schema, so this
+    drives one that emits `filesystem_write` regardless and asserts the file is
+    not there afterwards.
     """
     monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
@@ -2117,7 +2122,6 @@ def test_a_discussion_run_refuses_a_write_it_was_not_offered(monkeypatch, tmp_pa
 
     assert not target.exists(), "a discussion run must not write to disk"
     assert result["files_changed"] == []
-    assert "discussion-only" in result["builder_report"]
 
 
 def test_a_discussion_run_is_not_reported_as_implementation(monkeypatch, tmp_path):
@@ -2152,3 +2156,21 @@ def test_the_full_belt_is_still_offered_when_the_box_is_off(monkeypatch, tmp_pat
     builder_node(initial_state("Do the thing"))
 
     assert {tool["function"]["name"] for tool in llm.bound} == BUILDER_TOOL_NAMES
+
+
+def test_the_discussion_mode_reaches_every_seat_through_state(monkeypatch):
+    """The Architect is the gate, and it cannot rule on a mode it is not told.
+
+    Without this the run has no way to finish: `files_changed` is empty by
+    construction, so a gate judging by build standards sends it round until the
+    step ceiling -- measured at 8 cycles on a live run before the line existed.
+    """
+    from langgraph_agent.nodes import _get_state_injection
+
+    state = initial_state("Talk it through")
+    assert "DISCUSSION ONLY" not in _get_state_injection(state)
+
+    state["discuss_only"] = True
+    block = _get_state_injection(state)
+    assert "DISCUSSION ONLY" in block
+    assert "rule on" in block
