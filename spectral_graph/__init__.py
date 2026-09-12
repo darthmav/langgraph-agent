@@ -12,6 +12,7 @@ Core functionality:
 - Spectral clustering and embedding
 - Cheeger constant and bounds
 - Dolphin model mesh representation and spectral analysis
+- Upgrade report generation based on spectral gaps
 
 Example usage:
     import networkx as nx
@@ -33,6 +34,12 @@ Example with DolphinModel:
     # Analyze spectrally
     analyzer = SpectralAnalyzer.from_dolphin_model(model)
     eigenvalues = analyzer.get_sorted_eigenvalues()
+
+Example with upgrade analysis:
+    from spectral_graph import DolphinModel, analyze_and_report
+    
+    model = DolphinModel(vertices, faces)
+    report = analyze_and_report(model, output_format="print")
 """
 
 from spectral_graph.clustering import (
@@ -67,6 +74,13 @@ from spectral_graph.spectrum import (
     compute_eigenpairs,
     compute_spectrum,
 )
+from spectral_graph.upgrade_report import (
+    UpgradeAnalyzer,
+    UpgradeRecommendation,
+    SpectralGap,
+    SpectralReport,
+    analyze_and_report,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -96,4 +110,10 @@ __all__ = [
     # Dolphin model and spectral analysis
     "DolphinModel",
     "SpectralAnalyzer",
+    # Upgrade report
+    "UpgradeAnalyzer",
+    "UpgradeRecommendation",
+    "SpectralGap",
+    "SpectralReport",
+    "analyze_and_report",
 ]
