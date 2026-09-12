@@ -431,15 +431,26 @@ four the moment this file described the problem.
   otherwise driving `git` through `terminal_execute` one command at a time,
   where the ordering is the seat's to remember and a half-finished sequence
   leaves no record of how far it got.
-  Two refusals carry the design. *It will not commit onto the default branch*
+  One refusal carries the design: *it will not commit onto the default branch*
   -- `branch` creates one when HEAD is the default, and skipping that stage is
   refused rather than treated as permission, since an agent picking its own
-  stage list would find that gap immediately. *And it will not merge unless
-  the caller names `merge` in `stages`*: the default pipeline stops at `pr`,
-  because a pull request the same agent opens and immediately merges is not a
-  review, it is two commands in a row. Nothing infers the intent to merge from
-  the goal, the plan or the commit message. Both refusals are pinned by tests
-  that were watched to fail with the guard removed.
+  stage list would find that gap immediately. That is what makes the rest safe
+  to default: the work arrives on a branch, through a pull request, with the
+  diff and the checks attached, whatever else runs.
+  **The merge was the second refusal until 2026-09-12 and is now the last stage
+  of the default pipeline.** The old argument was that a pull request the same
+  agent opens and immediately merges is not a review, which is true and is not
+  something a default can decide. What it produced was a tool that is one call
+  because the flow is one act, doing six sevenths of it every time and leaving
+  the seventh to a caller who had no way to know it was outstanding -- observed
+  directly, twice in one afternoon, both times by an operator who had asked for
+  the whole flow. The review point is now opt-*in*: naming `stages` without
+  `merge` stops at `pr`, the same list the old default was, spelled by whoever
+  wants it. `merge` is `--squash --delete-branch`, so the default branch gets
+  one commit carrying the pull request's title and body -- which makes those
+  two fields the permanent record of the change, not just a review aid.
+  The refusal and the opt-out are both pinned by tests watched to fail with the
+  guard removed.
   Two smaller decisions matter. *Nothing staged is a success, not a failure* --
   a clean tree is an ordinary outcome, and failing there sends the Builder off
   repairing a repository that was never broken; the stages that only make sense
@@ -1008,7 +1019,11 @@ four the moment this file described the problem.
   exactly four documents apiece at zero free capitals. Worth knowing because
   the vocabulary that moves this list is not only the prose a person writes --
   **a run that writes code writes docstrings, and docstrings are where the
-  forced capitals live.** Three are ordinary openers. `Complete` is the one to
+  forced capitals live.** `Naming` followed within the hour from the prose
+  itself -- a docstring written to explain a change to `git_dwell`, four
+  documents and zero free capitals, a gerund opening a sentence every time --
+  and the guard caught it before the commit. Three of the four are ordinary
+  openers. `Complete` is the one to
   look at twice: *complete graph* is a real term in the spectral half of this
   project, and the token still goes on the list, because the term is the
   bigram and the entity is the bare word -- which appears with a chosen capital

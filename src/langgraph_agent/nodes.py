@@ -1248,13 +1248,15 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
             "name": "git_dwell",
             "description": (
                 "Run the whole git flow in order: survey, branch, stage, "
-                "commit, push, open a pull request. Prefer this over a series "
-                "of terminal git commands -- it runs the stages in the only "
-                "order that works, stops at the first failure and says which "
-                "stage stopped it. It never commits onto the default branch: "
-                "it creates a branch instead. It does NOT merge unless you put "
-                "'merge' in stages, and you should only do that if the goal "
-                "explicitly asked for the change to be merged."
+                "commit, push, open a pull request, merge it. Prefer this over "
+                "a series of terminal git commands -- it runs the stages in "
+                "the only order that works, stops at the first failure and "
+                "says which stage stopped it. It never commits onto the "
+                "default branch: it creates a branch instead. The default runs "
+                "every stage, so the change lands on the default branch as one "
+                "squashed commit and the branch is deleted. To stop short of "
+                "that -- to leave the pull request open for someone to read -- "
+                "name the stages you want and leave 'merge' out."
             ),
             "parameters": {
                 "type": "object",
@@ -1273,7 +1275,9 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
                         "description": (
                             "Stages to run, from: survey, branch, stage, "
                             "commit, push, pr, merge. They always run in that "
-                            "order. Defaults to everything except merge."
+                            "order. Defaults to all of them; pass a shorter "
+                            "list to stop early, e.g. everything up to 'pr' to "
+                            "leave the pull request unmerged."
                         ),
                     },
                     "paths": {

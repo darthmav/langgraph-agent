@@ -6,9 +6,12 @@ happened, and a mock would be testing the mock. `gh` is not: opening a pull
 request needs a remote and an account, so the `pr` and `merge` stages are
 exercised through a stub `gh` placed on PATH, which records how it was called.
 
-What matters most is what the pipeline *refuses*, since those are the two
-guarantees a caller relies on: it never commits onto the default branch, and it
-never merges unless asked by name.
+What matters most is the one thing the pipeline *refuses*: it never commits
+onto the default branch. That is the guarantee a caller relies on, and the
+reason the rest can be a default -- the work arrives on a branch, through a
+pull request, with the diff and the checks attached, whatever else runs. The
+merge used to be the second refusal and is now the last stage of the default;
+the opt-out it became is pinned here beside it.
 """
 
 from __future__ import annotations
@@ -123,19 +126,49 @@ async def test_it_refuses_to_commit_on_the_default_when_branch_is_skipped(repo, 
 
 
 @pytest.mark.asyncio
-async def test_merge_is_not_in_the_default_pipeline(repo, client, gh):
-    """A PR the same agent opens and immediately merges is not a review."""
-    assert "merge" not in DWELL_DEFAULT_STAGES
+async def test_merge_is_in_the_default_pipeline(repo, client, gh):
+    """The default runs the flow to the end, merge included.
+
+    This asserted the opposite until 2026-09-12, on the argument that a pull
+    request the same agent opens and immediately merges is not a review. The
+    argument holds; what it could not carry was the default. A tool that is one
+    call because the flow is one act, stopping one stage short every time,
+    leaves the last stage to a caller with no way to know it is outstanding --
+    which is what happened, repeatedly. The review point is now something a
+    caller asks for by naming its stages, which is the test below.
+    """
+    assert "merge" in DWELL_DEFAULT_STAGES
     (repo / "new.txt").write_text("work\n", encoding="utf-8")
 
     # Everything the default runs, minus the push that needs a real remote.
     await _dwell(
-        client, message="feat: a thing", stages=["survey", "branch", "stage", "commit", "pr"]
+        client, message="feat: a thing",
+        stages=["survey", "branch", "stage", "commit", "pr", "merge"],
     )
 
     calls = gh.read_text(encoding="utf-8") if gh.exists() else ""
     assert "pr create" in calls
-    assert "pr merge" not in calls, "merge must never happen unasked"
+    assert "pr merge" in calls
+
+
+@pytest.mark.asyncio
+async def test_a_caller_can_still_stop_at_the_pull_request(repo, client, gh):
+    """Naming stages without `merge` leaves the PR open for someone to read.
+
+    This is the opt-out that replaced the old default, and it is the half worth
+    pinning: a default can be changed again, while a caller that asked for the
+    review point must keep getting it.
+    """
+    (repo / "new.txt").write_text("work\n", encoding="utf-8")
+
+    await _dwell(
+        client, message="feat: a thing",
+        stages=["survey", "branch", "stage", "commit", "pr"],
+    )
+
+    calls = gh.read_text(encoding="utf-8") if gh.exists() else ""
+    assert "pr create" in calls
+    assert "pr merge" not in calls, "a stage list that omits merge must not merge"
 
 
 @pytest.mark.asyncio
