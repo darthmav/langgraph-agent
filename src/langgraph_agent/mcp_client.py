@@ -225,9 +225,18 @@ def _project_root() -> Path:
 # the parts that already succeeded.
 DWELL_STAGES = ("survey", "branch", "stage", "commit", "push", "pr", "merge")
 
-# What `git_dwell` runs when the caller names no stages. `merge` is absent, and
-# that absence is the design -- see `_git_dwell`.
-DWELL_DEFAULT_STAGES = ("survey", "branch", "stage", "commit", "push", "pr")
+# What `git_dwell` runs when the caller names no stages: the whole pipeline,
+# merge included. `merge` sat outside this tuple until 2026-09-12, on the
+# argument that a pull request the same agent opens and immediately merges is
+# not a review -- which is true, and was the wrong thing for the default to
+# decide. The tool is one call because the flow is one act; a default that
+# stopped one stage short meant the common case was a branch pushed, a PR
+# opened and nothing on the default branch, with the last stage left to a
+# caller that had no way to know it was missing. A caller who wants the review
+# point still has it, and now has to say so: `stages` without `merge` stops at
+# `pr`, which is the same opt-out the old default was, spelled by whoever
+# actually wants it.
+DWELL_DEFAULT_STAGES = DWELL_STAGES
 
 
 def _branch_name_from(message: str) -> str:
@@ -586,19 +595,24 @@ class MCPClient:
         a pipeline that reports only "failed" gets retried whole and re-runs
         the parts that already worked.
 
-        Two refusals are deliberate, and neither is safety theatre.
-
         *It will not commit onto the default branch.* Committing straight onto
         `main` is exactly what the branch-then-PR flow exists to prevent, and
         an agent doing it has removed the review point before anyone could use
         it. So `branch` creates one when HEAD is the default, naming it from
-        the message when the caller did not.
+        the message when the caller did not. This is the refusal that survives,
+        and it is the one that matters: the work still arrives on a branch,
+        through a pull request, with the diff and the checks attached.
 
-        *It will not merge unless the caller names `merge` in `stages`.* The
-        default pipeline stops at `pr`, and that stop is the point of the tool:
-        a pull request the same agent opens and immediately merges is not a
-        review, it is two commands in a row. Nothing infers the intent to
-        merge from the goal, the plan or the message.
+        *It does merge by default*, and that changed on 2026-09-12. The
+        argument for stopping at `pr` was that a pull request the same agent
+        opens and immediately merges is not a review. That remains true -- it
+        is simply not something a default can decide. A caller who wants the
+        review point names its stages and stops at `pr`; what the old default
+        produced instead was the opposite of a considered choice, a pipeline
+        that did six sevenths of a job every time and left the seventh to
+        somebody who had not been told it was outstanding. `merge` is
+        `--squash --delete-branch`, so what lands on the default branch is one
+        commit carrying the pull request's title and body.
         """
         message = str(args.get("message") or "").strip()
         requested = [str(x) for x in (args.get("stages") or DWELL_DEFAULT_STAGES)]
