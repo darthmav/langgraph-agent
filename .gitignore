@@ -77,3 +77,8 @@ research/web/
 # directory per sweep). Per-run measurements against non-deterministic models,
 # not history — the committed reports/*.md are written deliberately.
 reports/diagnostics/
+
+# Claude Code's per-machine permission grants, appended by the tool as it is
+# used on this checkout. `.claude/` itself is tracked on purpose — the plan and
+# the skills are project material — so only this one file is ignored.
+.claude/settings.local.json
