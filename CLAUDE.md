@@ -362,20 +362,44 @@ four the moment this file described the problem.
   The state field answers a different question — what the whole run produced —
   so `all_files_changed` merges the previous record in before it is written
   back. Overwriting it per pass meant a run that wrote a file on one cycle and
-  nothing on the next reported it had changed nothing while the file sat on
-  disk, and a build with a file to its name was approved as having produced
-  none — the same false account as claiming a file never written, pointing the
-  other way. The feed line counts this pass, naming the running total only when
-  the two differ, so a quiet pass never reads as a run that lost its work.
-  **It also retracts**: a path gone from disk is dropped, and named in the
-  report rather than vanishing. Three of the 2026-09-11 run's four entries were
-  scratch files it had `rm`-ed. It runs *after* `written`, which must still see
-  the whole record, or a file written and then removed reads as a lie.
-- **`filesystem_write` refuses to leave the project.** `_resolve_write_path`
-  resolves the parent, symlinks included, and rejects anything outside the
-  root; it took its argument raw until the 2026-09-11 run wrote
-  `/tmp/gen_doc.py` while working on this checkout. Its docstring says what a
-  file outside the root costs.
+  nothing on the next ended reporting it had changed nothing while the file sat
+  on disk, and the Architect ruled on that empty record: a build with a file to
+  its name was approved as having produced none. That is the same false account
+  as claiming a file that was never written, pointing the other way. The feed
+  line still counts this pass, and names the running total only when the two
+  differ, so a quiet pass never reads as though the run lost its work.
+  **It also retracts.** A path is dropped from the record once it is no longer
+  on disk, and named in the report rather than simply vanishing. The 2026-09-11
+  run ended listing four paths of which three were gone -- a generator script
+  at the project root and two more under /tmp, written on one pass and removed
+  with `rm` on a later one, with nothing retracting them. So the console's "changed
+  this machine" block, which is a safety notice about files on disk, named
+  three files nobody could find, and the Architect ruled on the same record
+  through the state injection block. That is the mirror of "described but not
+  written" -- the report's harshest claim, guarded a dozen lines further down
+  in the other direction -- and this was the unguarded direction. A run whose
+  every product was deleted now reports none, which is the accurate account
+  rather than the empty one described just above: the report still says what
+  went. The retraction runs *after* `written` is computed, and a test pins that
+  ordering, because `written` has to keep seeing the whole record -- a file
+  this pass wrote through a real tool call and then removed did come from a
+  successful write, so naming it under `## Files Modified` is not a lie and
+  must not be accused of being one.
+- **`filesystem_write` refuses to leave the project.** It took its argument
+  raw -- `Path(path).write_text()` behind a `parent.mkdir(parents=True)` -- so
+  an absolute path, a `..` or a symlinked parent put the Builder's writes
+  anywhere the account could reach, and on 2026-09-11 a run working on this
+  checkout wrote `/tmp/gen_doc.py` and `/tmp/gen_overview.py`. Two costs, and
+  the second is the one that bites: the obvious one is a file outside the
+  project that no reindex, no `corpus_staleness` and no `git status` will ever
+  mention, and the quiet one is that `files_changed` feeds the "changed this
+  machine" notice, so a write outside the root makes that notice name a path
+  the operator cannot find from the project. `_resolve_write_path` refuses
+  before the write, the shape `_resolve_cwd` already uses beside it. It
+  resolves the *parent* rather than the leaf -- the leaf normally does not
+  exist yet, and a symlinked parent is the way out that matters -- and it
+  resolves rather than matching strings, because `project/link/x` is inside the
+  root as text and outside it on disk.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line
@@ -1176,12 +1200,27 @@ four the moment this file described the problem.
   which parsed as a genuine empty web; `_search_duckduckgo` recognises it by
   its markup and raises `_SearchBlocked`, and the fan-out stops there, since
   each further request prolongs the block.
-  **It is per-run opt-in, default off** (`research_web`, the console's *research
-  online* box) -- the caller's switch, never an agent's, like `expect_failures`.
-  Relevance cannot be decided from the goal text: three gates were graded
-  against 13 hand-labelled pages and all three failed, the last
-  `RETRIEVAL_RELEVANCE_FLOOR` itself at 3/13. The 2026-09-11 run's five kept
-  blogs then took every top-five slot for its own goal.
+  **It is per-run opt-in, default off** (`research_web`, or the console's
+  *research online* box) -- set by the caller and never by an agent, exactly as
+  `expect_failures` is. That is measured rather than cautious. Whether a page
+  earns a place cannot be decided from the goal text, and three gates were
+  built and graded against 13 hand-labelled pages from two real runs to find
+  out: ranking fetched pages against the project's own documents (a
+  keyword-dense marketing page outscores every file in the checkout), skipping
+  the phase when the corpus already answers the goal (backwards on the
+  measurement -- 0.351 for a goal that needed no web at all against 0.405 for
+  one that did), and `RETRIEVAL_RELEVANCE_FLOOR` itself (3/13; every page
+  cleared it). No fourth threshold helps, and the lambda run is why: the
+  *wrong* pages outscore the right ones on both instruments, 0.553-0.631 for
+  AWS Lambda deployment guides against 0.459-0.550 for the Dolphin model pages
+  the goal was actually about. "LAMBDA" meant a model on this machine and the
+  web means AWS; "local project data" is, as a bag of words, generic
+  project-documentation advice. The information that settles it is the
+  operator's intent, and it is in no comparison of goal text to page text.
+  The cost of guessing wrong is not one bad run: a fetched page becomes a
+  permanent corpus member indistinguishable from project knowledge, and after
+  the 2026-09-11 run the five blogs it kept took every one of the top five
+  retrieval slots for that goal, shutting the project's own files out entirely.
   `_research_online_before_the_run` carries the numbers.
   **It runs before the Architect opens, and that ordering is the design.**
   `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
