@@ -685,8 +685,154 @@ def test_a_new_file_adds_to_the_record_rather_than_replacing_it(monkeypatch, tmp
     assert result["files_changed"] == [str(earlier), str(target)]
 
 
+class _NoToolLLM:
+    """A Builder pass that calls no tools and names a path it wrote earlier.
+
+    Used for the retraction cases: the file is gone from disk, this pass did
+    not write anything, and the report still mentions it.
+    """
+
+    def __init__(self, named: str = "") -> None:
+        self._named = named
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content=(
+                "## Changes Made\nRemoved the scratch file.\n\n"
+                f"## Files Modified\n- {self._named}\n\n"
+                "## Next Steps / Blockers\nnone\n"
+            )
+        )
+
+
+def test_a_file_deleted_since_it_was_written_leaves_the_record(monkeypatch, tmp_path):
+    """The run of 2026-09-11 ended naming three paths that did not exist.
+
+    It wrote `gen_overview.py` and two scratch scripts under `/tmp` on one
+    pass, deleted them with `rm` on a later one, and nothing retracted them --
+    so the console's "changed this machine" notice, a safety notice about files
+    on disk, named three files nobody could find. That is the mirror of
+    "described but not written", and it was the unguarded direction.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"          # written by an earlier pass, since deleted
+    kept = tmp_path / "kept.py"             # written by an earlier pass, still there
+    kept.write_text("print('still here')\n")
+    target = tmp_path / "new.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesFileLLM(target, "print('ok')\n"),
+    )
+
+    state = initial_state("Carry on")
+    state["plan"] = "1. Write the new file"
+    state["files_changed"] = [str(gone), str(kept)]
+
+    result = builder_node(state)
+
+    assert str(gone) not in result["files_changed"]
+    assert result["files_changed"] == [str(kept), str(target)]
+
+
+def test_a_dropped_path_is_named_rather_than_vanishing(monkeypatch, tmp_path):
+    """A silent retraction is indistinguishable from an entry never made.
+
+    The Architect rules on this report, so the removal has to be legible there
+    -- the same reason `_research_snippet` announces a cut instead of trimming
+    quietly.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"
+    target = tmp_path / "new.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesFileLLM(target, "print('ok')\n"),
+    )
+
+    state = initial_state("Carry on")
+    state["plan"] = "1. Write the new file"
+    state["files_changed"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert "no longer on disk" in result["builder_report"]
+    assert str(gone) in result["builder_report"]
+
+
+def test_a_run_whose_every_file_was_deleted_reports_none(monkeypatch, tmp_path):
+    """Empty is the accurate account here, not the false one.
+
+    CLAUDE.md warns that an empty `files_changed` let a build with a file to
+    its name be approved as having produced none. This is the other case: the
+    run has no file to its name, because everything it wrote is gone, and
+    saying so is correct. The report still names what went.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _NoToolLLM(str(gone)),
+    )
+
+    state = initial_state("Tidy up")
+    state["plan"] = "1. Remove the scratch file"
+    state["files_changed"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert result["files_changed"] == []
+    assert str(gone) in result["builder_report"]
+
+
+def test_a_file_written_then_removed_is_not_called_a_lie(monkeypatch, tmp_path):
+    """The retraction must not manufacture the accusation it mirrors.
+
+    A path this pass wrote through a real tool call and something then removed
+    still came from a successful write, so naming it under `## Files Modified`
+    is not a claim about work that never happened. `written` is computed off
+    the whole record, before the retraction, precisely so this stays true --
+    CLAUDE.md calls a false version of this the report's harshest claim.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    gone = tmp_path / "scratch.py"
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _NoToolLLM(str(gone)),
+    )
+
+    state = initial_state("Tidy up")
+    state["plan"] = "1. Remove the scratch file"
+    state["files_changed"] = [str(gone)]
+
+    result = builder_node(state)
+
+    assert "Described but not written" not in result["builder_report"]
+
+
 def test_a_rewritten_file_is_recorded_once(monkeypatch, tmp_path):
     """A path an earlier pass wrote and this one rewrote is not listed twice."""
+    # The Builder writes inside the project root (`_resolve_write_path`), so
+    # the root moves to the tmp dir rather than the write escaping it. Without
+    # this the write is refused, the file never lands, and the assertion below
+    # passes on the seeded path alone -- exercising nothing.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "again.py"
@@ -1630,6 +1776,9 @@ def test_a_stopped_builder_is_not_described_as_out_of_time(monkeypatch, tmp_path
     The two are separate flags for exactly this reason: the report is the only
     place anyone finds out which of them happened.
     """
+    # Without this the write is refused by `_resolve_write_path` and the seat
+    # stops after writing nothing, which is not the case this test is named for.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import BUILDER_DEADLINE_SECONDS, builder_node
 
     llm = _StopsAfterWritingLLM(tmp_path / "half.txt")

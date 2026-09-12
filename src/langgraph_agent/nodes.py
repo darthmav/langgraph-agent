@@ -1784,6 +1784,40 @@ def builder_node(state: AgentState) -> AgentState:
             + ", ".join(claimed)
         )
 
+    # A path the run wrote and something later removed is not a file on disk,
+    # and `files_changed` is read as though every entry were one -- by the
+    # console's "changed this machine" notice, and by the Architect through the
+    # state injection block. The run of 2026-09-11 ended naming four paths of
+    # which three did not exist: `gen_overview.py` and two under `/tmp`,
+    # written on one pass and deleted with `rm` on a later one, with nothing
+    # retracting them. That is the mirror of "described but not written" -- the
+    # report's harshest claim, which this function guards in the other
+    # direction a dozen lines above -- and it was unguarded.
+    #
+    # Dropped from the record rather than carried, because the record's readers
+    # take it for what is on disk now: a run whose every product was deleted
+    # has produced nothing, and reporting that plainly is the accurate account,
+    # not the empty one CLAUDE.md warns about. Named in the report rather than
+    # dropped silently, for the reason `_research_snippet` announces a cut --
+    # an entry that simply vanishes is indistinguishable from one that was
+    # never made, and the report is where the Architect finds out.
+    #
+    # This runs *after* `written`, deliberately. `written` is what answers the
+    # "described but not written" accusation, and it has to keep seeing the
+    # whole record: a file this pass wrote and then removed did come from a
+    # successful write call, and naming it in the report is not a lie.
+    removed_paths = [path for path in all_files_changed if not Path(path).exists()]
+    if removed_paths:
+        all_files_changed = [
+            path for path in all_files_changed if path not in removed_paths
+        ]
+        builder_report += (
+            "\n\nWritten earlier and no longer on disk: "
+            + ", ".join(removed_paths)
+            + ". Dropped from the run's file record, which names what is on "
+            "disk now."
+        )
+
     blockers = _clean_blockers(parsed.get("next_steps_blockers", ""))
 
     # A failed verification outranks whatever the model concluded: it wrote a

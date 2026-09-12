@@ -362,18 +362,20 @@ four the moment this file described the problem.
   The state field answers a different question — what the whole run produced —
   so `all_files_changed` merges the previous record in before it is written
   back. Overwriting it per pass meant a run that wrote a file on one cycle and
-  nothing on the next ended reporting it had changed nothing while the file sat
-  on disk, and the Architect ruled on that empty record: a build with a file to
-  its name was approved as having produced none. That is the same false account
-  as claiming a file that was never written, pointing the other way. The feed
-  line still counts this pass, and names the running total only when the two
-  differ, so a quiet pass never reads as though the run lost its work.
+  nothing on the next reported it had changed nothing while the file sat on
+  disk, and a build with a file to its name was approved as having produced
+  none — the same false account as claiming a file never written, pointing the
+  other way. The feed line counts this pass, naming the running total only when
+  the two differ, so a quiet pass never reads as a run that lost its work.
+  **It also retracts**: a path gone from disk is dropped, and named in the
+  report rather than vanishing. Three of the 2026-09-11 run's four entries were
+  scratch files it had `rm`-ed. It runs *after* `written`, which must still see
+  the whole record, or a file written and then removed reads as a lie.
 - **`filesystem_write` refuses to leave the project.** `_resolve_write_path`
-  resolves the parent, symlinks included, and rejects anything landing outside
-  the root. It took its argument raw until 2026-09-11, when a run wrote
-  `/tmp/gen_doc.py` while working on this checkout: a file no reindex, no
-  `corpus_staleness` and no `git status` will ever mention, and a "changed this
-  machine" notice naming a path the operator cannot find from the project.
+  resolves the parent, symlinks included, and rejects anything outside the
+  root; it took its argument raw until the 2026-09-11 run wrote
+  `/tmp/gen_doc.py` while working on this checkout. Its docstring says what a
+  file outside the root costs.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line
@@ -1175,12 +1177,11 @@ four the moment this file described the problem.
   its markup and raises `_SearchBlocked`, and the fan-out stops there, since
   each further request prolongs the block.
   **It is per-run opt-in, default off** (`research_web`, the console's *research
-  online* box) -- set by the caller, never by an agent, like `expect_failures`.
+  online* box) -- the caller's switch, never an agent's, like `expect_failures`.
   Relevance cannot be decided from the goal text: three gates were graded
-  against 13 hand-labelled pages from two real runs and all three failed, the
-  last of them `RETRIEVAL_RELEVANCE_FLOOR` itself at 3/13. On the 2026-09-11
-  run the five kept blogs then took every top-five retrieval slot for that
-  goal, shutting the project's own files out.
+  against 13 hand-labelled pages and all three failed, the last
+  `RETRIEVAL_RELEVANCE_FLOOR` itself at 3/13. The 2026-09-11 run's five kept
+  blogs then took every top-five slot for its own goal.
   `_research_online_before_the_run` carries the numbers.
   **It runs before the Architect opens, and that ordering is the design.**
   `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
