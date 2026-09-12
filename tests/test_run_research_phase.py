@@ -251,3 +251,28 @@ def test_run_goal_researches_online_when_the_caller_asks(monkeypatch, graph):
     serve.rpc_run_goal({"goal": "something the web knows", "research_web": True})
 
     assert called
+
+
+def test_a_discussion_run_never_researches_online(monkeypatch, graph):
+    """"No actions" has to cover the corpus too.
+
+    The phase writes pages under research/web/ and embeds them, which changes
+    this machine and every later run's retrieval. So the box being ticked is
+    not enough on a discussion run, and the two flags are resolved in
+    `rpc_run_goal` rather than left to the operator to keep consistent.
+    """
+    called: list[str] = []
+    _research(monkeypatch, FOUND, called)
+
+    serve.rpc_run_goal({"goal": "g", "research_web": True, "discuss_only": True})
+
+    assert called == []
+
+
+def test_a_discussion_run_reaches_the_seats_as_state(monkeypatch, graph):
+    """The flag has to arrive in AgentState; the Builder reads it from there."""
+    _research(monkeypatch, FOUND)
+
+    result = serve.rpc_run_goal({"goal": "g", "discuss_only": True})
+
+    assert result["discuss_only"] is True

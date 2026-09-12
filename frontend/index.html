@@ -312,8 +312,11 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <label class="optout" title="A file that does not run is still executed and still reported — it just stops blocking the Architect's approval. For goals whose product is a failing file.">
             <input type="checkbox" id="eng-expect-fail"> expect failures
           </label>
-          <label class="optout" title="Search the web for this goal before the run and embed what it finds into the corpus, permanently. Off by default: whether a goal wants the web cannot be judged from its wording — a goal about your own checkout reads to a search engine like a request for generic advice, and the pages it returns then answer your searches from then on. Tick it when the goal really is about something outside this project.">
+          <label class="optout" title="Search the web for this goal before the run and embed what it finds into the corpus, permanently. Off by default: whether a goal wants the web cannot be judged from its wording — a goal about your own checkout reads to a search engine like a request for generic advice, and the pages it returns then answer your searches from then on. Tick it when the goal really is about something outside this project. Ignored on a discussion-only run.">
             <input type="checkbox" id="eng-research-web"> research online
+          </label>
+          <label class="optout" title="The four seats reason about the goal and produce a proposal, without changing anything. The Builder is offered read-only tools only — it can read files and inspect git to ground what it says, but cannot write a file, run a command, run tests, or research online. Nothing on this machine and nothing in the corpus is touched.">
+            <input type="checkbox" id="eng-discuss-only"> discussion only
           </label>
           <label class="go" title="Embed a document into the corpus, so the Researcher can retrieve it on this run and every one after. It is written under uploads/ and indexed from there, which is what makes it survive a reindex. Text only — .md, .py, .rst, .txt. You can also drop files straight onto the transcript.">
             <input type="file" id="eng-upload" multiple accept=".md,.txt,.py,.rst" hidden><span>Attach</span></label>
@@ -1152,7 +1155,7 @@ const ENGINEER_EMPTY = {
 function clearEngineerView(){
   $("#director").innerHTML = ENGINEER_EMPTY.director;
   $("#state-dump").textContent = ENGINEER_EMPTY.state;
-  // The typed goal and the two checkboxes are inputs, not transcript, and
+  // The typed goal and the three checkboxes are inputs, not transcript, and
   // are deliberately left alone.
   setClearButton();
 }
@@ -1289,11 +1292,13 @@ async function run(){
   // Read once, at submit: toggling the box mid-run must not change the run.
   const expectFail = $("#eng-expect-fail").checked;
   const researchWeb = $("#eng-research-web").checked;
+  const discussOnly = $("#eng-discuss-only").checked;
   CURRENT.inflight = true; CURRENT.stopping = false; CURRENT.runId = "";
   setRunButtons();
   $("#director").innerHTML += `<div class="msg user">${esc(goal)}`
     + (expectFail ? ` <span class="badge">expect failures</span>` : "")
-    + (researchWeb ? ` <span class="badge">research online</span>` : "")
+    + (researchWeb && !discussOnly ? ` <span class="badge">research online</span>` : "")
+    + (discussOnly ? ` <span class="badge">discussion only</span>` : "")
     + `</div>`
     + `<div class="msg sys" id="run-live"><b>Running</b></div>`;
   $("#eng-prompt").value = "";
@@ -1350,7 +1355,7 @@ async function run(){
   }, 1000);
 
   try{
-    const r = await rpc("run_goal", {goal, expect_failures: expectFail, research_web: researchWeb});
+    const r = await rpc("run_goal", {goal, expect_failures: expectFail, research_web: researchWeb, discuss_only: discussOnly});
     renderRun(r);
   }catch(e){
     const live = $("#run-live");

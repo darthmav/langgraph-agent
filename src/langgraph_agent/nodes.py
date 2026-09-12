@@ -1227,6 +1227,36 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
 
 BUILDER_TOOL_NAMES = {tool["function"]["name"] for tool in BUILDER_TOOLS}
 
+# The tools that cannot change this machine, offered instead of the full belt
+# when a run is `discuss_only`. Reading is not acting: a discussion grounded in
+# what the files actually say beats one the seats invent, and none of these
+# three writes, spawns or stages anything. Everything else is withheld --
+# `filesystem_write` for the obvious reason, `run_tests` and `terminal_execute`
+# because a command's effect cannot be judged from its text. `ls` and
+# `rm -rf /` arrive through the same argument, and a whitelist of safe-looking
+# commands is the character filter `terminal_execute` already threw out.
+DISCUSSION_TOOL_NAMES = frozenset({"filesystem_read", "git_status", "git_diff"})
+
+DISCUSSION_TOOLS: list[dict[str, Any]] = [
+    tool for tool in BUILDER_TOOLS
+    if tool["function"]["name"] in DISCUSSION_TOOL_NAMES
+]
+
+# Appended to the Builder's prompt on a discussion run. Without it the seat
+# spends its turns discovering the refusals one at a time: it is told to
+# implement the plan, reaches for `filesystem_write`, is refused, and tries
+# again -- `MAX_BUILDER_TOOL_TURNS` is 8, and a pass can exhaust it learning
+# what it was never going to be allowed to do. The same reason `cwd` went into
+# the tool schema rather than being left to an error message.
+DISCUSSION_NOTE = (
+    "\n\nThis run is DISCUSSION ONLY. You cannot change anything: no file "
+    "writes, no terminal commands, no tests. You may read files and inspect "
+    "git to ground what you say. Do not report work as done and do not list "
+    "files under '## Files Modified' -- describe what you would change, which "
+    "files it would touch, and what you would need to verify it. That "
+    "description is the product of this run."
+)
+
 # How many times the Builder may think-and-call before the node gives up. Each
 # turn is a cloud round trip. The default leans on the Architect gate getting
 # another cycle anyway -- which holds only when a pass finishes a unit of work.
@@ -1295,6 +1325,7 @@ def _run_builder_tools(
     files_changed: list[str],
     tool_log: list[str],
     deadline: _Deadline,
+    allowed: frozenset[str] | set[str] = BUILDER_TOOL_NAMES,
 ) -> tuple[str, bool, bool, bool]:
     """Let the Builder call tools until it stops asking for them.
 
@@ -1343,14 +1374,21 @@ def _run_builder_tools(
             name = str(call.get("name", ""))
             args = dict(call.get("args") or {})
 
-            if name not in BUILDER_TOOL_NAMES:
+            if name not in allowed:
                 # Refused rather than run: the tool split is the whole point,
                 # and a Researcher tool reaching the Builder is a real bug
                 # worth surfacing in the report instead of silently serving.
-                result: Any = {
-                    "success": False,
-                    "error": f"{name} is not a Builder tool",
-                }
+                # Checked here as well as withheld from the offered list,
+                # because the two answer different questions: the list is what
+                # the model is told about, and this is what actually runs. On a
+                # discussion run that difference is the whole guarantee, so it
+                # does not rest on the model having read its tool schema.
+                why = (
+                    "cannot run on a discussion-only run"
+                    if name in BUILDER_TOOL_NAMES
+                    else "is not a Builder tool"
+                )
+                result: Any = {"success": False, "error": f"{name} {why}"}
             else:
                 try:
                     result = _call_mcp_tool_sync(name, args)
@@ -1650,8 +1688,16 @@ def builder_node(state: AgentState) -> AgentState:
         max(0.0, BUILDER_DEADLINE_SECONDS - VERIFY_RESERVE_SECONDS)
     )
 
+    # Set by the caller and never by an agent, like `expect_failures`. A seat
+    # cannot vote itself the right to act.
+    discuss_only = bool(state.get("discuss_only"))
+    offered = DISCUSSION_TOOLS if discuss_only else BUILDER_TOOLS
+    allowed = DISCUSSION_TOOL_NAMES if discuss_only else BUILDER_TOOL_NAMES
+
     messages: list[Any] = [
-        SystemMessage(content=BUILDER_PROMPT),
+        SystemMessage(
+            content=BUILDER_PROMPT + (DISCUSSION_NOTE if discuss_only else "")
+        ),
         HumanMessage(
             content=f"{state_injection}\n\nPlan to implement:\n{plan}\n\n"
             f"Research findings:\n{research}"
@@ -1660,7 +1706,7 @@ def builder_node(state: AgentState) -> AgentState:
 
     llm = get_agent_llm("builder")
     try:
-        tool_llm = llm.bind_tools(BUILDER_TOOLS)
+        tool_llm = llm.bind_tools(offered)
     except AttributeError:
         # A seat whose model cannot call tools at all -- StubLLM, or a tag
         # without tool support. It still reports; it just cannot change a file.
@@ -1682,7 +1728,7 @@ def builder_node(state: AgentState) -> AgentState:
         content = reply or ""
     else:
         content, exhausted, out_of_time, stopped = _run_builder_tools(
-            tool_llm, messages, files_changed, tool_log, loop_deadline
+            tool_llm, messages, files_changed, tool_log, loop_deadline, allowed
         )
 
     # Every runnable file the Builder wrote is executed before it gets to claim
@@ -1895,6 +1941,12 @@ def builder_node(state: AgentState) -> AgentState:
             f"Stopped at the {int(BUILDER_DEADLINE_SECONDS)}s deadline. "
             f"Files: {len(files_changed)}"
         )
+    elif discuss_only:
+        # Never "Implementation complete" -- nothing was implemented, and the
+        # Architect rules on this line. The same rule the stop and the deadline
+        # already follow: a pass that could not act must not read as one that
+        # acted.
+        summary = "Discussion only: proposal ready, nothing was changed"
     else:
         summary = f"Implementation complete. Files: {len(files_changed)}"
     # Every count above is this pass, which is what just happened and so what

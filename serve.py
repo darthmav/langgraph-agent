@@ -871,8 +871,14 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     # that respects the corpus-write rule.
     # Off unless the caller asks, the same shape as `expect_failures` below and
     # for the same reason: what this turns on cannot be judged from the goal.
+    # A discussion run never researches online whatever the box says -- the
+    # phase writes pages under research/web/ and embeds them, which is a change
+    # to this machine and to every later run's corpus. "No actions" has to mean
+    # that too, so the two flags are resolved here rather than left to the
+    # operator to keep consistent.
+    discuss_only = bool(params.get("discuss_only", False))
     research_report = _research_online_before_the_run(
-        goal, bool(params.get("research_web", False))
+        goal, bool(params.get("research_web", False)) and not discuss_only
     )
     research_line = _research_feed_line(research_report)
     print(f"[run] research -> {research_line}")
@@ -901,6 +907,9 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         # stop: a file nobody executed is unproven, not expected-to-fail, and
         # goes on blocking approval either way.
         "expect_failures": bool(params.get("expect_failures", False)),
+        # Reasoning without acting: the Builder is offered read-only tools
+        # alone. Set by the caller, never by an agent.
+        "discuss_only": discuss_only,
         "step_count": 0,
     }
     # Streamed rather than invoked so the last state survives the ceiling.

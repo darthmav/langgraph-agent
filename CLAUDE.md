@@ -201,6 +201,7 @@ Every node reads/writes `AgentState`:
     "files_changed": list[str],
     "failed_verification": list[str],
     "expect_failures": bool,
+    "discuss_only": bool,
     "step_count": int,
 }
 ```
@@ -400,6 +401,30 @@ four the moment this file described the problem.
   exist yet, and a symlinked parent is the way out that matters -- and it
   resolves rather than matching strings, because `project/link/x` is inside the
   root as text and outside it on disk.
+- **`discuss_only` is the per-run "reason, do not act" switch**, set by the
+  caller (the console's *discussion only* box, or
+  `run_goal({goal, discuss_only: true})`) and never by an agent -- the third
+  flag of that shape, after `expect_failures` and `research_web`. The Builder
+  is offered `DISCUSSION_TOOLS` instead of the full belt: `filesystem_read`,
+  `git_status` and `git_diff`, which change nothing. Reading is not acting, and
+  a discussion grounded in what the files say beats one the seats invent.
+  `terminal_execute` and `run_tests` are withheld with the write tool because a
+  command's effect cannot be judged from its text -- `ls` and `rm -rf /` arrive
+  through the same argument, and a whitelist of safe-looking commands is the
+  character filter `terminal_execute` already threw out. Online research is
+  forced off whatever its own box says, since the phase writes pages under
+  `research/web/` and embeds them, which changes this machine and every later
+  run's retrieval. Two things make the guarantee more than a promise. The
+  refusal is enforced in `_run_builder_tools` as well as in the offered list,
+  because the two answer different questions -- what the model was told about,
+  and what actually runs -- so a seat that calls a tool it was never given is
+  still refused. And the feed line reads "Discussion only: proposal ready,
+  nothing was changed" rather than "Implementation complete", for the reason
+  the stop and the deadline have their own wording: the Architect rules on that
+  line, and a pass that could not act must not read as one that acted. The
+  prompt carries `DISCUSSION_NOTE` so the seat is told up front; without it a
+  pass can spend all `MAX_BUILDER_TOOL_TURNS` discovering the refusals one at a
+  time.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line

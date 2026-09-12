@@ -2044,3 +2044,111 @@ def test_no_seat_is_working_once_the_run_is_over(agent_graph):
                        {"recursion_limit": RECURSION_LIMIT})
     assert ACTIVITY.current() == ""
     assert ACTIVITY.busy_for() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# discussion-only runs
+# ---------------------------------------------------------------------------
+
+
+class _TriesToWriteLLM(_ToolCallingLLM):
+    """A Builder that reaches for a write tool regardless of what it was offered.
+
+    Which is the case that matters: the guarantee cannot rest on the model
+    having read its tool schema.
+    """
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(content="", tool_calls=[{
+                "name": "filesystem_write",
+                "args": {"path": str(self._path), "content": "should never land\n"},
+                "id": "call_1",
+            }])
+        return AIMessage(content=(
+            "## Changes Made\nProposed.\n\n"
+            f"## Files Modified\n- {self._path}\n\n"
+            "## Next Steps / Blockers\nnone\n"
+        ))
+
+
+def test_a_discussion_run_offers_only_read_only_tools(monkeypatch, tmp_path):
+    """No write, no terminal, no tests -- and the three that remain change nothing."""
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import DISCUSSION_TOOL_NAMES, builder_node
+
+    llm = _ToolCallingLLM(tmp_path / "x.txt")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    state = initial_state("Talk it through")
+    state["plan"] = "1. Consider it"
+    state["discuss_only"] = True
+    builder_node(state)
+
+    offered = {tool["function"]["name"] for tool in llm.bound}
+    assert offered == set(DISCUSSION_TOOL_NAMES)
+    assert not offered & {"filesystem_write", "terminal_execute", "run_tests"}
+
+
+def test_a_discussion_run_refuses_a_write_it_was_not_offered(monkeypatch, tmp_path):
+    """The guarantee is enforced where tools run, not only where they are listed.
+
+    A model that calls a tool it was never given must still be refused, or
+    "takes no actions" rests on the seat's good manners.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "never.py"
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _TriesToWriteLLM(target),
+    )
+
+    state = initial_state("Talk it through")
+    state["plan"] = "1. Consider it"
+    state["discuss_only"] = True
+    result = builder_node(state)
+
+    assert not target.exists(), "a discussion run must not write to disk"
+    assert result["files_changed"] == []
+    assert "discussion-only" in result["builder_report"]
+
+
+def test_a_discussion_run_is_not_reported_as_implementation(monkeypatch, tmp_path):
+    """The Architect rules on this line; nothing was implemented."""
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+
+    state = initial_state("Talk it through")
+    state["plan"] = "1. Consider it"
+    state["discuss_only"] = True
+    result = builder_node(state)
+
+    assert "Implementation complete" not in result["messages"][-1]
+    assert "Discussion only" in result["messages"][-1]
+
+
+def test_the_full_belt_is_still_offered_when_the_box_is_off(monkeypatch, tmp_path):
+    """The default must not be quietly narrowed by adding the flag."""
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import BUILDER_TOOL_NAMES, builder_node
+
+    llm = _ToolCallingLLM(tmp_path / "x.txt")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    builder_node(initial_state("Do the thing"))
+
+    assert {tool["function"]["name"] for tool in llm.bound} == BUILDER_TOOL_NAMES
