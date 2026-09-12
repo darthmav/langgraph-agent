@@ -715,8 +715,32 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     return {"exiting": True, "running": False, "detail": "The server is exiting."}
 
 
-def _research_online_before_the_run(goal: str) -> dict[str, Any]:
+def _research_online_before_the_run(goal: str, requested: bool) -> dict[str, Any]:
     """Search the web for the goal and embed what earns a place. Never raises.
+
+    Runs only when the caller asked for it (`requested`), and the caller is the
+    operator -- never an agent, exactly as `expect_failures` is. That is a
+    measured decision, not caution. Three gates were built and graded against
+    thirteen hand-labelled pages from two real runs, and all three failed:
+    ranking fetched pages against the project's own documents (a keyword-dense
+    marketing page outscores every file in the checkout), skipping the phase
+    when the corpus already answers the goal (backwards on the measurement --
+    0.351 for a goal needing no web at all, 0.405 for one that did), and the
+    calibrated `RETRIEVAL_RELEVANCE_FLOOR` itself (3/13: every page cleared it).
+    The lambda run shows why no fourth threshold will do better -- the *wrong*
+    pages outscore the right ones on both instruments, 0.553-0.631 for AWS
+    Lambda deployment guides against 0.459-0.550 for the Dolphin model pages
+    the goal was actually about. "LAMBDA" meant a model on this machine and
+    the web means AWS; "local project data" is, as a bag of words, generic
+    project-documentation advice. The information that settles it is the
+    operator's intent, and it is in no comparison of goal text to page text.
+
+    The cost of guessing wrong is not one bad run. A fetched page becomes a
+    permanent corpus member indistinguishable from project knowledge: after the
+    run of 2026-09-11 the five blogs it kept took every one of the top five
+    retrieval slots for that goal, shutting the project's own files out
+    entirely, and would have gone on answering any query near "project
+    documentation" for as long as they sat there.
 
     This runs **before** `graph.stream` and never during it, and that ordering
     is the design rather than a convenience. `_refuse_while_a_run_is_in_flight`
@@ -754,6 +778,13 @@ def _research_online_before_the_run(goal: str) -> dict[str, Any]:
     a reason to refuse to run against the corpus already on disk, and the
     report distinguishes them so the feed can say which happened.
     """
+    if not requested:
+        # Kept apart from `disabled` for the reason `search_web` keeps its three
+        # empty outcomes apart: "this run did not ask" and "this machine has it
+        # switched off" call for different things from the operator, and an
+        # empty count reads identically in both.
+        return {"source": "not_requested", "documents": 0, "considered": 0, "note":
+                "Online research was not requested for this run."}
     if RUN_CONTROL.stopped():
         return {"source": "stopped", "documents": 0, "considered": 0, "note":
                 "Stopped before the online research phase began."}
@@ -782,6 +813,12 @@ def _research_feed_line(report: dict[str, Any]) -> str:
     considered = report.get("considered", 0)
     kept = report.get("documents", 0)
 
+    if source == "not_requested":
+        return (
+            "[Research] Online research was not requested; running against the "
+            "corpus as it stands. Tick 'Research online' to search the web for "
+            "this goal."
+        )
     if source == "disabled":
         return "[Research] Online research is switched off; running against the corpus as it stands."
     if source == "stopped":
@@ -832,7 +869,11 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     # Online research first, then the embedder, then the Architect opens --
     # see `_research_online_before_the_run` for why that order is the only one
     # that respects the corpus-write rule.
-    research_report = _research_online_before_the_run(goal)
+    # Off unless the caller asks, the same shape as `expect_failures` below and
+    # for the same reason: what this turns on cannot be judged from the goal.
+    research_report = _research_online_before_the_run(
+        goal, bool(params.get("research_web", False))
+    )
     research_line = _research_feed_line(research_report)
     print(f"[run] research -> {research_line}")
     with _run_lock:

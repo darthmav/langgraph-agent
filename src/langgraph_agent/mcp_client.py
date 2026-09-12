@@ -211,6 +211,66 @@ def _unexpanded_hint(argv: list[str], stderr: str) -> str | None:
     return None
 
 
+# The base every filesystem tool resolves a relative path against: the server's
+# working directory, which is the project root. Named here so `_resolve_cwd`,
+# `filesystem_read` and `filesystem_write` cannot drift into three bases -- one
+# relative path has to mean one place across the whole tool belt.
+def _project_root() -> Path:
+    return Path.cwd().resolve()
+
+
+def _resolve_write_path(requested: Any) -> tuple[Path | None, str | None]:
+    """Resolve a requested write path to `(path, error)`, refusing to escape the project.
+
+    An error is returned *instead of* a path, never alongside one, the same
+    shape `_resolve_cwd` uses and for the same reason: the caller must not be
+    able to act on half an answer.
+
+    This is containment, not safety theatre. `filesystem_write` took its
+    argument raw and called `Path(path).write_text()` behind a
+    `parent.mkdir(parents=True)`, so an absolute path, a `..` or a symlink put
+    the Builder's writes anywhere the account could reach -- and it did: the
+    run of 2026-09-11 wrote `/tmp/gen_doc.py` and `/tmp/gen_overview.py` while
+    working on a goal about this checkout. Two costs, and the second is the one
+    that bites. The obvious cost is a file left outside the project that no
+    reindex, no `corpus_staleness` and no `git status` will ever mention. The
+    quiet one is that `files_changed` feeds the console's "changed this
+    machine" notice, so a write outside the root makes that notice name a path
+    the operator cannot find from the project -- the same false account as a
+    Builder claiming a file it never wrote, which this project already guards
+    in `_report_path_key`, pointing the other way.
+
+    The path is resolved *before* the write rather than checked after, and
+    `resolve()` is what does it: a check on the literal string would pass
+    `project/link/x` where `link` points at `/etc`, because only resolution
+    knows where a symlink lands. The parent is resolved rather than the file
+    itself, since the file is usually about to be created and
+    `strict=False` resolution of a missing leaf is exactly what we want.
+
+    `~` is not expanded, for the reason `_resolve_cwd` gives: there is no shell
+    here, and a path that quietly expanded what an argument on the same line
+    would not is a worse surprise than a refusal naming the path.
+    """
+    if not isinstance(requested, str) or not requested.strip():
+        return None, f"Invalid path: {requested!r}. Pass a file path inside the project."
+    root = _project_root()
+    candidate = Path(requested)
+    # Resolve the parent, not the leaf: the leaf normally does not exist yet,
+    # and a symlinked *parent* is the way out of the root that matters.
+    resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None, (
+            f"Refusing to write outside the project: {requested!r} resolves to "
+            f"{resolved}, which is not under {root}. Write inside the project; "
+            "a file outside it is invisible to the reindex, to corpus staleness "
+            "and to git, and makes the run's 'changed this machine' notice name "
+            "a path nobody can find."
+        )
+    return resolved, None
+
+
 def _resolve_cwd(requested: Any) -> tuple[str | None, str | None]:
     """Resolve a requested working directory to `(cwd, error)`.
 
@@ -409,11 +469,18 @@ class MCPClient:
             return {"success": False, "error": str(e), "path": path}
 
     async def _filesystem_write(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Write file contents, creating parent directories if needed."""
+        """Write file contents inside the project, creating parent directories if needed.
+
+        The path goes through `_resolve_write_path` first, which refuses
+        anything landing outside the project root -- see it for why a raw
+        `Path(path).write_text()` here was worth closing.
+        """
         path = args.get("path", "")
         content = args.get("content", "")
+        file_path, error = _resolve_write_path(path)
+        if error is not None or file_path is None:
+            return {"success": False, "error": error, "path": path}
         try:
-            file_path = Path(path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return {"success": True, "path": path, "bytes_written": len(content)}

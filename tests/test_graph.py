@@ -307,6 +307,9 @@ class _ToolCallingLLM:
 
 def test_builder_writes_through_a_tool_call(monkeypatch, tmp_path):
     """The Builder's file changes come from real tool calls, not from prose."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "written.txt"
@@ -449,6 +452,9 @@ def test_builder_runs_the_python_it_writes(monkeypatch, tmp_path):
     This is the failure that shipped: a file written, reported complete, and
     approved -- which raised an AssertionError the first time it was run.
     """
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "broken.py"
@@ -471,6 +477,9 @@ def test_builder_runs_the_python_it_writes(monkeypatch, tmp_path):
 
 def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
     """A file that executes cleanly verifies, and sets no blocker."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "fine.py"
@@ -488,6 +497,9 @@ def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
 
 def test_builder_only_executes_runnable_files(monkeypatch, tmp_path):
     """Markdown has nothing to run; the verification pass must skip it."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "notes.md"
@@ -650,6 +662,9 @@ def test_a_later_pass_keeps_what_an_earlier_one_wrote(monkeypatch, tmp_path):
 
 def test_a_new_file_adds_to_the_record_rather_than_replacing_it(monkeypatch, tmp_path):
     """Two passes that each write a file end with both on the record."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     earlier = tmp_path / "earlier.py"
@@ -720,6 +735,9 @@ def test_a_deleted_file_clears_its_failure(monkeypatch, tmp_path):
 
 def test_a_fixed_file_clears_its_failure(monkeypatch, tmp_path):
     """Once the file actually runs, the failure is retired."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "broken.py"
@@ -765,6 +783,9 @@ def test_expect_failures_lets_the_gate_approve(monkeypatch):
 
 def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
     """The opt-out suppresses the block, not the check."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "fixture.py"
@@ -793,6 +814,9 @@ def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
     that as a failure pinned failed_verification open on a working package and
     the gate rewrote every `approved` to `revise` until the step ceiling.
     """
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     pkg = tmp_path / "pkg"
@@ -817,6 +841,9 @@ def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
 
 def test_a_root_level_script_is_still_executed(monkeypatch, tmp_path):
     """The skip is for package modules only; a loose script still has to run."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "verify_it.py"  # no __init__.py beside it
@@ -1115,6 +1142,9 @@ class _SlowToolCallingLLM(_ToolCallingLLM):
 
 def test_a_hung_builder_keeps_the_files_it_already_wrote(monkeypatch, tmp_path):
     """The deadline ends the turn; it does not discard completed work."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     import threading
 
     from langgraph_agent import nodes
@@ -1148,6 +1178,9 @@ def test_a_tool_call_is_never_abandoned_midway(monkeypatch, tmp_path):
     `filesystem_write` would go on writing into the project after the node had
     returned, which is worse than the hang the deadline exists to stop.
     """
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     import time
 
     from langgraph_agent import nodes
@@ -1567,6 +1600,9 @@ class _StopsAfterWritingLLM(_ToolCallingLLM):
 
 def test_a_stopped_builder_keeps_the_files_it_already_wrote(monkeypatch, tmp_path):
     """The write in flight completes; the next turn never starts."""
+    # The Builder writes inside the project root (`_resolve_write_path`),
+    # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
     target = tmp_path / "half.txt"

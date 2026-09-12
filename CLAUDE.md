@@ -368,6 +368,12 @@ four the moment this file described the problem.
   as claiming a file that was never written, pointing the other way. The feed
   line still counts this pass, and names the running total only when the two
   differ, so a quiet pass never reads as though the run lost its work.
+- **`filesystem_write` refuses to leave the project.** `_resolve_write_path`
+  resolves the parent, symlinks included, and rejects anything landing outside
+  the root. It took its argument raw until 2026-09-11, when a run wrote
+  `/tmp/gen_doc.py` while working on this checkout: a file no reindex, no
+  `corpus_staleness` and no `git status` will ever mention, and a "changed this
+  machine" notice naming a path the operator cannot find from the project.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line
@@ -1168,6 +1174,14 @@ four the moment this file described the problem.
   which parsed as a genuine empty web; `_search_duckduckgo` recognises it by
   its markup and raises `_SearchBlocked`, and the fan-out stops there, since
   each further request prolongs the block.
+  **It is per-run opt-in, default off** (`research_web`, the console's *research
+  online* box) -- set by the caller, never by an agent, like `expect_failures`.
+  Relevance cannot be decided from the goal text: three gates were graded
+  against 13 hand-labelled pages from two real runs and all three failed, the
+  last of them `RETRIEVAL_RELEVANCE_FLOOR` itself at 3/13. On the 2026-09-11
+  run the five kept blogs then took every top-five retrieval slot for that
+  goal, shutting the project's own files out.
+  `_research_online_before_the_run` carries the numbers.
   **It runs before the Architect opens, and that ordering is the design.**
   `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
   lock and before `graph.stream`, so the corpus is whole by the time any seat
