@@ -797,7 +797,7 @@ four the moment this file described the problem.
   abandoned worker would hold up interpreter shutdown.
 - **A document is embedded in chunks, because the model's window is 256
   tokens and silence is how it says so.** `add_document` used to embed a whole
-  file in one `encode()` call while `MAX_INDEXABLE_BYTES` allowed 100 KB, so
+  file in one `encode()` call while `MAX_INDEXABLE_BYTES` then allowed 100 KB, so
   everything past roughly the first thousand characters was discarded --
   without an error, a warning, or a counter that moved. Measured before the
   fix: **73 of 77 documents truncated, 224,809 tokens present and 19,147
@@ -1334,6 +1334,21 @@ four the moment this file described the problem.
   what happened, and the guard was never meant to be a figure anybody tracks by
   hand. `oversized` is the guard -- it reports a file the walk offers and the
   indexer must skip, apart from `stale` because a reindex cannot fix it.
+  **The limit itself was raised to 250,000 on 2026-09-11, and the old number's
+  stated reason had expired.** It said a file that large "would dominate the
+  embedding budget", which was true when a document was embedded as one vector;
+  chunking ended that, and `search` collapsing chunks onto documents ended it
+  again -- a document takes exactly one result slot however many chunks it
+  holds, measured at 1 of 5 for CLAUDE.md, which carries 7.1% of all chunks.
+  What 100,000 still did was decide the project's shape: `corpus_health.py` is
+  a separate module because of it, `nodes.py` had reached 82% of it and this
+  file 99.99%, so the next paragraph written here would have silently cost the
+  project its own documentation. The ceiling is not unbounded, though, and the
+  reason is at the constant: `search` fills a window of chunks *before*
+  collapsing them, so a document large enough to fill that window with itself
+  starves every other source. `INDEXABLE_WARN_RATIO` now fails the suite at 80%
+  of the limit, because `oversized` only fires once a file is already being
+  skipped -- which is the point at which the only fix left is surgery.
   The walk is cached for `WALK_CACHE_SECONDS` since the console polls every
   five seconds; `forget_expected_documents` drops it, and
   `rpc_upload_document` calls it because an upload is the one writer that

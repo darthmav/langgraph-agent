@@ -197,7 +197,7 @@ ENTITY_STOPWORDS = frozenset(
 # embedded badly, it is **silently truncated and the tail discarded**.
 #
 # That is what this constant exists to stop. A document used to be embedded
-# whole, in one `encode()` call, with `MAX_INDEXABLE_BYTES` allowing 100 KB --
+# whole, in one `encode()` call, with `MAX_INDEXABLE_BYTES` then allowing 100 KB --
 # so the vector for a 46 KB file was computed from its first ~1,000 characters
 # and nothing else. Measured on this project's own corpus before chunking: 73
 # of 77 documents over the limit, 224,809 tokens present and 19,147 embedded,
@@ -1211,9 +1211,34 @@ PROJECT_INDEX_EXCLUDES = (
     "reports/diagnostics/",
 )
 
-# Above this size a file is documentation of something else, not a unit of
-# knowledge, and it would dominate the embedding budget.
-MAX_INDEXABLE_BYTES = 100_000
+# Above this size a file is not a document at all -- a data dump, a minified
+# bundle, a log -- and reading it into the corpus indexes something nobody
+# wrote. It was 100,000, and that number outlived its own justification: it
+# said such a file "would dominate the embedding budget", which was true when
+# `add_document` embedded a whole file as ONE vector and a long document's
+# single embedding competed with everyone else's. Chunking ended that, and
+# `search` collapsing chunks back onto documents ended it twice -- a document
+# now takes exactly one result slot however many chunks it holds. Measured on
+# this corpus: CLAUDE.md carries 7.1% of all 1,687 chunks and returned in
+# exactly 1 of 5 slots on every query tried, never more.
+#
+# What the old number did instead was dictate the shape of the project.
+# `corpus_health.py` exists as a separate module because adding the staleness
+# check pushed `graphrag_server.py` from 98,920 characters to 104,582 -- the
+# module that defines the corpus would have dropped out of it. By 2026-09-11
+# `nodes.py` stood at 82% of the limit, `graphrag_server.py` at 75%,
+# `test_graph.py` at 73%, and CLAUDE.md had 13 characters left, so the next
+# paragraph anyone wrote would have silently cost the project its own
+# documentation. A constant that decides how files must be split is not
+# measuring anything about knowledge.
+#
+# The remaining real risk sets the ceiling, and it is why this is 250,000 and
+# not unbounded: `search` retrieves a window of chunks *before* collapsing
+# them, so a document holding a large enough share of the corpus can fill that
+# window with itself and starve every other source -- the case
+# `SEARCH_ESCALATION` widens the window for. At 7.1% the largest document here
+# is nowhere near it; a file several times this limit would be.
+MAX_INDEXABLE_BYTES = 250_000
 
 # Where a document uploaded from the console lands, relative to the project
 # root. An upload is written to disk *before* it is embedded, and that ordering
