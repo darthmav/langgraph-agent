@@ -1175,6 +1175,60 @@ BUILDER_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "git_dwell",
+            "description": (
+                "Run the whole git flow in order: survey, branch, stage, "
+                "commit, push, open a pull request. Prefer this over a series "
+                "of terminal git commands -- it runs the stages in the only "
+                "order that works, stops at the first failure and says which "
+                "stage stopped it. It never commits onto the default branch: "
+                "it creates a branch instead. It does NOT merge unless you put "
+                "'merge' in stages, and you should only do that if the goal "
+                "explicitly asked for the change to be merged."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": (
+                            "Commit message; its first line becomes the pull "
+                            "request title and the whole message its body. "
+                            "Required for the commit stage."
+                        ),
+                    },
+                    "stages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Stages to run, from: survey, branch, stage, "
+                            "commit, push, pr, merge. They always run in that "
+                            "order. Defaults to everything except merge."
+                        ),
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Paths to stage. Defaults to every change in the "
+                            "working tree; name paths to commit only your own."
+                        ),
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": (
+                            "Branch to create when HEAD is the default branch. "
+                            "Derived from the message when omitted."
+                        ),
+                    },
+                },
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "terminal_execute",
             "description": (
                 "Run one program in the project. There is no shell: the command is "
@@ -1435,7 +1489,24 @@ def _run_builder_tools(
             if not ok:
                 reason = _failure_reason(result)
                 outcome = f"failed: {reason}" if reason else "failed"
-            tool_log.append(f"{name}({target}){where} -> {outcome}")
+            if name == "git_dwell":
+                # This one call is a whole pipeline, and `ok` alone hides which
+                # part of it ran. A push that failed after a commit succeeded
+                # is a different situation from one that never committed, and
+                # the Architect rules on this line. So the stages are named,
+                # and the argument shown is the stage list rather than a path
+                # -- `git_dwell()` would otherwise log an empty target for the
+                # most consequential call the Builder can make.
+                target = ",".join(str(x) for x in (args.get("stages") or [])) or "default"
+                done = [
+                    e["stage"] for e in (result.get("stages") or [])
+                    if isinstance(e, dict) and e.get("ok")
+                ]
+                reached = f" [{' -> '.join(done)}]" if done else ""
+                outcome = outcome if ok else f"{outcome} at {result.get('stopped_at', '?')}"
+                tool_log.append(f"{name}({target}){reached} -> {outcome}")
+            else:
+                tool_log.append(f"{name}({target}){where} -> {outcome}")
 
             payload = json.dumps(result, default=str)
             if len(payload) > MAX_TOOL_RESULT_CHARS:

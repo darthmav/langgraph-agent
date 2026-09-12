@@ -76,6 +76,7 @@ python example_usage.py
 │   └── builder.txt
 ├── tests/
 │   ├── conftest.py            # Forces StubLLM; switches the web phase off
+│   ├── test_git_dwell.py      # The ordered git pipeline, and its two refusals
 │   ├── test_claims.py         # Documentation claims, made executable
 │   ├── test_corpus_absent.py  # The two doors: reading never creates a corpus
 │   ├── test_graph.py          # Pytest suite
@@ -424,6 +425,33 @@ four the moment this file described the problem.
   line, and a pass that could not act must not read as one that acted. The
   prompt carries `DISCUSSION_NOTE` so the seat is told it has no tools and
   works from the plan and research it was handed.
+- **`git_dwell` is the whole git flow as one call, and it stops before the
+  irreversible part.** The stages are `survey`, `branch`, `stage`, `commit`,
+  `push`, `pr`, `merge`, and they always run in that order however the caller
+  lists them -- "push then commit" is a typo, not an instruction. Each stage
+  records the command's real output, so the result is an account of what
+  happened rather than a claim that it did, and a failure names itself in
+  `stopped_at`: a pipeline reporting only "failed" gets retried whole and
+  re-runs the parts that already worked. It exists because the Builder was
+  otherwise driving `git` through `terminal_execute` one command at a time,
+  where the ordering is the seat's to remember and a half-finished sequence
+  leaves no record of how far it got.
+  Two refusals carry the design. *It will not commit onto the default branch*
+  -- `branch` creates one when HEAD is the default, and skipping that stage is
+  refused rather than treated as permission, since an agent picking its own
+  stage list would find that gap immediately. *And it will not merge unless
+  the caller names `merge` in `stages`*: the default pipeline stops at `pr`,
+  because a pull request the same agent opens and immediately merges is not a
+  review, it is two commands in a row. Nothing infers the intent to merge from
+  the goal, the plan or the commit message. Both refusals are pinned by tests
+  that were watched to fail with the guard removed.
+  Two smaller decisions matter. *Nothing staged is a success, not a failure* --
+  a clean tree is an ordinary outcome, and failing there sends the Builder off
+  repairing a repository that was never broken; the stages that only make sense
+  after a commit are dropped instead. *And `paths` commits only what it names*,
+  defaulting to everything, because the Builder shares a working tree with
+  whoever is running the console. A `discuss_only` run cannot reach it at all:
+  no tools are bound.
 - **The Builder must run what it writes.** Every file it wrote with a
   `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
   the tool loop, and a file that raises becomes a blocker plus a `FAILED` line

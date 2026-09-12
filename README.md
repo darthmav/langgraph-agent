@@ -377,6 +377,7 @@ unified MCP-style interface:
 | `filesystem_write` | Builder | Write a file |
 | `git_status` | Builder | `git status --porcelain` |
 | `git_diff` | Builder | `git diff` |
+| `git_dwell` | Builder | The whole git flow in order: survey, branch, stage, commit, push, open a PR. Never commits onto the default branch, and never merges unless `merge` is named in `stages` |
 | `terminal_execute` | Builder | Run one program, no shell (killed after `TERMINAL_TIMEOUT_SECONDS`, default 60; pass `timeout` to raise) |
 | `run_tests` | Builder | Run `pytest` |
 
