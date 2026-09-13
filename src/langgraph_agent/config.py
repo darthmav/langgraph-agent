@@ -189,18 +189,45 @@ def ollama_model_capabilities(model: str) -> list[str] | None:
     return caps
 
 
+def _ollama_ps() -> list[dict[str, Any]]:
+    """Every model the local daemon has loaded, as `/api/ps` lists them.
+
+    Raises when the daemon cannot be asked; each caller decides what that means.
+    """
+    with urllib.request.urlopen(f"{_ollama_base_url()}/api/ps", timeout=2.0) as response:
+        payload = json.loads(response.read())
+    return list(payload.get("models", []))
+
+
 def _ollama_models_in_memory() -> list[tuple[str, int]]:
     """(tag, bytes of it on a GPU) for every model the local daemon has loaded.
 
     Raises when the daemon cannot be asked. The one caller reads that as
     nothing to unload, which is what an unreachable daemon holds.
     """
-    with urllib.request.urlopen(f"{_ollama_base_url()}/api/ps", timeout=2.0) as response:
-        payload = json.loads(response.read())
     return [
         (str(entry.get("name") or entry.get("model")), int(entry.get("size_vram") or 0))
-        for entry in payload.get("models", [])
+        for entry in _ollama_ps()
     ]
+
+
+def ollama_cpu_share(model: str) -> float | None:
+    """The fraction of a loaded `model` the daemon holds in system memory, not on a GPU.
+
+    0.0 when it is wholly on the cards. None when it is not loaded or the
+    daemon cannot be asked, because an unknown split is not a clean one.
+    """
+    try:
+        loaded = _ollama_ps()
+    except Exception:
+        return None
+    for entry in loaded:
+        if _same_ollama_tag(str(entry.get("name") or entry.get("model")), model):
+            size = int(entry.get("size") or 0)
+            if size <= 0:
+                return None
+            return max(0.0, 1.0 - int(entry.get("size_vram") or 0) / size)
+    return None
 
 
 def _same_ollama_tag(a: str, b: str) -> bool:

@@ -147,10 +147,26 @@ def persist_dir_for(model: str) -> str:
 
 
 # Seconds one batch of passages may take through Ollama. Measured for
-# qwen3-embedding (7.6B) on 2x GTX 1060 3GB: 24 passages in 101s after a 12.5s
-# load, so a batch of 8 takes ~35s -- and the first batch of a run waits for
-# the load too.
+# qwen3-embedding (7.6B) on 2x GTX 1060 3GB: a batch of 8 took ~35s with the
+# model split onto the CPU and ~17s wholly on the cards (`OLLAMA_EMBED_OPTIONS`)
+# -- and the first batch of a run waits for the load too.
 OLLAMA_EMBED_TIMEOUT_SECONDS = 600.0
+
+# The window and batch every Ollama embedding model is loaded with, sent on
+# every call. Ollama loads one at a 4,096-token window with a 2,048-token batch
+# by default, and on 2x GTX 1060 3GB qwen3-embedding then asked for 7,463 MiB
+# against 6,217 free -- 4,453 of weights, 576 of KV cache and 2,433 of compute
+# buffers sized for that batch -- so the daemon ran 25 of its 37 layers on the
+# cards and the rest on the CPU, at 0.24 passages/s. At 512 it takes 4,987 MiB,
+# 37 of 37 on the cards, at 0.48 passages/s, and the vectors do not move:
+# cosine 1.000000 against the default load on the corpus's eight longest
+# passages, which peaked at 362 of its tokens. A longer input -- a query that
+# is a whole plan -- is cut at 511 tokens rather than refused, which is still
+# twice what MiniLM reads. 1,024 fits as well (5,403 MiB) at the same speed
+# with half the room to spare. Every call sends the same options because the
+# daemon reloads a model whose options changed, so a search at another window
+# would evict the runner an index is using.
+OLLAMA_EMBED_OPTIONS: dict[str, int] = {"num_ctx": 512, "num_batch": 512}
 
 
 class EmbeddingStopped(RuntimeError):
@@ -176,6 +192,23 @@ class OllamaEmbedder:
     def __init__(self, model: str) -> None:
         self.model = model
         self._tokenizer: Any = None
+        # How much of the model the daemon left on the CPU when it last
+        # embedded. The reply is identical either way, so this is the only
+        # place a split that quarters the speed shows. None until a call has
+        # loaded the model, or when the daemon cannot say.
+        self.cpu_share: float | None = None
+
+    @property
+    def placement_note(self) -> str | None:
+        """Why this model embeds slowly when the daemon split it onto the CPU; None otherwise."""
+        if not self.cpu_share:
+            return None
+        percent = max(1, round(self.cpu_share * 100))
+        return (
+            f"Ollama holds {percent}% of {self.model} on the CPU, which embeds at a "
+            f"fraction of the speed. It fits the cards at a {OLLAMA_EMBED_OPTIONS['num_ctx']}"
+            "-token window when nothing else holds them; `ollama ps` shows what does."
+        )
 
     @property
     def tokenizer(self) -> Any:
@@ -206,7 +239,7 @@ class OllamaEmbedder:
 
         import numpy as np
 
-        from langgraph_agent.config import _ollama_base_url
+        from langgraph_agent.config import _ollama_base_url, ollama_cpu_share
 
         single = isinstance(texts, str)
         items = [texts] if single else list(texts)
@@ -218,7 +251,9 @@ class OllamaEmbedder:
             batch = items[start : start + step]
             request = urllib.request.Request(
                 f"{_ollama_base_url()}/api/embed",
-                data=json.dumps({"model": self.model, "input": batch}).encode(),
+                data=json.dumps(
+                    {"model": self.model, "input": batch, "options": OLLAMA_EMBED_OPTIONS}
+                ).encode(),
                 headers={"Content-Type": "application/json"},
             )
             try:
@@ -240,6 +275,11 @@ class OllamaEmbedder:
                     f"passages from {self.model}"
                 )
             vectors.extend(embeddings)
+            if start == 0:
+                # Asked on every call, once its first batch has loaded the
+                # model: the daemon reloads a model something else evicted, and
+                # fits the reload around whatever holds the cards by then.
+                self.cpu_share = ollama_cpu_share(self.model)
         array = np.asarray(vectors, dtype=np.float32)
         return array[0] if single else array
 
@@ -743,7 +783,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     # the tests assemble field by field.
     embedding_model: str = EMBEDDING_MODEL_NAME
     # Set by `index_project_files` while it runs, so an embedding through
-    # Ollama -- ~35s a batch for qwen3-embedding here -- stops between batches
+    # Ollama -- ~17s a batch for qwen3-embedding here -- stops between batches
     # instead of finishing a document that can take minutes.
     _should_stop: "Callable[[], bool] | None" = None
 
@@ -887,9 +927,11 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         model = self.embedder
         try:
             if isinstance(model, OllamaEmbedder):
-                return model.encode(
+                vectors = model.encode(
                     texts, batch_size=EMBEDDING_BATCH_SIZE, should_stop=self._should_stop
                 )
+                self.embedding_device_note = model.placement_note
+                return vectors
             return model.encode(texts, batch_size=EMBEDDING_BATCH_SIZE, show_progress_bar=False)
         except Exception as exc:
             # Only a card falls back to the CPU. The CPU model is MiniLM, and
@@ -2348,10 +2390,14 @@ def embedding_device_status() -> dict[str, Any]:
     kb = _kb_instance
     loaded = kb is not None and kb._embedder is not None
     ollama = embedding_backend(active_embedding_model()) == "ollama"
+    embedder = kb._embedder if kb is not None else None
     return {
         "configured": "ollama" if ollama else EMBEDDING_DEVICE,
         "active": kb.embedding_device if kb is not None and loaded else None,
         "note": kb.embedding_device_note if kb is not None else None,
+        # Ollama only: the share of the model the daemon left on the CPU when
+        # it last embedded. None until something has, or when it cannot say.
+        "cpu_share": embedder.cpu_share if isinstance(embedder, OllamaEmbedder) else None,
     }
 
 

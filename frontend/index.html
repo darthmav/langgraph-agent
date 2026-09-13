@@ -1838,13 +1838,18 @@ function applyIndexableSuffixes(suffixes){
 // a local seat, leaves the model on the CPU. That fallback is the one reading
 // here worth colouring -- the embedder still works, only slower, which is
 // exactly the kind of failure nobody notices -- and its reason is on hover.
+// An Ollama model has the same failure in another shape: the daemon splits a
+// model that does not fit the cards and runs the rest on the CPU.
 function showEmbeddingDevice(dev){
   const box = $("#embed"), where = $("#embed-where");
   if(!dev){ where.textContent = "runs on this machine"; return; }
-  const fell = Boolean(dev.active) && dev.active !== dev.configured;
+  const split = dev.configured === "ollama" && dev.cpu_share > 0;
+  const fell = split || (Boolean(dev.active) && dev.active !== dev.configured);
   box.classList.toggle("fellback", fell);
   where.title = dev.note || "";
-  where.textContent = dev.configured === "ollama" ? "runs in Ollama"
+  where.textContent = split
+      ? `runs in Ollama, ${Math.max(1, Math.round(dev.cpu_share * 100))}% on the cpu`
+    : dev.configured === "ollama" ? "runs in Ollama"
     : !dev.active ? `runs on ${dev.configured} once loaded`
     : fell ? `runs on cpu, not ${dev.configured}`
     : `runs on ${dev.active}`;

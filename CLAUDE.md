@@ -1480,13 +1480,24 @@ four the moment this file described the problem.
   runs in this process, and every tag the Ollama daemon says can embed
   (`rpc_embedding_options` asks the daemon's capabilities, the way the seat
   cards ask about thinking). The choice lasts until the server restarts, like a
-  seat's, and `EMBEDDING_MODEL` sets the default. Measured before it was built,
-  on 2x GTX 1060 3GB, for the one other embedding model on this machine:
-  `qwen3-embedding:latest` is 7.6B parameters and 4,096 dimensions, took 7,117
-  MiB of which Ollama put 5,516 on the cards, and embedded 24 median passages
-  in 101s. That is 0.24 passages/s -- about 2.9 hours to build this project's
-  corpus, against MiniLM's 17s -- and at that size it cannot share two 3 GB
-  cards with the local 9B at all.
+  seat's, and `EMBEDDING_MODEL` sets the default. Measured on 2x GTX 1060 3GB
+  for the one other embedding model on this machine, `qwen3-embedding:latest`,
+  7.6B parameters and 4,096 dimensions. At the window and batch Ollama gives an
+  embedding model by default -- 4,096 and 2,048 tokens -- it asked for 7,463
+  MiB, 2,433 of them compute buffers sized for that batch, so the daemon ran 25
+  of its 37 layers on the cards and embedded 0.24 passages/s: about 2.9 hours
+  for this project's corpus, against MiniLM's 17s. **So every call sends
+  `OLLAMA_EMBED_OPTIONS`**, a 512-token window and batch, and the model takes
+  4,987 MiB with all 37 layers on the cards at 0.48 passages/s -- about 1.4
+  hours -- and vectors unchanged at cosine 1.000000. A longer query is cut at
+  511 tokens rather than refused. The options are identical on every call
+  because the daemon reloads a model whose options changed. A split model
+  embeds exactly as correctly as a whole one, only slower, which is why nobody
+  saw it: on 2026-09-13 a first build ran split for 24 minutes behind a
+  progress line that read as wedged. `OllamaEmbedder` now reads `/api/ps` after
+  each call's first batch, and the header and the corpus line both say how much
+  of the model the daemon left on the CPU. At either size it still cannot share
+  two 3 GB cards with the local 9B.
   Four decisions follow from what a model is. *Every model has its own
   corpus* (`persist_dir_for`): vectors from two models share no space, and a
   corpus built with one and searched with another answers with noise that
