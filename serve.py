@@ -1186,11 +1186,20 @@ def _index_the_project_before_the_run() -> dict[str, Any]:
 
     def progress(done: int, total: int) -> None:
         # Rewritten in place as the phase goes, so a build that takes hours --
-        # any model but MiniLM -- reads as moving rather than wedged.
+        # any model but MiniLM -- reads as moving rather than wedged. A model the
+        # daemon split onto the CPU is named here as well: this is the line
+        # someone watches while the build is slow, and the split is why.
+        share = embedding_device_status()["cpu_share"]
+        split = (
+            f" Ollama holds {max(1, round(share * 100))}% of the model on the CPU, "
+            "which is why this is slow."
+            if share
+            else ""
+        )
         with _run_lock:
             _run_progress["messages"] = [
                 f"[Corpus] Indexing with {model}: {done} of {total} project file(s) "
-                "checked."
+                f"checked.{split}"
             ]
 
     started = time.monotonic()

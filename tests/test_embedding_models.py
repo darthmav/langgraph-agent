@@ -81,20 +81,32 @@ def test_the_doors_follow_the_active_model(tmp_path, monkeypatch, qwen):
 
 
 class _Daemon:
-    """`/api/embed`, answering each passage with a vector of its own length."""
+    """`/api/embed`, answering each passage with a vector of its own length, and `/api/ps`."""
 
     def __init__(self) -> None:
         self.batches: list[list[str]] = []
+        self.options: list[Any] = []
         self.refusal: str | None = None
+        # Wholly on the cards unless a test says otherwise; None is a daemon
+        # that cannot be asked where it put the model.
+        self.loaded: list[dict[str, Any]] | None = [
+            {"name": QWEN, "size": 4_987, "size_vram": 4_987}
+        ]
 
     def urlopen(self, request: Any, timeout: float | None = None) -> io.BytesIO:
-        assert request.full_url.endswith("/api/embed")
+        url = request if isinstance(request, str) else request.full_url
+        if url.endswith("/api/ps"):
+            if self.loaded is None:
+                raise urllib.error.URLError("connection refused")
+            return io.BytesIO(json.dumps({"models": self.loaded}).encode())
+        assert url.endswith("/api/embed")
         body = json.loads(request.data)
         if self.refusal is not None:
             raise urllib.error.HTTPError(
                 request.full_url, 500, "refused", {}, io.BytesIO(self.refusal.encode())  # type: ignore[arg-type]
             )
         self.batches.append(body["input"])
+        self.options.append(body.get("options"))
         vectors = [[float(len(text))] * 4 for text in body["input"]]
         return io.BytesIO(json.dumps({"model": body["model"], "embeddings": vectors}).encode())
 
@@ -182,6 +194,51 @@ def test_an_ollama_failure_never_falls_back_to_minilm(daemon, qwen):
     with pytest.raises(RuntimeError):
         kb._encode(["a passage"])
     assert kb.embedding_device == "ollama"
+
+
+def test_every_call_loads_the_model_at_the_window_that_fits_the_cards(daemon):
+    """The daemon reloads a model whose options changed, so a search must match the index."""
+    gs.OllamaEmbedder(QWEN).encode([f"passage {i}" for i in range(19)])
+    gs.OllamaEmbedder(QWEN).encode("one query")
+
+    assert daemon.options == [gs.OLLAMA_EMBED_OPTIONS] * 4
+    assert gs.OLLAMA_EMBED_OPTIONS == {"num_ctx": 512, "num_batch": 512}
+
+
+def test_a_model_the_daemon_split_onto_the_cpu_is_reported(daemon, qwen, monkeypatch):
+    # Measured: qwen3-embedding at Ollama's default window, in MiB.
+    daemon.loaded = [{"name": QWEN, "size": 7_463, "size_vram": 5_784}]
+    kb = _corpus_on(qwen)
+    monkeypatch.setattr(gs, "_kb_instance", kb)
+
+    kb._encode(["a passage"])
+
+    status = gs.embedding_device_status()
+    assert status["cpu_share"] == pytest.approx(1 - 5_784 / 7_463)
+    assert "22% of qwen3-embedding:latest on the CPU" in status["note"]
+
+
+def test_a_reload_that_fits_the_cards_clears_the_warning(daemon, qwen, monkeypatch):
+    daemon.loaded = [{"name": QWEN, "size": 7_463, "size_vram": 5_784}]
+    kb = _corpus_on(qwen)
+    monkeypatch.setattr(gs, "_kb_instance", kb)
+    kb._encode(["a passage"])
+
+    daemon.loaded = [{"name": QWEN, "size": 4_987, "size_vram": 4_987}]
+    kb._encode(["a passage"])
+
+    assert gs.embedding_device_status()["cpu_share"] == 0.0
+    assert gs.embedding_device_status()["note"] is None
+
+
+def test_a_daemon_that_cannot_say_where_leaves_the_split_unknown(daemon, qwen, monkeypatch):
+    daemon.loaded = None
+    kb = _corpus_on(qwen)
+    monkeypatch.setattr(gs, "_kb_instance", kb)
+
+    assert kb._encode(["a passage"]).shape == (1, 4)
+    assert gs.embedding_device_status()["cpu_share"] is None
+    assert gs.embedding_device_status()["note"] is None
 
 
 # ---------------------------------------------------------------------------

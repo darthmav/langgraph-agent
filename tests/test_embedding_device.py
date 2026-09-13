@@ -277,7 +277,12 @@ def test_the_status_says_where_without_loading_anything(monkeypatch, library, ca
     kb = _kb()
     monkeypatch.setattr(gs, "_kb_instance", kb)
 
-    assert embedding_device_status() == {"configured": card, "active": None, "note": None}
+    assert embedding_device_status() == {
+        "configured": card,
+        "active": None,
+        "note": None,
+        "cpu_share": None,
+    }
     assert library.built == []
 
     kb.embedder  # noqa: B018
