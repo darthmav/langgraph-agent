@@ -125,3 +125,58 @@ def test_a_blank_node_id_resolves_to_nothing(kb):
 def test_a_loose_but_real_id_still_resolves(kb):
     """The guard must not cost the fuzzy match the console depends on."""
     assert kb._resolve_node("architect") == "Architect"
+
+
+# ---------------------------------------------------------------------------
+# resolving a loose id
+# ---------------------------------------------------------------------------
+
+
+def test_the_exact_name_beats_a_longer_one_that_contains_it(kb):
+    """`plan` is the entity `Plan`, not `Planner`, however the graph enumerates."""
+    for order in (("Planner", "Plan"), ("Plan", "Planner")):
+        kb.graph.remove_nodes_from(["Plan", "Planner"])
+        for node in order:
+            kb.graph.add_node(node, type="entity")
+        assert kb._resolve_node("plan") == "Plan"
+
+
+def test_a_document_resolves_by_its_file_name(kb):
+    kb.graph.add_node("src/pkg/nodes.py", type="document")
+    kb.graph.add_node("NodesThing", type="entity")
+
+    assert kb._resolve_node("nodes.py") == "src/pkg/nodes.py"
+    assert kb._resolve_node("nodes") == "src/pkg/nodes.py"
+
+
+def test_a_substring_match_is_the_shortest_and_the_same_every_time(kb):
+    """First in enumeration order made the answer depend on insertion order."""
+    long_name = "tests/test_planner_routing.py"
+    for order in ((long_name, "Planner"), ("Planner", long_name)):
+        kb.graph.remove_nodes_from(order)
+        for node in order:
+            kb.graph.add_node(node, type="document" if node.endswith(".py") else "entity")
+        assert kb._resolve_node("lann") == "Planner"
+
+
+def test_a_loose_trace_says_what_it_matched_and_what_else_it_could_be(kb):
+    for node in ("Planner", "PlannerNode"):
+        kb.graph.add_node(node, type="entity")
+        kb.graph.add_edge("serve.py", node, relation="mentions")
+
+    hood = kb.neighborhood("plann", max_depth=1, min_degree=1)
+
+    assert hood["center_node"] == "Planner"
+    assert hood["resolved_from"] == "plann"
+    assert "PlannerNode" in hood["alternatives"]
+    assert "resolved_from" not in kb.neighborhood("Planner", max_depth=1)
+
+
+def test_the_researcher_s_graph_tool_reports_the_match_too(kb):
+    kb.graph.add_node("Planner", type="entity")
+    kb.graph.add_edge("serve.py", "Planner", relation="mentions")
+
+    result = kb.query_graph("planner", hops=1)
+
+    assert result["entity"] == "Planner"
+    assert result["resolved_from"] == "planner"

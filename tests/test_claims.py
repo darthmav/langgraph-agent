@@ -36,10 +36,11 @@ import tomllib
 
 from langgraph_agent.config import DEFAULT_SEATS
 from langgraph_agent.graphrag_server import (
+    EMBEDDING_BATCH_SIZE,
     ENTITY_STOPWORDS,
     MAX_INDEXABLE_BYTES,
     RETRIEVAL_RELEVANCE_FLOOR,
-    _is_web_document,
+    _mints_entities,
     iter_project_files,
 )
 
@@ -249,6 +250,7 @@ def test_the_documented_python_version_matches_pyproject():
 # diagnostic now does.
 DOCUMENTED_FIGURES = (
     (r"floor of (\d+\.\d+)", lambda: RETRIEVAL_RELEVANCE_FLOOR, "RETRIEVAL_RELEVANCE_FLOOR"),
+    (r"`EMBEDDING_BATCH_SIZE` is (\d+)", lambda: EMBEDDING_BATCH_SIZE, "EMBEDDING_BATCH_SIZE"),
 )
 
 
@@ -413,7 +415,8 @@ def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
     """Per minted token: documents, and capitals position does not explain.
 
     Skips what `add_document` skips. A page the research phase fetched is
-    walked like any markdown file but mints no entities (`_is_web_document`),
+    walked like any markdown file but mints no entities (`_mints_entities`, which
+    also leaves out markup, script and config),
     so counting it audits a graph that does not exist -- and one that exists
     only on machines that have run web research. On 2026-09-10 eight pages
     under `research/web/` pushed two sentence-openers over the positional
@@ -424,7 +427,7 @@ def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
     """
     census: dict[str, dict] = {}
     for path in iter_project_files(str(root)):
-        if _is_web_document(str(path)):
+        if not _mints_entities(str(path)):
             continue
         try:
             text = (root / path).read_text(encoding="utf-8")
@@ -500,12 +503,15 @@ def test_no_capital_forced_by_position_becomes_a_hub_entity():
 
 
 # The best-connected entities in the graph, as of the 2026-09-09 audit. Not a
-# statistic -- a record of what a human looked at and accepted.
+# statistic -- a record of what a human looked at and accepted. Redone on
+# 2026-09-12, when `NetworkX` displaced `Search`: the graph library this
+# project is built on, named throughout the docstrings of an agent-written
+# `src/quisce/spectral_analysis.py`. A real term, so it stays.
 AUDITED_TOP_ENTITIES = frozenset({
     "Architect", "Builder", "Researcher", "Laplacian", "Planner", "System",
     "ValueError", "Fiedler", "AgentState", "Spectral", "Exception", "Graph",
     "GraphRAG", "Python", "Verdict", "Cheeger", "GraphRAGKnowledgeBase",
-    "LangGraph", "RETRIEVAL_RELEVANCE_FLOOR", "Search",
+    "LangGraph", "RETRIEVAL_RELEVANCE_FLOOR", "NetworkX",
 })
 
 

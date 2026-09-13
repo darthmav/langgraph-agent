@@ -332,6 +332,7 @@ def _state() -> dict[str, Any]:
         "plan": "p", "research": "", "builder_report": "a report",
         "next_agent": "Builder", "research_status": "", "blockers": "",
         "files_changed": [], "failed_verification": [],
+        "unverified": [], "builder_cut_off": "", "lint_failed": [],
         "expect_failures": False, "step_count": 0,
     }
 

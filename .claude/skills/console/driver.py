@@ -242,9 +242,12 @@ def cmd_shot(args: list[str]) -> int:
 def cmd_seats(_args: list[str]) -> int:
     seats = rpc("list_seats")["result"]["seats"]
     dead = 0
+    # Sized to the longest model rather than fixed: a pulled Hugging Face tag
+    # runs past sixty characters and ran straight into the provider column.
+    width = max((len(s["model"]) for s in seats), default=22) + 2
     for s in seats:
         mark = "live" if s["live"] else f"DEAD: {s['reason']}"
-        print(f"  {s['role']:11}{s['model']:24}{s['provider']:10}{mark}")
+        print(f"  {s['role']:11}{s['model']:{width}}{s['provider']:10}{mark}")
         dead += not s["live"]
     if dead:
         print(f"\n{dead}/{len(seats)} seats dead -- run_goal will fail. See SKILL.md Gotchas.")

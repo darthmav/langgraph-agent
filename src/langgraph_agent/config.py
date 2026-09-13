@@ -189,6 +189,87 @@ def ollama_model_capabilities(model: str) -> list[str] | None:
     return caps
 
 
+def _ollama_models_in_memory() -> list[tuple[str, int]]:
+    """(tag, bytes of it on a GPU) for every model the local daemon has loaded.
+
+    Raises when the daemon cannot be asked. The one caller reads that as
+    nothing to unload, which is what an unreachable daemon holds.
+    """
+    with urllib.request.urlopen(f"{_ollama_base_url()}/api/ps", timeout=2.0) as response:
+        payload = json.loads(response.read())
+    return [
+        (str(entry.get("name") or entry.get("model")), int(entry.get("size_vram") or 0))
+        for entry in payload.get("models", [])
+    ]
+
+
+def _same_ollama_tag(a: str, b: str) -> bool:
+    """`qwen3.8` and `qwen3.8:latest` are one model; the daemon reports the second."""
+
+    def full(tag: str) -> str:
+        return tag if ":" in tag.rsplit("/", 1)[-1] else f"{tag}:latest"
+
+    return full(a) == full(b)
+
+
+def unload_local_seat_models(timeout: float = 20.0) -> list[str]:
+    """Ask Ollama to unload every seated model it holds on a GPU, and wait for it.
+
+    For `GraphRAGKnowledgeBase.claim_embedding_device`, which needs the card a
+    local seat is sitting on. The embedder has to hold its memory *before* the
+    seat loads, because llama.cpp fits a model around whatever a card already
+    carries and never moves it afterwards: measured the other way round, the
+    embedder found 11 MiB free and failed. Unloading is the only way to get
+    that order back once a seat is loaded, and it costs the seat one reload on
+    its next call -- 5.5-9.8s measured for the local 9B -- which it then makes
+    around the embedder.
+
+    Only seated models, and only those holding GPU memory. A `:cloud` tag holds
+    none, and a model the operator loaded for something else is theirs to
+    unload. Returns the tags it unloaded; an unreachable daemon unloads nothing.
+    """
+    seated = [
+        str(seat["model"])
+        for seat in (_resolve_seat(agent) for agent in AGENTS)
+        if seat["provider"] == "ollama" and seat["model"]
+    ]
+    try:
+        loaded = _ollama_models_in_memory()
+    except Exception:
+        return []
+    targets = [
+        tag
+        for tag, vram in loaded
+        if vram > 0 and any(_same_ollama_tag(tag, model) for model in seated)
+    ]
+    for tag in targets:
+        request = urllib.request.Request(
+            f"{_ollama_base_url()}/api/generate",
+            data=json.dumps({"model": tag, "keep_alive": 0}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10.0) as response:
+                response.read()
+        except Exception:
+            pass
+
+    # The reply means the unload was scheduled, not finished. Waited on here so
+    # the caller does not ask the card again while the model is still on it;
+    # the caller retries as well, because a runner can hold its memory for a
+    # moment after the daemon stops listing it.
+    deadline = time.monotonic() + timeout
+    while targets and time.monotonic() < deadline:
+        try:
+            still = [tag for tag, _ in _ollama_models_in_memory()]
+        except Exception:
+            break
+        if not any(_same_ollama_tag(tag, target) for tag in still for target in targets):
+            break
+        time.sleep(0.25)
+    return targets
+
+
 # Why the last call to a seat failed, if it did. A key can be present and the
 # seat still unusable -- out of credits, expired, revoked, wrong workspace --
 # and only a real call finds that out. Recording the outcome here is what lets

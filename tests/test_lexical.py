@@ -216,10 +216,11 @@ def test_the_floor_is_defined_where_the_embedding_model_is_named():
     """It is a property of the model, and meaningless apart from it.
 
     A cosine has no absolute meaning across models, so the floor lives beside
-    EMBEDDING_MODEL_NAME rather than beside the comparison in `nodes.py`. The
-    second assertion is the one with teeth: `nodes.py` must *read* the
-    constant, never carry its own copy of the number, or a model swap moves one
-    and leaves the other behind.
+    EMBEDDING_MODEL_NAME rather than beside the comparison in `nodes.py`, and a
+    model other than MiniLM gets its own, measured on its own corpus. The
+    assertion with teeth is on `nodes.py`: it must *read* the active model's
+    floor through `relevance_floor`, never carry its own copy of a number, or
+    a model swap moves one and leaves the other behind.
     """
     import langgraph_agent.graphrag_server as server
     import langgraph_agent.nodes as nodes
@@ -227,10 +228,12 @@ def test_the_floor_is_defined_where_the_embedding_model_is_named():
     assert hasattr(server, "EMBEDDING_MODEL_NAME")
     assert isinstance(server.RETRIEVAL_RELEVANCE_FLOOR, float)
 
+    assert server.relevance_floor(server.EMBEDDING_MODEL_NAME) == server.RETRIEVAL_RELEVANCE_FLOOR
+
     source = nodes.__file__ or ""
     assert source, "the module has to be on disk to read"
     text = open(source, encoding="utf-8").read()
-    assert "RETRIEVAL_RELEVANCE_FLOOR" in text, "nodes.py must read the constant"
+    assert "relevance_floor()" in text, "nodes.py must read the model's floor"
     assert 'get("score", 0) > 0.' not in text, "and must not hard-code a floor"
 
 
@@ -249,7 +252,7 @@ class _FakeEmbedder:
     def __init__(self) -> None:
         self.tokenizer = self._Tokenizer()
 
-    def encode(self, text: str | list[str]) -> Any:
+    def encode(self, text: str | list[str], **kwargs: Any) -> Any:
         import numpy as np
 
         return np.zeros((len(text), 3)) if isinstance(text, list) else np.zeros(3)

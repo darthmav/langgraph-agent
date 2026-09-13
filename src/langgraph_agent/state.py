@@ -4,7 +4,8 @@ The 4-Agent System:
 - Architect writes: architecture, verdict
 - Planner writes: plan, next_agent
 - Researcher writes: research, research_status
-- Builder writes: builder_report, files_changed, blockers, failed_verification
+- Builder writes: builder_report, files_changed, blockers, failed_verification,
+  unverified, builder_cut_off, lint_failed
 """
 
 from enum import Enum
@@ -48,17 +49,28 @@ class AgentState(TypedDict):
         research_status: Status from Researcher (ready_for_builder | need_replan | no_relevant_knowledge)
         blockers: What's blocking progress (set by Builder when stuck)
         discuss_only: Set by the caller, never by an agent. The seats reason
-            about the goal and the Builder is offered read-only tools alone --
-            no write, no terminal, no tests -- so a run cannot change the
-            machine. The online research phase is off for the same reason: it
+            about the goal and the Builder is offered no tools at all -- no
+            read, no write, no terminal, no tests -- so a run cannot change the
+            project. The online research phase is off for the same reason: it
             writes pages to disk and embeds them.
         files_changed: List of file paths modified by Builder
-        failed_verification: Files the Builder wrote that did not run. Set by
-            the Builder every pass, so it clears once a file is fixed. A
-            non-empty list blocks the Architect from approving, unless
-            expect_failures is set.
+        failed_verification: Files the Builder wrote that did not pass
+            verification -- they ran and failed, or nobody executed them. Set
+            by the Builder every pass and carried into the next, so a file
+            clears only by passing, never by omission.
+        unverified: The part of failed_verification nobody executed, because
+            the deadline or the emergency stop came first. It blocks approval
+            whatever expect_failures says: that opt-out is for a file meant to
+            fail, not for a gap in the evidence.
+        builder_cut_off: Why the Builder's last pass ended before it finished
+            -- "turn_cap" or "deadline" -- or empty when it finished. While it
+            is set the Architect cannot approve.
+        lint_failed: Python files the Builder wrote or carried that still fail
+            `ruff check` after the fixes it is allowed to make. Re-linted every
+            pass until clean, and blocking approval whatever expect_failures
+            says.
         expect_failures: Per-run opt-out, set by the caller and never by an
-            agent. A file that does not run is still executed, still reported
+            agent. A file that runs and fails is still executed, still reported
             and still listed in failed_verification -- it just stops blocking
             approval and sets no blocker. For goals whose product is a failing
             file: a deliberate fixture, an expected-to-fail test.
@@ -77,6 +89,9 @@ class AgentState(TypedDict):
     blockers: str
     files_changed: list[str]
     failed_verification: list[str]
+    unverified: list[str]
+    builder_cut_off: str  # "" | "turn_cap" | "deadline"
+    lint_failed: list[str]
     discuss_only: bool
     expect_failures: bool
     step_count: int

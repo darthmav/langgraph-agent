@@ -66,6 +66,85 @@ class _FakeGraph:
             yield {name: state}
 
 
+def test_a_run_needs_a_goal(monkeypatch):
+    """A blank goal is refused before the run is claimed or the corpus touched.
+
+    The console's textarea already ignored one, which hid that the server did
+    not: `/api/run` with no goal indexed the project and set four seats to
+    work on nothing.
+    """
+    indexed = []
+    monkeypatch.setattr(
+        serve,
+        "_index_the_project_before_the_run",
+        lambda: indexed.append(True) or {"source": "disabled"},
+    )
+
+    with pytest.raises(ValueError, match="needs a goal"):
+        serve.rpc_run_goal({"goal": "   "})
+
+    assert not indexed
+    assert serve._run_progress["running"] is False
+    assert not RUN_CONTROL.run_id()
+
+
+class _Socket:
+    """A handler's output stream, recording what was written to it."""
+
+    def __init__(self, closed=False):
+        self.closed = closed
+        self.data = b""
+
+    def write(self, data):
+        if self.closed:
+            raise BrokenPipeError(32, "Broken pipe")
+        self.data += data
+
+    def flush(self):
+        pass
+
+
+def _rpc_handler(socket):
+    """A `Handler` with no connection behind it -- enough to reach `handle_rpc`."""
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.wfile = socket
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "POST /rpc HTTP/1.1"
+    handler.command = "POST"
+    return handler
+
+
+def test_a_caller_that_went_away_is_not_a_failed_method(monkeypatch, capsys):
+    """A console reloaded mid-run drops the request that started the run.
+
+    The run still finishes; only its reply has nowhere to go. That read as
+    `run_goal FAILED ... Broken pipe`, then two tracebacks, for a run that had
+    ended cleanly.
+    """
+    monkeypatch.setitem(serve.RPC_METHODS, "probe", lambda params: {"ok": True})
+
+    _rpc_handler(_Socket(closed=True)).handle_rpc({"method": "probe", "params": {}})
+
+    out = capsys.readouterr().out
+    assert "FAILED" not in out
+    assert "disconnected before the reply" in out
+
+
+def test_a_method_that_raises_still_fails_out_loud(monkeypatch, capsys):
+    """Keeping the write apart must not quieten a method that really failed."""
+    def boom(params):
+        raise ValueError("no good")
+
+    monkeypatch.setitem(serve.RPC_METHODS, "probe", boom)
+    socket = _Socket()
+
+    _rpc_handler(socket).handle_rpc({"method": "probe", "params": {}})
+
+    assert "[RPC] probe FAILED" in capsys.readouterr().out
+    body = json.loads(socket.data.split(b"\r\n\r\n", 1)[1])
+    assert body["error"]["message"] == "no good"
+
+
 def test_a_stop_ends_the_run_at_a_node_boundary(monkeypatch):
     """The stop breaks the stream loop, and the state so far comes back."""
     def trip():

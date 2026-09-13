@@ -487,6 +487,8 @@ def test_connectivity_is_defined_on_an_empty_and_a_single_node_graph(kb):
         # are excluded from the component counts and reported here instead --
         # see `test_web_entities.py`. Zero of them, on an empty graph.
         "web_documents": 0,
+        # Markup, script and config files are entity-free too, counted apart.
+        "entity_free_sources": 0,
     }
 
     kb.graph = nx.DiGraph()
@@ -544,35 +546,6 @@ def test_stats_does_not_load_the_embedder_for_the_health_check(kb):
     kb._connectivity_cache = None
     kb.stats()
     assert kb._embedder is None
-
-
-def test_the_embedder_is_pinned_to_the_cpu(kb, monkeypatch):
-    """Never left to sentence-transformers' own choice of device.
-
-    It picks `cuda:0` whenever `torch.cuda.is_available()` is True, and that
-    stays True on a build with no kernels for the card: a `+cu130` torch on a
-    compute-6.1 GTX 1060 made every `encode()` raise. The fake stands in for
-    the library so the test sees the arguments without loading a model.
-    """
-    import sys
-    import types
-
-    from langgraph_agent.graphrag_server import EMBEDDING_DEVICE, EMBEDDING_MODEL_NAME
-
-    seen: dict[str, Any] = {}
-
-    class _Recorder:
-        def __init__(self, name: str, **kwargs: Any) -> None:
-            seen.update(name=name, **kwargs)
-
-    fake = types.ModuleType("sentence_transformers")
-    fake.SentenceTransformer = _Recorder  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
-
-    kb.embedder  # noqa: B018 - the property load is what is under test
-
-    assert EMBEDDING_DEVICE == "cpu"
-    assert seen == {"name": EMBEDDING_MODEL_NAME, "device": "cpu"}
 
 
 # ---------------------------------------------------------------------------
@@ -915,6 +888,24 @@ def test_neighborhood_is_unchanged_unless_the_split_is_asked_for(kb):
     assert all("side" not in record for record in plain["related_nodes"])
 
 
+def test_neighborhood_returns_the_centre_as_its_own_record(kb):
+    """The console draws the centre from this record, typed as the graph types it.
+
+    It used to get only `center_node`, a bare id, and assumed a document -- so
+    every entity anyone traced was drawn as a file.
+    """
+    kb.graph = _topic_corpus(topics=2, docs=30)
+
+    entity = kb.neighborhood("BRIDGE0", max_depth=1)
+    document = kb.neighborhood("d0_1", max_depth=1)
+
+    assert entity["center"]["id"] == "BRIDGE0"
+    assert entity["center"]["node_type"] == "entity"
+    assert document["center"]["node_type"] == "document"
+    # Still kept out of its own neighbourhood, so nothing is drawn twice.
+    assert all(record["id"] != "BRIDGE0" for record in entity["related_nodes"])
+
+
 def test_the_sign_split_separates_the_topic_areas(kb):
     """One eigenvector, and it recovers the division the corpus was built with."""
     kb.graph = _topic_corpus(topics=2, docs=30)
@@ -1238,3 +1229,55 @@ def test_nothing_but_a_run_and_an_upload_builds_a_corpus():
         "these build a corpus outside a run and outside an upload, which is the "
         "third writer this rule exists to refuse:\n  " + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# the overview a sweep draws
+# ---------------------------------------------------------------------------
+
+
+def test_the_overview_is_the_union_of_every_document_s_neighbourhood(kb):
+    """One call, and the same graph the console's per-document sweep assembled."""
+    kb.graph = _topic_corpus(topics=2, docs=30)
+    kb.graph.add_node("lonely.md", type="document")
+
+    union_nodes: set[str] = set()
+    union_edges: set[tuple[str, str]] = set()
+    for node, attrs in kb.graph.nodes(data=True):
+        if attrs.get("type") != "document":
+            continue
+        union_nodes.add(node)
+        hood = kb.neighborhood(node, max_depth=2, min_degree=4)
+        union_nodes |= {record["id"] for record in hood["related_nodes"]}
+        union_edges |= {(edge["source_id"], edge["target_id"]) for edge in hood["edges"]}
+
+    full = kb.overview(min_degree=4, include_isolated=True)
+
+    assert {record["id"] for record in full["nodes"]} == union_nodes
+    assert {(edge["source_id"], edge["target_id"]) for edge in full["edges"]} == union_edges
+
+
+def test_the_overview_leaves_out_documents_linked_to_nothing_and_counts_them(kb):
+    kb.graph = _topic_corpus(topics=2, docs=30)
+    kb.graph.add_node("lonely.md", type="document")
+
+    shown = kb.overview(min_degree=1)
+
+    assert "lonely.md" not in {record["id"] for record in shown["nodes"]}
+    assert shown["unlinked_documents"] == 1
+    assert shown["total_nodes"] == len(shown["nodes"])
+
+
+def test_rpc_graph_overview_is_registered_and_answers_without_a_corpus(kb, monkeypatch):
+    assert serve.RPC_METHODS["graph_overview"] is serve.rpc_graph_overview
+
+    kb.graph = _topic_corpus(topics=2, docs=30)
+    monkeypatch.setattr(serve, "kb", kb)
+    result = serve.rpc_graph_overview({"min_degree": 4})
+    json.dumps(result)
+    assert result["total_nodes"] > 0
+
+    monkeypatch.setattr(serve, "kb", None)
+    monkeypatch.setattr(serve, "open_knowledge_base", lambda *a, **k: None)
+    absent = serve.rpc_graph_overview({})
+    assert absent["corpus"] == "absent" and absent["nodes"] == []

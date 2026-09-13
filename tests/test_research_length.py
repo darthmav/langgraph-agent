@@ -100,3 +100,23 @@ def test_every_retrieved_result_is_forwarded(monkeypatch):
     assert status == "ready_for_builder"
     for n in range(RESEARCH_RESULTS):
         assert f"passage {n}" in findings
+
+
+def test_each_finding_names_the_file_and_line_it_came_from(monkeypatch):
+    """Passages used to arrive with no source, so the Builder could not open the file."""
+    def fake_tool(name, args):
+        return {
+            "results": [
+                {"id": "src/app/graph.py", "line": 118, "content": "def neighbours(): " + "body " * 40, "score": 0.9},
+                {"id": "notes.md", "content": "no line known " + "body " * 40, "score": 0.8},
+            ],
+            "source": "local_graphrag",
+        }
+
+    monkeypatch.setattr(nodes, "_call_mcp_tool_sync", fake_tool)
+    findings, _ = nodes._gather_research(
+        {"plan": "p", "goal": "g", "research": "", "messages": []}  # type: ignore[arg-type]
+    )
+
+    assert "1. src/app/graph.py:118\n" in findings
+    assert "2. notes.md\n" in findings

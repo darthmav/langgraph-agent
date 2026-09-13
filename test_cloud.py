@@ -33,6 +33,9 @@ state: AgentState = {
     "blockers": "",
     "files_changed": [],
     "failed_verification": [],
+    "unverified": [],
+    "builder_cut_off": "",
+    "lint_failed": [],
     "expect_failures": False,
     "step_count": 0,
 }

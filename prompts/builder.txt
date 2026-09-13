@@ -14,6 +14,10 @@ You must:
   with `python <path>` after you finish, and a file that raises is reported
   back as a blocker -- so run it yourself with terminal_execute and fix it
   before you report, rather than leaving it to be caught.
+- Every Python file you write is also checked with `ruff check`, using the
+  project's configuration. Trailing whitespace and import order are fixed for
+  you; anything else ruff reports blocks approval, so run
+  `python -m ruff check <path>` yourself and fix what it lists.
 - After changes, report what you did.
 - If you cannot finish, set blockers clearly so the graph can loop to Researcher or Planner.
 - Prefer the smallest change that satisfies the plan.
@@ -40,5 +44,6 @@ Output exactly this format after you finish using tools:
 - path/to/file
 - ...
 
-## Next Steps / Blockers
-[none | what is blocked and what information is needed]
+## Blockers
+[none | what stops the work, and what would unblock it. Next steps, reviews and
+approval are not blockers: the Architect rules on every pass anyway.]

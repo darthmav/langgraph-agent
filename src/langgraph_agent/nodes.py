@@ -9,8 +9,11 @@ Implements the 4-Agent System with strict prompts and tool binding:
 
 import asyncio
 import json
+import keyword
 import os
 import re
+import shlex
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -360,6 +363,10 @@ Research: {_fmt("research")}
 Builder report: {_fmt("builder_report")}
 Blockers: {_fmt("blockers")}
 Files changed: {_fmt("files_changed")}
+Failed verification: {_fmt("failed_verification")}
+Never executed: {_fmt("unverified")}
+Builder cut off: {_fmt("builder_cut_off")}
+Lint failures: {_fmt("lint_failed")}
 Step: {state.get("step_count", 0)}
 """
 
@@ -554,8 +561,10 @@ def _parse_builder_output(content: str) -> dict[str, Any]:
                 paths.append(key)
         result["files_modified"] = paths
 
+    # "## Blockers" is the heading the prompt asks for. "## Next Steps /
+    # Blockers" was the old one, and a heading that invited next steps got them.
     blockers_match = re.search(
-        r"## Next Steps / Blockers\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE
+        r"## (?:Next Steps / )?Blockers\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE
     )
     if blockers_match:
         result["next_steps_blockers"] = blockers_match.group(1).strip()
@@ -677,21 +686,48 @@ def architect_node(state: AgentState) -> AgentState:
         state["architecture"] = parsed["architecture"]
     state["verdict"] = parsed["verdict"]
 
-    # A file that does not run cannot be approved work, whatever the Architect
+    # Work without evidence cannot be approved, whatever the Architect
     # concluded. This is the one place the gate's ruling is overridden, and it
     # is deliberate: the Architect reads the failure in `blockers` and had
     # approved past it. The verdict is rewritten rather than the routing
-    # patched, so the state says what actually happened.
+    # patched, so the state says what actually happened. Four things block:
     #
-    # Note the cost: a goal that legitimately calls for a failing file can no
-    # longer be approved, and will run to MAX_STEPS before the ceiling ends it.
-    blocked = list(state.get("failed_verification") or [])
+    # - a file that ran and failed, unless the run asked for failing files;
+    # - a file nobody executed (`unverified`), whatever that opt-out says. It is
+    #   for a file meant to fail, not for a gap in the evidence, and clearing
+    #   the whole list under it let unrun files through;
+    # - a Builder pass cut off before it finished (`builder_cut_off`). Its
+    #   blocker said so, the Architect approved anyway, and nothing stopped it.
+    # - a file that fails lint (`lint_failed`), whatever the opt-out says: CI
+    #   lints a fixture meant to fail at runtime all the same.
+    #
+    # Note the cost: a goal that legitimately calls for a failing file needs
+    # `expect_failures`, and work too big for one pass is not approved until a
+    # pass finishes it. MAX_STEPS still ends a run that never gets there.
+    unverified = list(state.get("unverified") or [])
+    failed_files = [
+        path for path in (state.get("failed_verification") or []) if path not in unverified
+    ]
     if state.get("expect_failures"):
         # The caller asked for a failing file, so a failure is the product.
         # The list stays in state and the report still shows it; it just does
         # not overrule the gate.
-        blocked = []
-    overridden = bool(blocked) and state["verdict"] == Verdict.APPROVED.value
+        failed_files = []
+    raw_cut_off = str(state.get("builder_cut_off") or "")
+    reasons: list[str] = []
+    if failed_files:
+        reasons.append(f"{len(failed_files)} file(s) do not run")
+    if unverified:
+        reasons.append(f"{len(unverified)} file(s) never executed")
+    lint_failed = list(state.get("lint_failed") or [])
+    if lint_failed:
+        reasons.append(f"{len(lint_failed)} file(s) fail lint")
+    if raw_cut_off:
+        # A reason nobody has wording for is still a pass that did not finish.
+        reasons.append(
+            _CUT_OFF_REASONS.get(raw_cut_off, f"the Builder did not finish ({raw_cut_off})")
+        )
+    overridden = bool(reasons) and state["verdict"] == Verdict.APPROVED.value
     if overridden:
         state["verdict"] = Verdict.REVISE.value
 
@@ -716,14 +752,88 @@ def architect_node(state: AgentState) -> AgentState:
             "not a ruling, and never an approval)"
         )
     elif overridden:
-        note = f" (approval blocked: {len(blocked)} file(s) do not run)"
-    elif blocked:
-        note = f" ({len(blocked)} file(s) do not run)"
+        note = f" (approval blocked: {'; '.join(reasons)})"
+    elif reasons:
+        note = f" ({'; '.join(reasons)})"
     else:
         note = ""
     state["messages"].append(f"[Architect] Verdict: {state['verdict']}{note}")
 
     return state
+
+
+# Whether the Planner is shown the project files the corpus ranks closest to
+# the goal before it plans. Switched off by `tests/conftest.py` for every test,
+# for the reason it switches off indexing: a planning test must not pass or
+# fail by what the checkout it ran in happens to have indexed.
+PLANNER_PROJECT_MAP = os.getenv("PLANNER_PROJECT_MAP", "1").strip().lower() not in {
+    "0", "false", "no",
+}
+
+# How many corpus hits the Planner is shown. Enough to name the files a goal
+# touches, few enough that a small local seat still reads the goal itself.
+PLANNER_MAP_RESULTS = 6
+
+# The longest excerpt of each hit the Planner sees. The map is for deciding
+# where work goes, not for reading the code -- that is the Researcher's pass.
+PLANNER_MAP_EXCERPT_CHARS = 160
+
+
+def _project_map(goal: str) -> str:
+    """The project files the corpus ranks closest to the goal, for the Planner.
+
+    The Planner used to plan from the goal and the Architect's direction alone,
+    so it could name no file the goal did not, and its plan tended to restate
+    the goal as steps. That costs twice: the Researcher searches on `plan`, so a
+    plan naming nothing is a search for nothing in particular.
+
+    Measured on 2026-09-12 with the local 9B Planner seat, three goals planned
+    each way: without the map no plan named a single project file, and one
+    listed the Planner's own instructions as its steps ("Break the goal into
+    clear, ordered steps"). With it, the goal about seat timeouts was planned
+    against `config.py`, `mcp_client.py` and `nodes.py`. The other two were
+    about the console's UI, which that corpus had not yet indexed -- the map can
+    only name what retrieval can find.
+
+    Read through the same tool the Researcher uses, and only hits over the
+    embedding model's relevance floor are shown (`relevance_floor`; MiniLM's is
+    RETRIEVAL_RELEVANCE_FLOOR) -- a map of files the corpus does not consider
+    related would be invented structure, which is also why a model with no
+    floor gets no map at all. The Planner still calls no
+    tool: this is context handed to it, like the state injection. Returns ""
+    when there is nothing worth showing, and never raises.
+    """
+    if not goal.strip():
+        return ""
+    try:
+        response = _call_mcp_tool_sync(
+            "search_knowledge_graph", {"query": goal, "top_k": PLANNER_MAP_RESULTS}
+        )
+        from langgraph_agent.graphrag_server import relevance_floor
+
+        floor = relevance_floor()
+    except Exception:
+        return ""
+    if floor is None:
+        return ""
+
+    results = response.get("results", []) if isinstance(response, dict) else []
+    lines = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        score = float(result.get("score") or 0.0)
+        if score <= floor:
+            continue
+        path = str((result.get("metadata") or {}).get("path") or result.get("id") or "")
+        excerpt = " ".join(str(result.get("content") or "").split())
+        lines.append(f"- {path} ({score:.2f}): {excerpt[:PLANNER_MAP_EXCERPT_CHARS]}")
+    if not lines:
+        return ""
+    return (
+        "Project files the corpus ranks closest to this goal (these paths exist):\n"
+        + "\n".join(lines)
+    )
 
 
 def _make_plan(state: AgentState) -> dict[str, Any]:
@@ -735,9 +845,12 @@ def _make_plan(state: AgentState) -> dict[str, Any]:
     state_injection = _get_state_injection(state)
     goal = state.get("goal", "")
 
+    project_map = _project_map(goal) if PLANNER_PROJECT_MAP else ""
+    map_block = f"\n\n{project_map}" if project_map else ""
+
     messages = [
         SystemMessage(content=PLANNER_PROMPT),
-        HumanMessage(content=f"{state_injection}\n\nUser goal: {goal}"),
+        HumanMessage(content=f"{state_injection}{map_block}\n\nUser goal: {goal}"),
     ]
 
     llm = get_agent_llm("planner")
@@ -992,11 +1105,15 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
         # the tool call above has already paid for that by the time we rule on
         # what it returned. The floor is a property of the embedding model, so
         # it is read from where the model is named -- see
-        # RETRIEVAL_RELEVANCE_FLOOR for the measurement behind the number.
-        from langgraph_agent.graphrag_server import RETRIEVAL_RELEVANCE_FLOOR
+        # RETRIEVAL_RELEVANCE_FLOOR for MiniLM's measurement and
+        # `relevance_floor` for any other model's. A model with no floor cannot
+        # tell an answer from noise, so nothing it retrieves counts as answered.
+        from langgraph_agent.graphrag_server import relevance_floor
+
+        floor = relevance_floor()
 
         # Check if we got real results
-        if results and results[0].get("score", 0) > RETRIEVAL_RELEVANCE_FLOOR:
+        if floor is not None and results and results[0].get("score", 0) > floor:
             graphrag_results = {"results": results, "source": "local_graphrag"}
 
             # Try to get graph info too via the MCP query tool
@@ -1035,7 +1152,13 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
         for i, result in enumerate(results[:RESEARCH_RESULTS], 1):
             content = _research_snippet(result.get("content", ""))
             score = result.get('score', 0)
-            research_findings += f"\n{i}. {content}"
+            # Where it came from, to the line when the search could tell. The
+            # passages used to arrive with no source, so the Builder was handed
+            # code it could not open the file of.
+            source = str(result.get("id") or "unknown source")
+            if result.get("line"):
+                source += f":{result['line']}"
+            research_findings += f"\n{i}. {source}\n{content}"
             if result.get("related_entities"):
                 research_findings += f"\n   Related: {result['related_entities'][:3]}"
             research_findings += f"\n   Score: {score:.2f}\n"
@@ -1402,7 +1525,8 @@ DISCUSSION_NOTE = (
     "research findings you were given. Do not report work as done and do not "
     "list files under '## Files Modified' -- describe what you would change, "
     "which files it would touch, and what you would need to verify it. That "
-    "description is the product of this run."
+    "description is the product of this run. Answer '## Blockers' with none: a "
+    "proposal is not blocked by needing review or approval."
 )
 
 # How many times the Builder may think-and-call before the node gives up. Each
@@ -1603,6 +1727,20 @@ def _run_builder_tools(
 # produces -- markdown, config, data -- has nothing to run.
 RUNNABLE_SUFFIXES = (".py",)
 
+# Rules ruff may fix on the Builder's behalf: only those that cannot change what
+# the code does -- trailing whitespace, a missing final newline, import order.
+# Everything else ruff reports is the Builder's to fix, because a fix ruff marks
+# "safe" can still delete an import that was kept for its side effect.
+LINT_AUTOFIX_RULES = ("W291", "W292", "W293", "I001")
+
+# Per-file ceiling for the lint pass. ruff answers in milliseconds; this bounds
+# a wedged interpreter, not the linter.
+LINT_TIMEOUT_SECONDS = 30
+
+# Findings shown per file in the report. The Builder can run ruff itself for the
+# rest; the report only has to say what kind of trouble a file is in.
+MAX_LINT_FINDINGS_SHOWN = 8
+
 # Verification runs a file to prove it does not raise, with nobody watching.
 # Anything that opens a window waits for a human to close it, so a correct
 # script ending in `plt.show()` -- the ordinary way to write a plotting
@@ -1626,11 +1764,11 @@ _TIMEOUT_OUTPUT_HEADING = "\nOutput before it was killed (tail):\n"
 # traceback that matters, not so much that it buries the plan.
 MAX_VERIFY_DETAIL_CHARS = 800
 
-# Why a package module is not executed, said in the report so the Architect
-# reads a reason rather than a silence.
-PACKAGE_MODULE_SKIP_REASON = (
-    "not executed: module inside a package, which `python <path>` cannot import. "
-    "Cover it with a root-level script that imports the package."
+# What an import proves, said in the report so the Architect rules on what was
+# actually established rather than on "clean" alone.
+PACKAGE_MODULE_IMPORT_NOTE = (
+    "imported as `{module}`: its syntax, its imports and its module-level code "
+    "ran; its __main__ block, if it has one, did not"
 )
 
 # The least time worth starting a file in. Below this the remaining slice
@@ -1654,13 +1792,20 @@ VERIFY_DEADLINE_SKIP_REASON = (
     "It is unproven, not passing, and is re-checked on the next cycle."
 )
 
-# How each verification status reads in the report. "SKIPPED" and "NOT RUN" are
-# shouted like "FAILED" on purpose: an unexecuted file is not a passing one.
+# How each verification status reads in the report. "NOT RUN" is shouted like
+# "FAILED" on purpose: an unexecuted file is not a passing one.
 _VERIFY_LABELS = {
     "ok": "ran clean",
+    "imported": "imported clean",
     "failed": "FAILED",
-    "skipped": "SKIPPED",
     "unverified": "NOT RUN",
+}
+
+# Why the Builder's last pass ended before it finished, as the gate words it.
+# Keyed by `builder_cut_off`.
+_CUT_OFF_REASONS = {
+    "turn_cap": "the Builder ran out of tool turns before it finished",
+    "deadline": "the Builder hit its deadline before it finished",
 }
 
 
@@ -1688,20 +1833,37 @@ def _clean_blockers(text: str) -> str:
     return text.strip()
 
 
-def _is_package_module(path: str) -> bool:
-    """True for a .py file that lives inside a Python package.
+def _import_target(path: str) -> tuple[str, str] | None:
+    """How to verify a file inside a package: (import root, dotted module name).
 
-    `python pkg/mod.py` puts *pkg* on sys.path rather than the project root, so
-    a module that imports its own package absolutely -- `from pkg.other import
-    x`, the normal way to write one -- dies with ModuleNotFoundError no matter
-    how correct it is. Executing it proves nothing about the code and produces
-    a failure that cannot be fixed inside the file.
+    `python pkg/mod.py` puts *pkg* on sys.path rather than the directory above
+    it, so a module that imports its own package absolutely -- `from pkg.other
+    import x`, the normal way to write one -- dies with ModuleNotFoundError no
+    matter how correct it is. Such a file used to be skipped, and a skip proves
+    nothing: on 2026-09-12 a run whose only products were two package modules
+    was approved as "complete and verified" with neither ever executed. So it
+    is imported instead, the way its callers use it -- `import pkg.mod`, with
+    the directory above the outermost package on the path.
 
-    The test is the one Python itself uses to decide what a package is: the
-    directory holding the file has an `__init__.py`.
+    The walk up stops at the first directory without an `__init__.py`, the test
+    Python itself uses to decide what a package is. An `__init__.py` is the
+    package itself, so it is imported by the package's name.
+
+    Returns None for a file that is not inside a package, and for one whose
+    package path is not a valid module name (a directory called `my-pkg` cannot
+    be imported by anyone): both are executed as scripts.
     """
-    parent = Path(path).parent
-    return (parent / "__init__.py").exists()
+    file = Path(path).resolve()
+    directory = file.parent
+    if not (directory / "__init__.py").exists():
+        return None
+    parts = [] if file.name == "__init__.py" else [file.stem]
+    while (directory / "__init__.py").exists() and directory.parent != directory:
+        parts.insert(0, directory.name)
+        directory = directory.parent
+    if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
+        return None
+    return str(directory), ".".join(parts)
 
 
 def _timeout_detail(result: dict[str, Any]) -> str:
@@ -1743,10 +1905,12 @@ def _verify_written_files(
     time anyone ran it. Running it here means a broken file comes back as a
     blocker the loop can act on, rather than as a success nobody checked.
 
-    A file inside a package is skipped instead: see `_is_package_module`. The
-    skip is reported, never silent -- a module nobody ran is exactly what this
-    pass exists to surface, and the way to cover one is a root-level script
-    that imports it, which this pass does execute.
+    A file inside a package is imported rather than executed -- see
+    `_import_target` -- and reads "imported", which clears exactly as "ok" does.
+    Both run under this process's own interpreter rather than whatever `python`
+    is first on PATH: a launcher without the virtualenv active found an
+    interpreter with none of the project's dependencies, and every file that
+    imported one would have been reported broken.
 
     Each file is bounded by VERIFY_TIMEOUT_SECONDS, but the number of files is
     not, so `deadline` bounds the pass as a whole. Files past it come back
@@ -1756,7 +1920,7 @@ def _verify_written_files(
     stop lands in the same place and with the same status, for the same reason.
 
     Returns one (path, status, detail) per runnable file, where status is
-    "ok", "failed", "skipped" or "unverified".
+    "ok", "imported", "failed" or "unverified".
     """
     results: list[tuple[str, str, str]] = []
 
@@ -1764,13 +1928,8 @@ def _verify_written_files(
         if not path.endswith(RUNNABLE_SUFFIXES):
             continue
 
-        if _is_package_module(path):
-            results.append((path, "skipped", PACKAGE_MODULE_SKIP_REASON))
-            tool_log.append(f"verify({path}) -> skipped")
-            continue
-
         if RUN_CONTROL.stopped():
-            # `unverified`, not `skipped`: nobody ran this file, which is
+            # `unverified`: nobody ran this file, which is
             # exactly the gap this pass exists to surface. It keeps blocking
             # approval even under `expect_failures`, because that opt-out is
             # for a file the run meant to fail -- still executed, still
@@ -1784,11 +1943,24 @@ def _verify_written_files(
             tool_log.append(f"verify({path}) -> not run (deadline)")
             continue
 
+        target = _import_target(path)
+        env: dict[str, str | None] = dict(HEADLESS_VERIFY_ENV)
+        # Quoted because there is no shell to split on: a path with a space in
+        # it reached the interpreter as two arguments.
+        python = shlex.quote(sys.executable)
+        if target is None:
+            command, passed = f"{python} {shlex.quote(path)}", "ok"
+        else:
+            root, module = target
+            command, passed = f'{python} -c "import {module}"', "imported"
+            inherited = os.environ.get("PYTHONPATH")
+            env["PYTHONPATH"] = root + (os.pathsep + inherited if inherited else "")
+
         try:
             result = _call_mcp_tool_sync(
                 "terminal_execute",
                 {
-                    "command": f"python {path}",
+                    "command": command,
                     # Never let one file overrun what is left for the rest, and
                     # never hand it a slice too small to run in -- see
                     # MIN_VERIFY_SLICE_SECONDS.
@@ -1797,7 +1969,7 @@ def _verify_written_files(
                         if deadline is None
                         else max(1, int(min(VERIFY_TIMEOUT_SECONDS, deadline.remaining())))
                     ),
-                    "env": HEADLESS_VERIFY_ENV,
+                    "env": env,
                 },
             )
         except Exception as exc:
@@ -1814,11 +1986,110 @@ def _verify_written_files(
             ).strip()[:MAX_VERIFY_DETAIL_CHARS]
             if result.get("timed_out"):
                 detail = _timeout_detail(result)
+        elif ok and target is not None:
+            detail = PACKAGE_MODULE_IMPORT_NOTE.format(module=target[1])
 
-        results.append((path, "ok" if ok else "failed", detail))
-        tool_log.append(f"verify({path}) -> {'ok' if ok else 'failed'}")
+        status = passed if ok else "failed"
+        results.append((path, status, detail))
+        tool_log.append(f"verify({path}) -> {status}")
 
     return results
+
+
+def _lint_written_files(
+    paths: list[str],
+    tool_log: list[str],
+    deadline: _Deadline | None = None,
+) -> tuple[list[tuple[str, list[tuple[int, str, str]]]], list[str], str]:
+    """Lint the Python the Builder wrote, the way CI will.
+
+    Running a file proves it does not raise; it says nothing about whether CI
+    accepts it. The module an agent run wrote on 2026-09-12 imported, ran and
+    was approved -- carrying 103 ruff errors, so its first push would have
+    failed. This runs `ruff check` over each Python file with the project's own
+    configuration, applies only `LINT_AUTOFIX_RULES`, and reports what is left.
+
+    Returns (failures, fixed, unavailable): each path with the findings left
+    after the fixes, as (line, code, message); the paths ruff tidied; and why
+    ruff could not run at all, or "" when it did. A linter that is missing or
+    broken is not a defect in the file, so it is reported rather than failed,
+    and the pass stops at the first sign of it -- every file would say the same.
+    """
+    failures: list[tuple[str, list[tuple[int, str, str]]]] = []
+    fixed: list[str] = []
+    python = shlex.quote(sys.executable)
+    rules = ",".join(LINT_AUTOFIX_RULES)
+
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        # The stop and the deadline leave lint unrun. The verification pass
+        # that follows reports the same files as unproven, which already blocks.
+        if RUN_CONTROL.stopped() or (
+            deadline is not None and deadline.remaining() < MIN_VERIFY_SLICE_SECONDS
+        ):
+            tool_log.append(f"lint({path}) -> not run")
+            continue
+        try:
+            before = Path(path).read_bytes()
+        except OSError:
+            continue  # gone from disk: the verification pass accounts for it
+
+        try:
+            result = _call_mcp_tool_sync(
+                "terminal_execute",
+                {
+                    "command": (
+                        f"{python} -m ruff check --no-cache --fix --fixable {rules} "
+                        f"--output-format json {shlex.quote(path)}"
+                    ),
+                    "timeout": (
+                        LINT_TIMEOUT_SECONDS
+                        if deadline is None
+                        else max(1, int(min(LINT_TIMEOUT_SECONDS, deadline.remaining())))
+                    ),
+                    "env": {"NO_COLOR": "1"},
+                },
+            )
+        except Exception as exc:
+            tool_log.append(f"lint({path}) -> not run")
+            return failures, fixed, f"the lint pass could not start: {exc}"
+
+        output = result if isinstance(result, dict) else {}
+        try:
+            findings = json.loads(str(output.get("stdout") or ""))
+        except json.JSONDecodeError:
+            findings = None
+        if not isinstance(findings, list):
+            stderr = str(output.get("stderr") or output.get("error") or "").strip()
+            tool_log.append(f"lint({path}) -> not run")
+            if "No module named ruff" in stderr:
+                return failures, fixed, "ruff is not installed for this interpreter"
+            if output.get("timed_out"):
+                return failures, fixed, f"ruff timed out on {path}"
+            last = stderr.splitlines()[-1] if stderr else "no readable answer"
+            return failures, fixed, f"ruff could not check {path}: {last}"
+
+        try:
+            if Path(path).read_bytes() != before:
+                fixed.append(path)
+        except OSError:
+            pass
+
+        left = [
+            (
+                int((finding.get("location") or {}).get("row") or 0),
+                str(finding.get("code") or finding.get("name") or "syntax"),
+                str(finding.get("message") or "").strip(),
+            )
+            for finding in findings
+            if isinstance(finding, dict)
+        ]
+        if left:
+            failures.append((path, left))
+        tool_log.append(f"lint({path}) -> {'failed' if left else 'clean'}")
+
+    return failures, fixed, ""
 
 
 def builder_node(state: AgentState) -> AgentState:
@@ -1924,32 +2195,47 @@ def builder_node(state: AgentState) -> AgentState:
     ]
     # The reserve plus whatever the tool loop left unspent.
     verify_deadline = _Deadline(VERIFY_RESERVE_SECONDS + loop_deadline.remaining())
+    # Lint first, so what is executed below is the file after ruff's whitespace
+    # and import fixes. A file that failed lint on an earlier pass is re-linted
+    # though this pass left it alone, on the rule that keeps a failed file on
+    # `failed_verification`: it clears by passing, never by omission.
+    lint_carried = [
+        path
+        for path in (state.get("lint_failed") or [])
+        if path not in files_changed and path not in carried and Path(path).exists()
+    ]
+    lint_failures, lint_fixed, lint_unavailable = _lint_written_files(
+        files_changed + carried + lint_carried, tool_log, verify_deadline
+    )
+    lint_failed = [path for path, _ in lint_failures]
     verification = _verify_written_files(
         files_changed + carried, tool_log, verify_deadline
     )
     failed = [
         (path, detail) for path, status, detail in verification if status == "failed"
     ]
-    skipped = [path for path, status, _ in verification if status == "skipped"]
     unverified = [path for path, status, _ in verification if status == "unverified"]
 
     parsed = _parse_builder_output(content)
-    builder_report = parsed.get("changes_made") or content or "No report produced."
+    # A loop cut off at the turn cap has no closing message to parse, and "No
+    # report produced." read as a Builder that did nothing -- above a report
+    # listing every tool call it made.
+    builder_report = parsed.get("changes_made") or content or (
+        f"No closing report: the Builder used all {MAX_BUILDER_TOOL_TURNS} tool "
+        "turns without writing one."
+        if exhausted
+        else "No report produced."
+    )
 
     if verification:
         builder_report += (
-            "\n\nVerification (each runnable file was executed, except as noted):\n"
+            "\n\nVerification (each runnable file was executed, and each package "
+            "module imported, except as noted):\n"
         )
         # fall through to the per-file lines below
         builder_report += "\n".join(
             f"- {path}: {_VERIFY_LABELS[status]}" + (f"\n{detail}" if detail else "")
             for path, status, detail in verification
-        )
-    if skipped:
-        builder_report += (
-            f"\n\n{len(skipped)} package module(s) were not executed. A package "
-            "module only proves itself through a root-level script that imports "
-            "it; write one if none of the scripts above cover it."
         )
     if unverified:
         why = (
@@ -1961,6 +2247,27 @@ def builder_node(state: AgentState) -> AgentState:
             f"\n\n{len(unverified)} file(s) were not executed: {why}. They are "
             "unproven rather than working, and are re-checked next cycle."
         )
+
+    if lint_failures or lint_fixed or lint_unavailable:
+        builder_report += "\n\nLint (ruff, with this project's configuration):"
+        if lint_unavailable:
+            builder_report += f"\n- not run: {lint_unavailable}"
+        for path, findings in lint_failures:
+            builder_report += f"\n- {path}: {len(findings)} error(s)"
+            builder_report += "".join(
+                f"\n  line {line}: {code} {message}"
+                for line, code, message in findings[:MAX_LINT_FINDINGS_SHOWN]
+            )
+            if len(findings) > MAX_LINT_FINDINGS_SHOWN:
+                builder_report += (
+                    f"\n  ...and {len(findings) - MAX_LINT_FINDINGS_SHOWN} more; "
+                    f"`python -m ruff check {path}` lists them all"
+                )
+        if lint_fixed:
+            builder_report += (
+                "\n- trailing whitespace and import order fixed automatically in: "
+                + ", ".join(lint_fixed)
+            )
 
     if tool_log:
         builder_report += "\n\nTool calls:\n" + "\n".join(f"- {c}" for c in tool_log)
@@ -2033,7 +2340,15 @@ def builder_node(state: AgentState) -> AgentState:
             "disk now."
         )
 
+    # A discussion run's Builder has no tools and nothing to be blocked on, so
+    # what it writes under Blockers is part of its proposal. On the run of
+    # 2026-09-12 that read "This proposal requires approval from the Architect
+    # to proceed to implementation", which then sat in `blockers` and in the
+    # recovery block as though the run were stuck. It stays in the report.
     blockers = _clean_blockers(parsed.get("next_steps_blockers", ""))
+    if discuss_only and blockers:
+        builder_report += f"\n\nWhat the proposal says it would need:\n{blockers}"
+        blockers = ""
 
     # A failed verification outranks whatever the model concluded: it wrote a
     # file that does not run, and the Architect must see that as unfinished --
@@ -2053,6 +2368,15 @@ def builder_node(state: AgentState) -> AgentState:
     if unverified:
         lead = "Not executed before the stop" if stopped else "Not executed before the deadline"
         note = f"{lead}: " + ", ".join(unverified)
+        blockers = f"{blockers}. {note}" if blockers else note
+
+    # Whatever `expect_failures` says, like an unrun file: CI lints a fixture
+    # that is meant to fail at runtime all the same.
+    if lint_failures:
+        note = "Files that fail lint: " + "; ".join(
+            f"{path} ({', '.join(sorted({code for _, code, _ in findings}))})"
+            for path, findings in lint_failures
+        )
         blockers = f"{blockers}. {note}" if blockers else note
 
     if stopped and not blockers:
@@ -2082,15 +2406,29 @@ def builder_node(state: AgentState) -> AgentState:
     # cycle re-runs them: a file nobody executed must not clear by omission,
     # which is the same rule that keeps a failed file on the list.
     state["failed_verification"] = [path for path, _ in failed] + unverified
+    # The gate reads these two apart from the list above. `unverified` blocks
+    # approval whatever `expect_failures` says, and the gate could not honour
+    # that while it had one list: it cleared the whole of failed_verification
+    # under the opt-out, unrun files included. A pass cut off before it
+    # finished blocks too -- its blocker always said so, and on 2026-09-12 a
+    # run was approved over one.
+    state["unverified"] = list(unverified)
+    state["builder_cut_off"] = (
+        "turn_cap" if exhausted else "deadline" if out_of_time else ""
+    )
+    state["lint_failed"] = lint_failed
     state["blockers"] = blockers
     # The feed line has to carry the verification result too. "Implementation
     # complete" beside a file that does not run is the same false claim this
     # pass exists to catch, and it is what the Architect reads in state.
-    if failed:
-        suffix = " (expected for this run)" if expected else ""
-        summary = (
-            f"Wrote {len(files_changed)} file(s); {len(failed)} do not run{suffix}"
-        )
+    if failed or lint_failed:
+        problems = []
+        if failed:
+            suffix = " (expected for this run)" if expected else ""
+            problems.append(f"{len(failed)} do not run{suffix}")
+        if lint_failed:
+            problems.append(f"{len(lint_failed)} fail lint")
+        summary = f"Wrote {len(files_changed)} file(s); " + "; ".join(problems)
     elif unverified:
         why = "stopped" if stopped else "deadline"
         summary = (
@@ -2109,6 +2447,16 @@ def builder_node(state: AgentState) -> AgentState:
         summary = (
             f"Stopped at the {int(BUILDER_DEADLINE_SECONDS)}s deadline. "
             f"Files: {len(files_changed)}"
+        )
+    elif exhausted:
+        # Never "Implementation complete": the loop ran out of turns with the
+        # model still asking for tools, so the Builder did not finish. The
+        # blocker above says so, and this line used to contradict it -- on
+        # 2026-09-12 a Builder stopped at the turn cap read "Implementation
+        # complete. Files: 2" in the feed, and the Architect approved the run.
+        summary = (
+            f"Stopped after {MAX_BUILDER_TOOL_TURNS} tool turns without "
+            f"finishing. Files: {len(files_changed)}"
         )
     elif discuss_only:
         # Never "Implementation complete" -- nothing was implemented, and the

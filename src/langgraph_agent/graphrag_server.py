@@ -13,7 +13,8 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping, MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -37,11 +38,6 @@ from langgraph_agent.lexical import (
     reciprocal_rank_fusion,
 )
 
-# Force CPU for sentence-transformers (GPU 1060 3GB not compatible). Set at
-# import rather than beside the model load below, because it has to be in the
-# environment before torch is imported, and that import is now deferred.
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 if TYPE_CHECKING:  # pragma: no cover - import cost is the whole point
     from sentence_transformers import SentenceTransformer
 
@@ -51,15 +47,201 @@ if TYPE_CHECKING:  # pragma: no cover - import cost is the whole point
 # produced the corpus it is dumping.
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
-# Where it runs, named rather than left to sentence-transformers, which picks
+# Where it runs: `cpu`, or a card numbered the way `nvidia-smi` numbers cards
+# (`cuda:1`). Always named, never left to sentence-transformers, which picks
 # `cuda:0` whenever `torch.cuda.is_available()` says True. That answer only
 # means a driver answered, not that the installed build carries kernels for
 # the card: on 2026-09-10 a Builder swapped the venv to `torch+cu130` on a
 # GTX 1060 (compute 6.1, which CUDA 13 dropped), `is_available()` stayed True,
 # and every `encode()` raised `no kernel image is available`, taking search
-# and indexing down with it. And a 3 GB card is wanted whole for the model
-# being offloaded onto it; a 384-dimension MiniLM is not worth any of that.
-EMBEDDING_DEVICE = "cpu"
+# and indexing down with it. So a named card is proven with a real encode
+# before it is trusted, and the CPU takes over when it refuses
+# (`_embedder_on`).
+#
+# `cpu` stays the default. A card is worth having -- a full index of 2,446
+# passages measured 81.0s on this machine's CPU and 17.0s on a GTX 1060 -- but
+# a 3 GB card shared with a local seat takes it in exactly one arrangement,
+# which `claim_embedding_device` describes.
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu").strip().lower() or "cpu"
+
+
+def _prepare_cuda_environment(device: str, environ: "MutableMapping[str, str]") -> None:
+    """Make CUDA see what `EMBEDDING_DEVICE` means, before torch initialises it.
+
+    Called at import, because CUDA reads both variables once, when it first
+    initialises, and nothing can change its mind after that.
+
+    On `cpu` every card is hidden from this process. That line predates the
+    setting (2026-08-31) and is kept for the setting that matches it: with no
+    card visible, nothing in the process can land on one by accident. It is
+    gone for a card because it hid the named card too -- measured, `No CUDA
+    GPUs are available`.
+
+    On a card the order is pinned to the PCI bus. CUDA's own default is
+    fastest-first, which on two identical cards promises nothing, so `cuda:1`
+    could have meant the card driving the display. `nvidia-smi` numbers by bus,
+    and that is the number an operator reads before writing the setting. An
+    order the operator chose is left alone.
+    """
+    if device == "cpu":
+        environ["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
+
+_prepare_cuda_environment(EMBEDDING_DEVICE, os.environ)
+
+# Passages per forward pass, on either device. 8 rather than
+# sentence-transformers' default of 32, and it costs nothing: measured, a GTX
+# 1060 embedded 305 passages/s at 8 against 315 at 32, and this machine's CPU
+# 35.2 against 34.3 -- both are compute-bound, not batch-bound. What 32 costs
+# is memory: a peak of 406 MiB on the card against ~240 at 8, and beside a
+# local seat on a 3 GB card that difference is a layer. With the embedder at 32
+# the seat loaded 48 of 49 layers on the GPU and read prompts at 98 tok/s
+# instead of 155.
+EMBEDDING_BATCH_SIZE = 8
+
+# Which embedding model builds and searches the corpus. MiniLM unless the
+# environment or the console names another, and anything but MiniLM is an
+# Ollama tag: the console offers only tags the daemon says can embed. The
+# console's choice lasts until the server restarts, the way a seat's does.
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "").strip() or EMBEDDING_MODEL_NAME
+_embedding_model_override: str | None = None
+
+
+def active_embedding_model() -> str:
+    """The embedding model the corpus is built and searched with, right now."""
+    return _embedding_model_override or EMBEDDING_MODEL
+
+
+def set_embedding_model(model: str) -> None:
+    """Switch the embedding model for the rest of this process.
+
+    Drops the open corpus rather than re-pointing it. Every model has its own
+    store (`persist_dir_for`), because vectors from two models share no space
+    -- MiniLM's are 384 numbers and qwen3-embedding's 4,096 -- so the next open
+    is of that model's corpus, which the next run builds if it does not exist.
+    A caller holding a corpus object has to drop its own as well.
+    """
+    global _embedding_model_override, _kb_instance
+    _embedding_model_override = None if model == EMBEDDING_MODEL else model
+    _kb_instance = None
+
+
+def embedding_backend(model: str) -> str:
+    """`sentence-transformers` for MiniLM, which runs in this process; `ollama` otherwise."""
+    return "sentence-transformers" if model == EMBEDDING_MODEL_NAME else "ollama"
+
+
+def persist_dir_for(model: str) -> str:
+    """Where `model`'s corpus lives: `knowledge/` for MiniLM, a directory of its own otherwise.
+
+    MiniLM keeps the directory it always had, so choosing it moves nothing.
+    Any other model gets `knowledge/models/<tag>/`, inside the directory the
+    walk already excludes, so no corpus is ever indexed into another.
+    """
+    if model == EMBEDDING_MODEL_NAME:
+        return "./knowledge"
+    slug = "".join(c if c.isalnum() or c in "._-" else "-" for c in model).strip("-")
+    return f"./knowledge/models/{slug}"
+
+
+# Seconds one batch of passages may take through Ollama. Measured for
+# qwen3-embedding (7.6B) on 2x GTX 1060 3GB: 24 passages in 101s after a 12.5s
+# load, so a batch of 8 takes ~35s -- and the first batch of a run waits for
+# the load too.
+OLLAMA_EMBED_TIMEOUT_SECONDS = 600.0
+
+
+class EmbeddingStopped(RuntimeError):
+    """The run was stopped between two batches of an embedding."""
+
+
+class OllamaEmbedder:
+    """An Ollama embedding model behind the two things the corpus asks of one.
+
+    `encode` sends passages to `/api/embed` in batches of
+    `EMBEDDING_BATCH_SIZE` and returns the shapes sentence-transformers
+    returns, so `add_document` and `search` cannot tell the two apart.
+
+    `tokenizer` is MiniLM's rather than the model's. The chunker needs a
+    tokenizer in this process and the daemon's is not reachable from here;
+    MiniLM's loads from the local cache on its own, with offsets identical to
+    the full model's on 40,000 characters of CLAUDE.md. It also keeps every
+    corpus's passages the same: 254 MiniLM tokens sit far inside a 40,960-token
+    window, so passage size, and everything tuned against it, does not move
+    with the model.
+    """
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self._tokenizer: Any = None
+
+    @property
+    def tokenizer(self) -> Any:
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
+
+            name = f"sentence-transformers/{EMBEDDING_MODEL_NAME}"
+            try:
+                self._tokenizer = AutoTokenizer.from_pretrained(name, local_files_only=True)
+            except (OSError, ValueError):
+                self._tokenizer = AutoTokenizer.from_pretrained(name)
+        return self._tokenizer
+
+    def encode(
+        self,
+        texts: str | list[str],
+        batch_size: int = EMBEDDING_BATCH_SIZE,
+        show_progress_bar: bool = False,
+        should_stop: "Callable[[], bool] | None" = None,
+    ) -> Any:
+        """One vector per passage, or a single vector for a single string.
+
+        `should_stop` is asked before each batch, so a stopped run waits for at
+        most one batch rather than for the rest of a document.
+        """
+        import urllib.error
+        import urllib.request
+
+        import numpy as np
+
+        from langgraph_agent.config import _ollama_base_url
+
+        single = isinstance(texts, str)
+        items = [texts] if single else list(texts)
+        vectors: list[list[float]] = []
+        step = max(1, batch_size)
+        for start in range(0, len(items), step):
+            if should_stop is not None and should_stop():
+                raise EmbeddingStopped(f"stopped after {start} of {len(items)} passages")
+            batch = items[start : start + step]
+            request = urllib.request.Request(
+                f"{_ollama_base_url()}/api/embed",
+                data=json.dumps({"model": self.model, "input": batch}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=OLLAMA_EMBED_TIMEOUT_SECONDS
+                ) as response:
+                    payload = json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace").strip()
+                raise RuntimeError(
+                    f"Ollama could not embed with {self.model}: {detail or exc}"
+                ) from exc
+            except OSError as exc:
+                raise RuntimeError(f"Ollama could not embed with {self.model}: {exc}") from exc
+            embeddings = payload.get("embeddings") or []
+            if len(embeddings) != len(batch):
+                raise RuntimeError(
+                    f"Ollama returned {len(embeddings)} vectors for {len(batch)} "
+                    f"passages from {self.model}"
+                )
+            vectors.extend(embeddings)
+        array = np.asarray(vectors, dtype=np.float32)
+        return array[0] if single else array
 
 # The score at or below which retrieval is treated as having answered nothing,
 # and the run falls through to the Researcher's model. It is a property of
@@ -91,6 +273,80 @@ EMBEDDING_DEVICE = "cpu"
 # on-corpus minimum fell from 0.492 to 0.442 as retrieval improved. A floor
 # calibrated against dense-only ordering describes code that no longer runs.
 RETRIEVAL_RELEVANCE_FLOOR = 0.37
+
+# The questions a model's floor is measured with, in a JSON file for one
+# reason: the walk does not index JSON. Written anywhere the corpus reads, the
+# unanswerable questions would be answered by their own text, score near 1.0,
+# and leave no gap to put a floor in.
+FLOOR_CALIBRATION_QUESTIONS = Path(__file__).with_name("embedding_calibration.json")
+FLOOR_CALIBRATION_FILE = "floor_calibration.json"
+
+
+def floor_calibration(model: str | None = None) -> dict[str, Any] | None:
+    """The stored measurement behind `model`'s floor, or None if none was taken."""
+    name = model or active_embedding_model()
+    path = Path(persist_dir_for(name)) / FLOOR_CALIBRATION_FILE
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) and record.get("model") == name else None
+
+
+def relevance_floor(model: str | None = None) -> float | None:
+    """The score over which a search counts as the corpus having answered.
+
+    MiniLM's is `RETRIEVAL_RELEVANCE_FLOOR`, measured by hand. Any other
+    model's is what `calibrate_relevance_floor` measured on that model's own
+    corpus -- None until then, and None for good when the model left no gap
+    between the two populations. None means retrieval cannot tell an answer
+    from noise, and a caller must treat every search as unanswered rather than
+    borrow a number measured on a different model: a cosine has no meaning
+    across models.
+    """
+    name = model or active_embedding_model()
+    if name == EMBEDDING_MODEL_NAME:
+        return RETRIEVAL_RELEVANCE_FLOOR
+    record = floor_calibration(name)
+    floor = record.get("floor") if record else None
+    return float(floor) if isinstance(floor, (int, float)) else None
+
+
+def calibrate_relevance_floor(kb: "GraphRAGKnowledgeBase") -> dict[str, Any]:
+    """Take a floor for `kb`'s model the way MiniLM's was taken, and keep it.
+
+    Twelve questions this corpus answers against twelve it cannot, each asked
+    once. The floor is the midpoint of the gap between the lowest answered
+    score and the highest unanswered one -- a value in open space rather than
+    on an observed boundary, which is how `RETRIEVAL_RELEVANCE_FLOOR` was
+    chosen. When the populations overlap there is no gap and no floor: any
+    number inside the overlap would misfile some question, and nothing would
+    say which. Checked against MiniLM on this corpus first: answered
+    0.503-0.715, unanswerable 0.156-0.369, with MiniLM's hand-measured floor
+    inside the gap.
+    """
+    questions = json.loads(FLOOR_CALIBRATION_QUESTIONS.read_text(encoding="utf-8"))
+
+    def best(question: str) -> float:
+        hits = kb.search(question, 1)
+        return round(float(hits[0].get("score") or 0.0), 3) if hits else 0.0
+
+    answered = [best(question) for question in questions["answered"]]
+    unanswerable = [best(question) for question in questions["unanswerable"]]
+    low, high = max(unanswerable), min(answered)
+    record: dict[str, Any] = {
+        "model": kb.embedding_model,
+        "answered": answered,
+        "unanswerable": unanswerable,
+        "floor": round((low + high) / 2, 3) if high > low else None,
+        "measured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = Path(kb.persist_dir) / FLOOR_CALIBRATION_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    temporary.replace(path)
+    return record
 
 # What every caller says when asked to search a corpus nobody has built. One
 # string because three doors report it -- the MCP tools, the Builder's tool
@@ -174,7 +430,10 @@ NO_CORPUS_NOTE = (
 # writing-up of a change minting the entity -- and both joined the list by the
 # same count. The lesson is not the two words: it is that this list is a claim
 # about a vocabulary, and the vocabulary grows every time someone documents
-# something.
+# something -- and code is documented too: the same day an agent-written
+# module, `src/quisce/spectral_analysis.py`, took `Perform` and `Useful` across
+# the floor, both docstring openers at zero position-free capitals, and `Prose`
+# crossed it the same day as the first word of a comment's sentence.
 ENTITY_STOPWORDS = frozenset(
     word.lower()
     for word in """
@@ -200,7 +459,7 @@ ENTITY_STOPWORDS = frozenset(
     Refused Whether Split Asserted Degree Shared Based Demonstrates References
     Generate Extract Point Seconds Deliberately Named Built Asking Pinned
     Insert Tests Write Reported Computed Cached Complete Convert Dimension
-    Naming
+    Naming Perform Useful Prose
     """.split()
 )
 
@@ -332,6 +591,111 @@ def _document_id_of(
     return chunk_id
 
 
+def _is_cuda_device(device: str) -> bool:
+    """`cuda` or `cuda:N` -- the spellings torch accepts for a card."""
+    return device == "cuda" or (device.startswith("cuda:") and device[5:].isdigit())
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """A card that was full, as against a card that cannot run the model at all.
+
+    torch raises `OutOfMemoryError` when an allocation fails, and a plain
+    `RuntimeError` reading "out of memory" when the context itself cannot be
+    created. Both clear once something else lets go of the card; a missing
+    kernel never does, which is the whole difference between a card worth
+    asking again and one that is not.
+    """
+    return type(exc).__name__ == "OutOfMemoryError" or "out of memory" in str(exc).lower()
+
+
+def _sentence_transformer(device: str) -> "SentenceTransformer":
+    """The model on `device`, from the local cache first.
+
+    Loading by name asks huggingface.co whether the model changed -- a request
+    on every server's first embed, and a failure on a machine with no network
+    even though the model is already on disk. Only a model not cached yet is
+    fetched.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    try:
+        return SentenceTransformer(EMBEDDING_MODEL_NAME, device=device, local_files_only=True)
+    except (OSError, ValueError):
+        return SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
+
+
+def _warm_to_peak(model: "SentenceTransformer") -> None:
+    """Encode, now, every shape a full index will ask the card for.
+
+    Two jobs in one call. It is the proof that the card runs the model at all:
+    construction succeeds on a build with no kernels for the card, and only an
+    encode fails. And it makes torch's caching allocator reserve what indexing
+    will need *before* a local seat is fitted around it -- reserved memory
+    stays reserved, so the seat is placed around the embedder's working size
+    rather than its idle one.
+
+    Mixed lengths rather than one full window, because the allocator keeps
+    blocks by shape. Measured on a GTX 1060: one batch at the full window
+    reserved 148 MiB, these lengths 154, and a full index of 2,446 real
+    passages afterwards peaked at 166 either way -- growth the card's margin
+    beside the seat absorbs. Padding the pool up front was measured too and is
+    worse: reserved to 176, the same index still grew it to 182, because small
+    allocations never come out of one large block.
+    """
+    lengths = (CHUNK_MAX_TOKENS, 192, 128, 96, 64, 32, 16, 4)
+    texts = [" ".join(["word"] * n) for n in lengths for _ in range(EMBEDDING_BATCH_SIZE)]
+    model.encode(texts, batch_size=EMBEDDING_BATCH_SIZE, show_progress_bar=False)
+
+
+def _release_cuda_cache() -> None:
+    """Hand back what a refused attempt reserved.
+
+    Without it the CPU model that replaces the card's would sit beside a pool
+    nobody uses again, in memory a local seat could have had.
+    """
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        # A no-op where CUDA never initialised, so it needs no guard.
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+# How often a card is asked again once a seat was unloaded to make room, and
+# how far apart. The daemon stops listing a model before its runner has exited,
+# and until then the memory is still taken.
+EMBEDDER_ROOM_RETRIES = 3
+EMBEDDER_ROOM_RETRY_SECONDS = 1.0
+
+
+def _embedder_on(device: str) -> "tuple[SentenceTransformer | None, str | None, bool]":
+    """`(model, None, False)` when the card takes it; `(None, why, retryable)` when not.
+
+    Whatever a refused attempt touched is released before this returns, which
+    is why the failure is reduced to text inside the `except`: the exception's
+    traceback holds the frames holding the half-built model, and the cache
+    cannot be emptied while they are alive.
+    """
+    failure: tuple[str, bool] | None = None
+    model: SentenceTransformer | None = None
+    try:
+        model = _sentence_transformer(device)
+        _warm_to_peak(model)
+    except Exception as exc:
+        text = str(exc).strip()
+        first_line = text.splitlines()[0][:200] if text else type(exc).__name__
+        failure = (f"{device} refused the embedding model: {first_line}", _is_out_of_memory(exc))
+    if failure is None:
+        return model, None, False
+    model = None
+    _release_cuda_cache()
+    return None, failure[0], failure[1]
+
+
 class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     """Simple GraphRAG: NetworkX graph + Chroma vector store.
 
@@ -347,7 +711,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     # field by field around a fake collection -- which is how the corpus tests
     # avoid the model entirely -- still reads as "not loaded yet" rather than
     # raising on the attribute.
-    _embedder: "SentenceTransformer | None" = None
+    _embedder: "SentenceTransformer | OllamaEmbedder | None" = None
 
     # Same reasoning, and the same construction path: (nodes, edges) -> the
     # connectivity result computed at that shape. A cache must not depend on
@@ -361,8 +725,31 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     # around a fake collection still reads as "not built yet".
     _lexical_index: "BM25Index | None" = None
 
-    def __init__(self, persist_dir: str = "./knowledge"):
-        self.persist_dir = Path(persist_dir)
+    # Where the loaded embedder actually runs, and why that is not
+    # `EMBEDDING_DEVICE` when it is not. Declared on the class for the reason
+    # the three above are: an instance built field by field around a fake
+    # embedder reads as "not placed yet" rather than raising. Both are None
+    # until something loads the model.
+    embedding_device: str | None = None
+    embedding_device_note: str | None = None
+    # A card that was full can take the model once something lets go of it; a
+    # card with no kernels for this build never will, and asking it again on
+    # every run would unload a seat on every run for nothing.
+    _embedding_device_retryable: bool = False
+
+    # The model this corpus is embedded with, fixed when it is opened: a corpus
+    # is a set of vectors from one model, so switching models opens another
+    # corpus rather than changing this one. MiniLM on the class, for instances
+    # the tests assemble field by field.
+    embedding_model: str = EMBEDDING_MODEL_NAME
+    # Set by `index_project_files` while it runs, so an embedding through
+    # Ollama -- ~35s a batch for qwen3-embedding here -- stops between batches
+    # instead of finishing a document that can take minutes.
+    _should_stop: "Callable[[], bool] | None" = None
+
+    def __init__(self, persist_dir: str | None = None):
+        self.embedding_model = active_embedding_model()
+        self.persist_dir = Path(persist_dir or persist_dir_for(self.embedding_model))
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize Chroma vector store
@@ -377,7 +764,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         self._load_graph()
 
     @property
-    def embedder(self) -> "SentenceTransformer":
+    def embedder(self) -> "SentenceTransformer | OllamaEmbedder":
         """The local embedding model, loaded the first time something embeds.
 
         Deferred because loading it is the one heavyweight thing this machine
@@ -386,11 +773,140 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         poll, a document list -- paid for it, and importing this module paid
         for pulling in torch behind it.
         """
-        if self._embedder is None:
-            from sentence_transformers import SentenceTransformer
+        model = self._embedder
+        if model is None:
+            model, _ = self._load_embedder()
+        return model
 
-            self._embedder = SentenceTransformer(EMBEDDING_MODEL_NAME, device=EMBEDDING_DEVICE)
-        return self._embedder
+    def _load_embedder(
+        self, make_room: "Callable[[], list[str]] | None" = None
+    ) -> "tuple[SentenceTransformer | OllamaEmbedder, list[str]]":
+        """Load onto `EMBEDDING_DEVICE`, or onto the CPU with the reason recorded.
+
+        `make_room` is asked only when the card was full, and the card is asked
+        again only if something was unloaded. Returns the installed model and
+        the tags `make_room` unloaded.
+        """
+        if embedding_backend(self.embedding_model) == "ollama":
+            # Placed by the daemon, not by this process: `EMBEDDING_DEVICE` is
+            # about the one model that runs here.
+            ollama_model = OllamaEmbedder(self.embedding_model)
+            self._embedder = ollama_model
+            self.embedding_device = "ollama"
+            self.embedding_device_note = None
+            self._embedding_device_retryable = False
+            return ollama_model, []
+        device = EMBEDDING_DEVICE
+        model: SentenceTransformer | None = None
+        note: str | None = None
+        retryable = False
+        unloaded: list[str] = []
+        if _is_cuda_device(device):
+            model, note, retryable = _embedder_on(device)
+            if model is None and retryable and make_room is not None:
+                unloaded = make_room()
+                for attempt in range(EMBEDDER_ROOM_RETRIES if unloaded else 0):
+                    if attempt:
+                        time.sleep(EMBEDDER_ROOM_RETRY_SECONDS)
+                    model, note, retryable = _embedder_on(device)
+                    if model is not None or not retryable:
+                        break
+        elif device != "cpu":
+            note = f"EMBEDDING_DEVICE={device!r} names neither cpu nor cuda:N"
+        if model is None:
+            model = _sentence_transformer("cpu")
+            device = "cpu"
+        self._embedder = model
+        self.embedding_device = device
+        self.embedding_device_note = note
+        self._embedding_device_retryable = retryable
+        return model, unloaded
+
+    def claim_embedding_device(
+        self, make_room: "Callable[[], list[str]] | None" = None
+    ) -> dict[str, Any]:
+        """Load the embedder onto its card now, before a local seat is fitted beside it.
+
+        llama.cpp fits a model around what a card already carries and never
+        moves it afterwards, so on a card shared with a local seat the order of
+        the two loads decides the outcome. Measured on a GTX 1060 3GB beside
+        the local 9B with its KV cache at q8_0: embedder first, the seat kept
+        49 of 49 layers on the GPU at unchanged speed; seat first, the embedder
+        found 11 MiB free and failed. A lazy load gets whichever order a run
+        happens to produce, so a run calls this before anything embeds.
+
+        A card that was full is retried after `make_room` unloads what is on
+        it. A card that cannot run the model at all is not asked again, since
+        that would unload a seat on every run for nothing. An embedder already
+        on its card is left there, and `cpu` places nothing and loads nothing.
+
+        Returns `source` -- `cpu`, `resident`, `claimed` or `unavailable` --
+        with the device, the reason when it is not the configured one, and the
+        tags unloaded to make room.
+        """
+        if embedding_backend(self.embedding_model) == "ollama":
+            # The daemon places it, and swaps it with a seat as it needs to;
+            # there is no order this process can get right on its behalf.
+            return {"source": "ollama", "model": self.embedding_model}
+        if EMBEDDING_DEVICE == "cpu":
+            return {"source": "cpu"}
+        if self._embedder is not None:
+            if self.embedding_device != "cpu":
+                return {"source": "resident", "device": self.embedding_device}
+            if not self._embedding_device_retryable:
+                return self._placement("unavailable", [])
+        _, unloaded = self._load_embedder(make_room)
+        source = "unavailable" if self.embedding_device == "cpu" else "claimed"
+        return self._placement(source, unloaded)
+
+    def _placement(self, source: str, unloaded: list[str]) -> dict[str, Any]:
+        return {
+            "source": source,
+            "configured": EMBEDDING_DEVICE,
+            "device": self.embedding_device,
+            "note": self.embedding_device_note,
+            "retryable": self._embedding_device_retryable,
+            "unloaded": unloaded,
+        }
+
+    def _encode(self, texts: str | list[str]) -> Any:
+        """Embed at `EMBEDDING_BATCH_SIZE`, finishing on the CPU if the card fills.
+
+        Every encode goes through here, so no call site reaches the model at
+        the library's own batch size, and none draws a progress bar --
+        sentence-transformers draws one per call when logging is at INFO, and
+        the server log once carried 33 of them.
+
+        A card can fill after the embedder was placed: a seat fitted around its
+        idle pool, a larger model seated since. An out-of-memory raised from
+        here would reach `index_project_files` as a per-file error -- the
+        document skipped, the rebuild reporting success -- so the model moves
+        to the CPU, says why, and the same passages are embedded there. The
+        next run's placement asks the card again.
+        """
+        model = self.embedder
+        try:
+            if isinstance(model, OllamaEmbedder):
+                return model.encode(
+                    texts, batch_size=EMBEDDING_BATCH_SIZE, should_stop=self._should_stop
+                )
+            return model.encode(texts, batch_size=EMBEDDING_BATCH_SIZE, show_progress_bar=False)
+        except Exception as exc:
+            # Only a card falls back to the CPU. The CPU model is MiniLM, and
+            # MiniLM's vectors in another model's corpus would be noise that
+            # still scored.
+            if not _is_cuda_device(self.embedding_device or "") or not _is_out_of_memory(exc):
+                raise
+            note = f"{self.embedding_device} ran out of memory while embedding"
+        del model
+        self._embedder = None
+        _release_cuda_cache()
+        cpu_model = _sentence_transformer("cpu")
+        self._embedder = cpu_model
+        self.embedding_device = "cpu"
+        self.embedding_device_note = note
+        self._embedding_device_retryable = True
+        return cpu_model.encode(texts, batch_size=EMBEDDING_BATCH_SIZE, show_progress_bar=False)
 
     def _load_graph(self) -> None:
         """Load graph from disk if exists."""
@@ -556,7 +1072,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             # chunk: the model is the expensive thing on this machine and
             # batching is most of what makes a reindex of ~1,100 chunks
             # finish in the time a reindex of 77 documents used to take.
-            embeddings = self.embedder.encode(chunks).tolist()
+            embeddings = self._encode(chunks).tolist()
             self.collection.upsert(
                 ids=[
                     f"{doc_id}{CHUNK_ID_SEPARATOR}{i:04d}" for i in range(len(chunks))
@@ -633,9 +1149,10 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         # `neighborhood`, `topics` and `duplicate_entities`, so the graph
         # degrades as the corpus grows.
         # The page is still chunked, embedded and fully retrievable; it simply
-        # stops voting on what the entities of this project are.
+        # stops voting on what the entities of this project are. Markup, script
+        # and config follow the same rule: see `ENTITY_FREE_SUFFIXES`.
         entities = []
-        for word in ([] if _is_web_document(doc_id) else content.split()):
+        for word in (content.split() if _mints_entities(doc_id) else []):
             token = word.strip("\"'`()[]{}<>.,!?;:*=+-/\\|")
             if (
                 len(token) > 4
@@ -704,8 +1221,9 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         if not query or not query.strip():
             return []
 
-        # Generate query embedding
-        query_embedding = self.embedder.encode(query).tolist()
+        # Generate query embedding. `_encode` is what keeps it at the batch cap
+        # and draws no progress bar.
+        query_embedding = self._encode(query).tolist()
 
         # Widen once if one document monopolised the first window of hits.
         # A focused query genuinely can match a dozen passages of the same
@@ -843,6 +1361,9 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
                 "score": 1 - distances[0][i] if distances[0] else 0.0,
                 "chunks_matched": 1,
             }
+            location = _passage_location(doc_id, str(result["content"]))
+            if location is not None:
+                result["line"], result["content"] = location
 
             # Add graph neighbors
             if doc_id in self.graph:
@@ -866,10 +1387,10 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         """
         # One spelling of the fuzzy match, so the console and the Researcher's
         # tool cannot resolve an id differently.
-        found = self._resolve_node(entity)
+        found, alternatives = self._match_node(entity)
         if found is None:
             return {"error": f"Entity '{entity}' not found"}
-        entity = found
+        typed, entity = entity, found
 
         # Undirected, for the reason `neighborhood` is: every edge runs
         # document -> entity, so an entity has in-edges only and a directed walk
@@ -885,34 +1406,72 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         # Build subgraph
         subgraph = self.graph.subgraph(neighbors.keys())
 
-        return {
+        result: dict[str, Any] = {
             "entity": entity,
             "neighbors": list(neighbors.items()),
             "subgraph_nodes": len(subgraph.nodes()),
             "subgraph_edges": len(subgraph.edges()),
         }
+        if entity != typed:
+            # The Researcher reads this too: a relationship question answered
+            # about a different node than the one it named should say so.
+            result["resolved_from"] = typed
+            result["alternatives"] = alternatives
+        return result
 
 
     def _resolve_node(self, node_id: str) -> str | None:
-        """Resolve a node id, falling back to a substring match.
+        """Resolve a node id; see `_match_node`. Both entry points use it."""
+        return self._match_node(node_id)[0]
 
-        Mirrors the fuzzy match in `query_graph` so both entry points accept the
-        same loosely-typed ids the console lets a user paste.
+    def _match_node(self, node_id: str) -> tuple[str | None, list[str]]:
+        """Resolve a typed id to a node, and name the others it could have meant.
+
+        The fallback used to be the first node whose id contained the text, in
+        whatever order the graph enumerated its nodes -- so the same loose id
+        could trace a different node after a reindex, and nobody was told there
+        had been a choice. Candidates are ranked instead: the exact id ignoring
+        case, a document by its file name or stem, an id starting with the text,
+        an id containing it; within a rank the shorter id wins, then the better
+        connected node. The runners-up come back with the match, so a caller can
+        say what it chose between.
         """
         if node_id in self.graph:
-            return node_id
+            return node_id, []
 
         # `"" in anything` is True, so a blank id matched on the first
         # comparison and resolved to whatever the graph enumerated first. The
         # caller asked about nothing and got a real document's neighbourhood.
         if not node_id or not node_id.strip():
+            return None, []
+
+        needle = node_id.strip().lower()
+        undirected = self.graph.to_undirected(as_view=True)
+
+        def rank(node: Any) -> int | None:
+            name = str(node)
+            lowered = name.lower()
+            if lowered == needle:
+                return 0
+            if self.graph.nodes[node].get("type") == "document":
+                path = PurePosixPath(name)
+                if needle in (path.name.lower(), path.stem.lower()):
+                    return 1
+            if lowered.startswith(needle):
+                return 2
+            if needle in lowered:
+                return 3
             return None
 
-        needle = node_id.lower()
-        for node in self.graph.nodes():
-            if needle in str(node).lower():
-                return str(node)
-        return None
+        candidates = [
+            (tier, len(str(node)), -undirected.degree(node), str(node))
+            for node in self.graph.nodes()
+            if (tier := rank(node)) is not None
+        ]
+        if not candidates:
+            return None, []
+        candidates.sort()
+        return candidates[0][3], [c[3] for c in candidates[1 : 1 + MAX_MATCH_ALTERNATIVES]]
 
     def _node_record(self, node_id: str) -> dict[str, Any]:
         """Render one graph node in the shape the console draws."""
@@ -1057,7 +1616,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             center_node, related_nodes (excluding the centre), edges, and
             totals; plus `split` when asked for.
         """
-        centre = self._resolve_node(node_id)
+        centre, alternatives = self._match_node(node_id)
         if centre is None:
             return {
                 "error": f"Node '{node_id}' not found",
@@ -1100,11 +1659,21 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
 
         result = {
             "center_node": centre,
+            # The centre's own record, because only the graph knows whether it
+            # is a document or an entity. Without it the console assumed a
+            # document and drew every traced entity as a file.
+            "center": self._node_record(centre),
             "related_nodes": related,
             "edges": edges,
             "total_nodes": len(related),
             "total_edges": len(edges),
         }
+
+        if centre != node_id:
+            # Said whenever the id typed was not the id found, so a trace of
+            # the wrong node reads as a choice rather than as the answer.
+            result["resolved_from"] = node_id
+            result["alternatives"] = alternatives
 
         if split:
             division = self._sign_split(keep, centre)
@@ -1117,6 +1686,53 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             result["split"] = division
 
         return result
+
+    def overview(self, min_degree: int = 4, include_isolated: bool = False) -> dict[str, Any]:
+        """The whole corpus as one drawable graph -- what the console's sweep draws.
+
+        The console used to assemble this itself: `list_documents`, then one
+        `neighborhood` call per document -- 97 round trips on this corpus, each
+        a line in the server log, before anything was drawn. Every document is
+        always kept and entities are kept by degree, so for any depth of one or
+        more the union of those neighbourhoods is exactly every document plus
+        every entity with at least `min_degree` edges. That is computed here
+        once, from the same degree `neighborhood` reads.
+
+        A document linked to nothing in that subgraph -- a fetched page, an
+        entity-free source file, a document whose entities are all rarer than
+        `min_degree` -- is a dot joined to nothing, and a sweep has no use for
+        it. It is left out unless asked for, and counted in
+        `unlinked_documents` so the drawing does not silently lose it.
+        """
+        undirected = self.graph.to_undirected(as_view=True)
+        keep = {
+            node
+            for node, attrs in self.graph.nodes(data=True)
+            if attrs.get("type") == "document" or undirected.degree(node) >= min_degree
+        }
+        edges = [
+            {
+                "id": f"{source}->{target}",
+                "source_id": source,
+                "target_id": target,
+                "relationship": data.get("relation", "related_to"),
+                "weight": data.get("weight", 1.0),
+            }
+            for source, target, data in self.graph.edges(data=True)
+            if source in keep and target in keep
+        ]
+        linked = {edge["source_id"] for edge in edges} | {edge["target_id"] for edge in edges}
+        unlinked = {node for node in keep if node not in linked}
+        if not include_isolated:
+            keep -= unlinked
+        nodes = [self._node_record(node) for node in sorted(keep, key=str)]
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "unlinked_documents": 0 if include_isolated else len(unlinked),
+        }
 
     def stats(self) -> dict[str, Any]:
         """Counters for the console header, plus the connectivity health check."""
@@ -1235,9 +1851,9 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "note": (
                 "Embeddings are omitted; re-indexing regenerates them locally "
-                f"with {EMBEDDING_MODEL_NAME}."
+                f"with {self.embedding_model}."
             ),
-            "embedding_model": EMBEDDING_MODEL_NAME,
+            "embedding_model": self.embedding_model,
             "stats": self.stats(),
             "graph": nx.readwrite.json_graph.node_link_data(self.graph),
             "chunks": chunks,
@@ -1248,12 +1864,29 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
 # Files worth indexing, and the directories that only add noise. One list, so
 # the rebuild a run does and the walk `corpus_health` compares against cannot
 # drift into describing different corpora.
-PROJECT_INDEX_PATTERNS = ("**/*.py", "**/*.md", "**/*.txt", "**/*.rst")
+#
+# Markup, script and config are in it because the project is not only prose and
+# Python: the console itself is `frontend/index.html`, and none of it could be
+# retrieved. Measured on 2026-09-12 by embedding that file's passages against
+# five questions about the console: it would rank first on three -- "how does
+# the console reattach to a run after a page reload" at 0.644, against a best of
+# 0.426 from the corpus as it stood -- and it lifts one question the corpus could
+# not answer at all over the relevance floor, 0.308 before and 0.383 after.
+# Asked about the Corpus tab without it, a discussion Builder proposed changes to
+# "a React/Vue/Angular component" the project does not have. These files are
+# retrievable but mint no entities: see `ENTITY_FREE_SUFFIXES`.
+PROJECT_INDEX_PATTERNS = (
+    "**/*.py", "**/*.md", "**/*.txt", "**/*.rst",
+    "**/*.html", "**/*.js", "**/*.css",
+    "**/*.sh", "**/*.toml", "**/*.yml", "**/*.yaml", "**/*.ini", "**/*.cfg",
+)
 # Matched as plain substrings of the path, so no globs: "*.egg-info" never
 # matched anything and let build metadata (SOURCES.txt, top_level.txt) into
 # the corpus as if it were project knowledge.
 PROJECT_INDEX_EXCLUDES = (
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
+    # `.git/`, not `.git`: as a plain substring it also matched `.github/`, so
+    # the CI workflow went out with the repository's object store.
+    "__pycache__", ".git/", ".venv", "venv", "node_modules",
     ".pytest_cache", ".mypy_cache", "build/", "dist/", ".egg-info",
     "knowledge/", "scripts/", ".qwen/", ".claude/",
     # Seat-diagnostic sweeps. `.gitignore` already calls these "per-run
@@ -1339,6 +1972,79 @@ def _is_web_document(doc_id: str) -> bool:
     return len(parts) > len(wanted) and parts[-len(wanted) - 1 : -1] == wanted
 
 
+# Suffixes whose documents are retrievable but mint no entities. Their capitals
+# are identifiers and interface strings, not terms the project is about:
+# measured on 2026-09-12, the seven such files in this checkout would mint 72
+# entities the graph does not hold, 56 of them from `frontend/index.html` alone
+# -- `BRIDGE_VERDICTS`, `CLEAR_ARMED`, `ACTIVE_SEAT`, and the openers of its
+# comments and messages (`Copying`, `Dimming`, `Cancelling`). The decision
+# `_is_web_document` makes for fetched pages, for the same reason: they would
+# vote on what this project's entities are without saying anything about them.
+# Python stays out of the set, because its docstrings are where the terms live.
+ENTITY_FREE_SUFFIXES = frozenset(
+    {".html", ".js", ".css", ".sh", ".toml", ".yml", ".yaml", ".ini", ".cfg"}
+)
+
+# The `type` a document is stored under, by suffix. Prose falls through to
+# "markdown", which is what .md, .txt and .rst have always been filed as.
+_DOCUMENT_TYPES = {
+    ".py": "python",
+    ".html": "html", ".js": "javascript", ".css": "css", ".sh": "shell",
+    ".toml": "config", ".yml": "config", ".yaml": "config", ".ini": "config",
+    ".cfg": "config",
+}
+
+
+# How many runners-up a loose node id reports beside its match.
+MAX_MATCH_ALTERNATIVES = 5
+
+# The most of a passage's first line a search result reaches back for. A chunk
+# starts wherever the token arithmetic cut it, usually mid-line; reaching back
+# to the start of the line reads better, but a minified line has no useful start.
+MAX_PASSAGE_LEAD_CHARS = 240
+
+
+def _passage_location(doc_id: str, passage: str) -> tuple[int, str] | None:
+    """Where a retrieved passage sits in its file: (1-based line, passage from that line's start).
+
+    A chunk begins where the token arithmetic cut it -- boundaries are not
+    snapped, see `CHUNK_OVERLAP_TOKENS` -- so the passage the Builder was handed
+    opened mid-statement ("in self.graph: neighbors = ...") and carried no
+    location at all. The line is what lets it open the file at the right place.
+
+    Read from the file on disk, because the store holds chunks, not documents.
+    None when the file cannot be read or no longer contains the passage -- a
+    document edited since it was indexed, where a guessed line would point at
+    the wrong code.
+    """
+    if not passage:
+        return None
+    try:
+        text = Path(doc_id).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    start = text.find(passage)
+    if start < 0:
+        return None
+    line_start = text.rfind("\n", 0, start) + 1
+    lead = text[line_start:start]
+    if len(lead) > MAX_PASSAGE_LEAD_CHARS:
+        lead = ""
+    return text.count("\n", 0, start) + 1, lead + passage
+
+
+def _mints_entities(doc_id: str) -> bool:
+    """Whether a document takes part in entity extraction at all.
+
+    Decided from the path alone, like `_is_web_document`, so an upload, the
+    first index and every rebuild after it reach the same answer.
+    """
+    if _is_web_document(doc_id):
+        return False
+    suffix = PurePosixPath(str(doc_id).replace("\\", "/")).suffix.lower()
+    return suffix not in ENTITY_FREE_SUFFIXES
+
+
 def _document_metadata(path: Path) -> dict[str, str]:
     """The metadata a document is stored under. One definition, two callers.
 
@@ -1349,7 +2055,7 @@ def _document_metadata(path: Path) -> dict[str, str]:
     """
     return {
         "path": str(path),
-        "type": "python" if path.suffix == ".py" else "markdown",
+        "type": _DOCUMENT_TYPES.get(path.suffix.lower(), "markdown"),
     }
 
 
@@ -1468,12 +2174,25 @@ def iter_project_files(
 
 
 def index_project_files(
-    kb: "GraphRAGKnowledgeBase", root: str = "."
+    kb: "GraphRAGKnowledgeBase",
+    root: str = ".",
+    *,
+    progress: "Callable[[int, int], None] | None" = None,
+    should_stop: "Callable[[], bool] | None" = None,
 ) -> dict[str, Any]:
     """Index every project file into the knowledge base.
 
     Returns a report rather than printing one, so both the CLI script and the
     console's reindex button can render it their own way.
+
+    `progress(done, total)` is called after each file, and `should_stop` is
+    asked before each file and between batches of an Ollama embedding. Neither
+    mattered while MiniLM was the only model -- a full build is 17s on a card --
+    and both matter for any other: qwen3-embedding measured 0.24 passages/s
+    here, about 2.9 hours for this project, and a phase that long has to say
+    how far it has got and has to stop when asked. A stop is `stopped` in the
+    report and leaves the corpus part-built, which the next run finishes rather
+    than repeats, because what is already embedded keeps its vectors.
     """
     files = iter_project_files(root)
     wanted = {str(path) for path in files}
@@ -1530,7 +2249,12 @@ def index_project_files(
     indexed = embedded = reused = skipped = 0
     errors: list[str] = list(errors_pre)
 
-    for file_path in files:
+    stopped = False
+    kb._should_stop = should_stop
+    for position, file_path in enumerate(files, 1):
+        if should_stop is not None and should_stop():
+            stopped = True
+            break
         try:
             content = file_path.read_text(encoding="utf-8")
             if len(content) > MAX_INDEXABLE_BYTES:
@@ -1549,8 +2273,13 @@ def index_project_files(
                 kb.add_document(doc_id, content, metadata)
                 embedded += 1
             indexed += 1
+        except EmbeddingStopped:
+            stopped = True
+            break
         except Exception as exc:
             errors.append(f"{file_path}: {exc}")
+        if progress is not None:
+            progress(position, len(files))
 
     # Both halves of the rebuild above are otherwise persisted only as a side
     # effect of `add_document`: the `graph.clear()` reaches disk through its
@@ -1569,7 +2298,9 @@ def index_project_files(
     # caller has always printed. `embedded` and `reused` split that by cost --
     # the only number that moves when a rebuild is nearly a no-op, and the one
     # thing that says whether a rebuild did any work at all.
+    kb._should_stop = None
     report: dict[str, Any] = {
+        "stopped": stopped,
         "indexed": indexed,
         "embedded": embedded,
         "reused": reused,
@@ -1586,7 +2317,7 @@ def index_project_files(
 _kb_instance: GraphRAGKnowledgeBase | None = None
 
 
-def get_knowledge_base(persist_dir: str = "./knowledge") -> GraphRAGKnowledgeBase:
+def get_knowledge_base(persist_dir: str | None = None) -> GraphRAGKnowledgeBase:
     """The singleton knowledge base, **built if it does not exist yet**.
 
     This is the door for the one act that is allowed to bring a corpus into
@@ -1606,17 +2337,35 @@ def get_knowledge_base(persist_dir: str = "./knowledge") -> GraphRAGKnowledgeBas
     return _kb_instance
 
 
-def corpus_exists(persist_dir: str = "./knowledge") -> bool:
+def embedding_device_status() -> dict[str, Any]:
+    """Where the embedder is set to run and where it does, without loading it.
+
+    For the console header, which polls: `active` is None until something has
+    embedded, and `note` says why `active` is not `configured` when it is not.
+    It reads the singleton only if something already opened the corpus, so
+    asking never opens one.
+    """
+    kb = _kb_instance
+    loaded = kb is not None and kb._embedder is not None
+    ollama = embedding_backend(active_embedding_model()) == "ollama"
+    return {
+        "configured": "ollama" if ollama else EMBEDDING_DEVICE,
+        "active": kb.embedding_device if kb is not None and loaded else None,
+        "note": kb.embedding_device_note if kb is not None else None,
+    }
+
+
+def corpus_exists(persist_dir: str | None = None) -> bool:
     """Whether a corpus has been built, without building or opening one.
 
     A store that was emptied by `clear()` still exists -- that is the point of
     emptying it in place -- so this answers "has anyone indexed here", not "is
     there anything in it". `corpus_state()` tells those two apart.
     """
-    return (Path(persist_dir) / "chroma").is_dir()
+    return (Path(persist_dir or persist_dir_for(active_embedding_model())) / "chroma").is_dir()
 
 
-def open_knowledge_base(persist_dir: str = "./knowledge") -> GraphRAGKnowledgeBase | None:
+def open_knowledge_base(persist_dir: str | None = None) -> GraphRAGKnowledgeBase | None:
     """The corpus if one has been built, `None` if none has. Never builds one.
 
     The reason this exists rather than every caller using `get_knowledge_base`:
@@ -1633,7 +2382,7 @@ def open_knowledge_base(persist_dir: str = "./knowledge") -> GraphRAGKnowledgeBa
     return get_knowledge_base(persist_dir)
 
 
-def corpus_state(persist_dir: str = "./knowledge") -> tuple[str, str]:
+def corpus_state(persist_dir: str | None = None, model: str | None = None) -> tuple[str, str]:
     """Report the corpus as `absent`, `empty` or `indexed`, plus the model name.
 
     Deliberately lightweight and deliberately non-creating: it opens Chroma
@@ -1649,23 +2398,24 @@ def corpus_state(persist_dir: str = "./knowledge") -> tuple[str, str]:
     Returns:
         (state, embedding_model_name)
     """
-    chroma_dir = Path(persist_dir) / "chroma"
+    name = model or active_embedding_model()
+    chroma_dir = Path(persist_dir or persist_dir_for(name)) / "chroma"
     if not chroma_dir.is_dir():
-        return "absent", EMBEDDING_MODEL_NAME
+        return "absent", name
 
     try:
         client = chromadb.PersistentClient(str(chroma_dir))
         # `get_collection`, not `get_or_create_collection`: asking after the
         # corpus must not create the collection it is asking about.
         collection = client.get_collection(name="knowledge")
-        return ("indexed" if collection.count() > 0 else "empty"), EMBEDDING_MODEL_NAME
+        return ("indexed" if collection.count() > 0 else "empty"), name
     except Exception:
         # A store whose collection is missing or unreadable has nothing to
         # answer with, which is what `empty` already means to every caller.
-        return "empty", EMBEDDING_MODEL_NAME
+        return "empty", name
 
 
-def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, str]:
+def is_knowledge_base_indexed(persist_dir: str | None = None) -> tuple[bool, str]:
     """Whether the knowledge base holds any documents.
 
     Returns:
@@ -1676,7 +2426,12 @@ def is_knowledge_base_indexed(persist_dir: str = "./knowledge") -> tuple[bool, s
 
 
 # Create MCP server
-server = MCPServer("graphrag")
+# At WARNING, because the SDK's constructor runs `logging.basicConfig` at the
+# level it is given, and this module is imported by the console. At its default
+# of INFO every library in the process logged at INFO from then on: of the 1,772
+# lines the server log held on 2026-09-12, 84 were HTTP requests -- each call to
+# Ollama, each model check against huggingface.co.
+server = MCPServer("graphrag", log_level="WARNING")
 
 
 # Register tools with the server
