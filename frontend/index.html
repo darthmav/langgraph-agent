@@ -142,8 +142,10 @@ body::before{
 .seat .chip{display:inline-block;margin-top:5px;padding:1px 5px;border-radius:4px;
   font:9px var(--mono);letter-spacing:.1em;background:#ffffff10;color:var(--ink-3)}
 .seat .chip.bad{background:#f8717122;color:#ffb4b4}
-#embed{padding:10px 16px 18px;font:10px var(--mono);color:var(--amber);line-height:1.6}
-#embed span{color:var(--ink-2)}
+#embed{--role:var(--amber);margin-top:14px}
+#embed .plc{text-transform:none;letter-spacing:.06em}
+#embed.fellback #embed-where{color:var(--danger);cursor:help}
+#embed .chip.warn{background:#fbbf2422;color:var(--warn)}
 
 #main{grid-area:main;position:relative;z-index:1;overflow:hidden}
 .panel{display:none;height:100%;padding:16px;flex-direction:column;overflow:hidden}
@@ -183,7 +185,8 @@ label.go:hover{filter:brightness(1.4)}
 #gwrap::before{content:"";position:absolute;inset:0;opacity:.35;
   background-image:linear-gradient(#ffffff06 1px,transparent 1px),linear-gradient(90deg,#ffffff06 1px,transparent 1px);
   background-size:26px 26px}
-#g{width:100%;height:100%;display:block;position:relative}
+#g{width:100%;height:100%;display:block;position:relative;cursor:grab;touch-action:none}
+#g.panning{cursor:grabbing}
 #g .edge{stroke:#3a4453;stroke-width:1}
 #g .edge.mentions{stroke:#4ea3ff44;stroke-dasharray:3 3}
 #g .node circle{cursor:grab;transition:r .15s}
@@ -191,13 +194,31 @@ label.go:hover{filter:brightness(1.4)}
 #g .node text{font:10px var(--mono);fill:var(--ink-2);pointer-events:none;
   paint-order:stroke;stroke:var(--bg-3);stroke-width:3px;stroke-linejoin:round}
 /* Entities outnumber documents several times over and their labels pile into
-   an unreadable stack. Label documents always, reveal an entity on hover. */
-#g .node.entity text{opacity:0;transition:opacity .12s}
-#g .node.entity:hover text{opacity:1}
+   an unreadable stack, so an entity is labelled on hover. Documents are
+   labelled while there are few enough to read -- every one on a small trace,
+   the best-connected on a sweep -- and the rest on hover, or once zoomed in far
+   enough for the labels to fit. A sweep used to label all 97, and the middle
+   of the canvas was a stack of overlapping text. */
+#g .node.entity text,#g .node.doc text{opacity:0;transition:opacity .12s}
+#g .node.entity:hover text,#g .node.doc:hover text,
+#g .node.doc.major text,#g.zoomed .node.doc text{opacity:1}
 #g .node:hover text{fill:var(--ink)}
+/* Hovering a node keeps it, its neighbours and the edges between them, and
+   steps everything else back: a hairball is read one node at a time. */
+#g.focus .node{opacity:.12}
+#g.focus .edge{opacity:.04}
+#g.focus .node.hl,#g.focus .edge.hl{opacity:1}
+#g.focus .node.hl text{opacity:1}
 .gempty{position:absolute;inset:0;display:grid;place-items:center;color:var(--ink-3);
   font:12px var(--mono);text-align:center;padding:30px;line-height:1.8}
 .gempty code{background:#ffffff10;padding:2px 6px;border-radius:4px;color:var(--ink-2)}
+/* The trace's status rides on the canvas it describes. In the toolbar a split
+   reading ran to fifty characters, shrank the id field, and moved Trace, Sweep
+   all and the split box out from under the pointer between two clicks. */
+#gwrap #gstat{position:absolute;top:8px;left:10px;z-index:2;pointer-events:none;
+  max-width:calc(100% - 20px);padding:3px 8px;border-radius:5px;background:#0b0f14d9;
+  font:11px var(--mono);color:var(--ink-2)}
+#gwrap #gstat:empty{display:none}
 
 /* ---- split panes ---- */
 .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;flex:1;min-height:0}
@@ -293,7 +314,12 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
 <aside id="crew">
   <div class="hd"><span>Crew</span><span id="crewn">&mdash;</span></div>
   <div id="seats"></div>
-  <div id="embed">Embedding model:<br><span id="embed-model">&mdash;</span><br>runs on this machine</div>
+  <div id="embed" class="seat embedder">
+    <div class="nm"><span class="dot"></span>embedder</div>
+    <select id="embed-select" title="Switch the embedding model. Each model has its own corpus, which the next run builds if it has none, and its own relevance floor. Lasts until the server restarts."></select>
+    <div class="plc"><span id="embed-where">runs on this machine</span></div>
+    <div id="embed-chips"></div>
+  </div>
 </aside>
 
 <main id="main">
@@ -315,11 +341,11 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <label class="optout" title="Search the web for this goal before the run and embed what it finds into the corpus, permanently. Off by default: whether a goal wants the web cannot be judged from its wording — a goal about your own checkout reads to a search engine like a request for generic advice, and the pages it returns then answer your searches from then on. Tick it when the goal really is about something outside this project. Ignored on a discussion-only run.">
             <input type="checkbox" id="eng-research-web"> research online
           </label>
-          <label class="optout" title="The four seats reason about the goal and produce a proposal, without changing anything. The Builder is offered read-only tools only — it can read files and inspect git to ground what it says, but cannot write a file, run a command, run tests, or research online. Nothing on this machine and nothing in the corpus is touched.">
+          <label class="optout" title="The four seats reason about the goal and produce a proposal, without changing anything. The Builder is offered no tools at all — it works from the plan and research it is handed, and cannot read or write a file, run a command, run tests, or research online. Nothing in the project is changed; the corpus is still brought up to date with the project before the run, as on every run.">
             <input type="checkbox" id="eng-discuss-only"> discussion only
           </label>
-          <label class="go" title="Embed a document into the corpus, so the Researcher can retrieve it on this run and every one after. It is written under uploads/ and indexed from there, which is what makes it survive a reindex. Text only — .md, .py, .rst, .txt. You can also drop files straight onto the transcript.">
-            <input type="file" id="eng-upload" multiple accept=".md,.txt,.py,.rst" hidden><span>Attach</span></label>
+          <label class="go" title="Embed a document into the corpus, so the Researcher can retrieve it on this run and every one after. It is written under uploads/ and indexed from there, which is what makes it survive a reindex. Text only. You can also drop files straight onto the transcript.">
+            <input type="file" id="eng-upload" multiple accept=".cfg,.css,.html,.ini,.js,.md,.py,.rst,.sh,.toml,.txt,.yaml,.yml" hidden><span>Attach</span></label>
           <button class="go" id="eng-send">Run</button>
           <button class="go danger" id="eng-stop" disabled
                   title="Halt the run at its next safe boundary. Work already in flight — a file write, a test run, a model call — finishes first, so this can take up to a minute. Everything the run produced is kept.">Stop</button>
@@ -336,11 +362,11 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
       <input id="gdepth" type="number" value="2" min="1" max="5" style="width:78px" title="max depth">
       <button class="go" id="gbtn">Trace</button>
       <button class="go ghost" id="gall">Sweep all</button>
+      <button class="go ghost" id="gfit" title="Reset zoom and pan. Scroll on the graph to zoom, drag its background to pan, double-click it to reset.">Reset view</button>
       <label class="splitlbl" title="Split the traced neighbourhood in two along the Fiedler vector: what clusters with the node you looked up, and what is peripheral to it. Trace only — a sweep has no centre to orient on.">
         <input type="checkbox" id="gsplit"> split</label>
-      <span class="muted" id="gstat"></span>
     </div>
-    <div id="gwrap"><svg id="g"></svg><div class="gempty" id="gempty">Loading graph&hellip;</div></div>
+    <div id="gwrap"><svg id="g"></svg><div class="gempty" id="gempty">Loading graph&hellip;</div><span id="gstat"></span></div>
   </section>
 
   <section class="panel" data-p="retrieval">
@@ -351,7 +377,7 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <input id="topk" type="number" value="5" min="1" max="25" style="width:74px" title="top k">
           <button class="go" id="qbtn">Search</button>
         </div>
-        <div class="scroll" id="hits"><div class="muted">all-MiniLM-L6-v2 &middot; cosine &middot; embeddings run locally</div></div>
+        <div class="scroll" id="hits"><div class="muted"><span id="hits-model">all-MiniLM-L6-v2</span> &middot; cosine &middot; embeddings run locally</div></div>
       </div>
       <div class="col" id="tele">
         <div class="hd"><span>Telemetry</span><span id="clr">clear</span></div>
@@ -370,8 +396,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
            the files as they are then, so there is nothing to press. -->
       <!-- The same upload the Engineer tab offers, reachable from where the
            corpus is actually managed. One RPC behind both. -->
-      <label class="go" id="up-label" title="Embed documents into the corpus. They are written under uploads/ and indexed from there, so a reindex re-reads them rather than pruning them. Text only — .md, .py, .rst, .txt; there is no extractor for PDFs here.">
-        <input type="file" id="up-input" multiple accept=".md,.txt,.py,.rst" hidden><span>Upload documents</span></label>
+      <label class="go" id="up-label" title="Embed documents into the corpus. They are written under uploads/ and indexed from there, so a reindex re-reads them rather than pruning them. Text only; there is no extractor for PDFs here.">
+        <input type="file" id="up-input" multiple accept=".cfg,.css,.html,.ini,.js,.md,.py,.rst,.sh,.toml,.txt,.yaml,.yml" hidden><span>Upload documents</span></label>
       <button class="go ghost" id="rfbtn">Refresh</button>
       <button class="go ghost" id="exbtn"
               title="Download the whole corpus as one JSON file — the graph plus every chunk and its metadata. Embeddings are left out; a reindex regenerates them locally.">Export</button>
@@ -385,11 +411,17 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
               title="Empty the corpus. The files under knowledge/ stay, holding an empty store — the same shape a reindex leaves. Refused while a run is in flight.">Clear corpus</button>
       <span class="muted" id="restat"></span>
     </div>
-    <div id="bridges"></div>
-    <div id="topics"></div>
-    <div id="dupes"></div>
-    <h2>Documents</h2>
-    <div class="scroll" id="docs"><div class="muted">nothing indexed</div></div>
+    <!-- One scroll for the analyses and the list together. The panel itself
+         does not scroll, and each analysis renders a table above the list, so
+         with all three open the Documents heading sat below the viewport and
+         the last table was cut off, with no way to reach either. -->
+    <div class="scroll">
+      <div id="bridges"></div>
+      <div id="topics"></div>
+      <div id="dupes"></div>
+      <h2>Documents</h2>
+      <div id="docs"><div class="muted">nothing indexed</div></div>
+    </div>
   </section>
 
   <section class="panel" data-p="state">
@@ -588,6 +620,14 @@ async function setThinking(role, on){
   await loadCrew(true, true).catch(()=>{});
 }
 
+// A whole number from a number input, pinned to what the control offers. An
+// input's min and max only govern its spinner: a typed -3 or 500 still reached
+// the server, which now refuses it -- better to send what the control means.
+const clampInt = (raw, low, high, fallback) => {
+  const n = Math.round(Number(raw));
+  return String(raw).trim() !== "" && Number.isFinite(n) ? Math.min(high, Math.max(low, n)) : fallback;
+};
+
 /* ---------- graph ---------- */
 let NODES = [], EDGES = [], raf = null;
 
@@ -596,11 +636,75 @@ let NODES = [], EDGES = [], raf = null;
 // Four is where the sweep starts showing structure instead of noise.
 const SWEEP_MIN_DEGREE = 4;
 
+// How many documents keep a label on a busy graph, and the zoom at which every
+// document gets its label back.
+const LABELLED_DOCUMENTS = 14;
+const LABEL_ZOOM = 1.6;
+
+// Zoom and pan. One transform on the viewport group maps graph coordinates to
+// the screen, so the layout never has to know what the view is doing.
+let VIEW = {k: 1, x: 0, y: 0};
+
+function applyView(){
+  const viewport = document.getElementById("g-viewport");
+  if(viewport) viewport.setAttribute("transform",
+    `translate(${VIEW.x.toFixed(1)},${VIEW.y.toFixed(1)}) scale(${VIEW.k.toFixed(3)})`);
+  $("#g").classList.toggle("zoomed", VIEW.k >= LABEL_ZOOM);
+}
+
+function resetView(){ VIEW = {k: 1, x: 0, y: 0}; applyView(); }
+
+// Where the pointer is in graph coordinates, which is what a dragged node needs.
+function toGraph(clientX, clientY){
+  const r = $("#g").getBoundingClientRect();
+  return {x: (clientX - r.left - VIEW.x) / VIEW.k, y: (clientY - r.top - VIEW.y) / VIEW.k};
+}
+
+// Draw one node and its edges where the model says it is. The animation loop
+// does this for everyone while the layout settles; a drag has to do it itself,
+// or a node dragged after the layout stopped moved nothing on screen.
+function place(n){
+  n.el.setAttribute("transform", `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
+  n.lines.forEach(e => {
+    e.el.setAttribute("x1", e.s.x); e.el.setAttribute("y1", e.s.y);
+    e.el.setAttribute("x2", e.t.x); e.el.setAttribute("y2", e.t.y);
+  });
+}
+
+function focusOn(node){
+  $("#g").classList.toggle("focus", !!node);
+  NODES.forEach(n => n.el.classList.toggle("hl", !!node && (n === node || node.nbrs.has(n))));
+  EDGES.forEach(e => e.el.classList.toggle("hl", !!node && (e.s === node || e.t === node)));
+}
+
+// The whole corpus in one call. The console used to assemble this itself --
+// `list_documents`, then a `query_graph` per document, 97 round trips on this
+// corpus and a server log line for each -- and for any depth of one or more
+// that union is every document plus the entities at least SWEEP_MIN_DEGREE
+// documents share, which the server hands over directly.
+async function sweep(){
+  let g;
+  try{
+    g = await rpc("graph_overview", {min_degree: SWEEP_MIN_DEGREE});
+  }catch(e){
+    // A page newer than the server that served it -- a checkout pulled without
+    // a restart -- has no overview to ask for. Assemble it the old way rather
+    // than draw nothing.
+    if(/Unknown method/.test(e.message)) return sweepByDocument();
+    throw e;
+  }
+  const hidden = g.unlinked_documents || 0;
+  $("#gstat").textContent = hidden
+    ? `${hidden} document(s) share no entity with the rest and are not drawn · the Corpus tab lists them all`
+    : "";
+  draw(g.nodes || [], g.edges || []);
+}
+
 // query_graph excludes the node you centred on, so the centre has to be added
 // back or every trace comes out missing the one node you asked about.
-async function sweep(){
+async function sweepByDocument(){
   const docs = (await rpc("list_documents", {})).documents || [];
-  const depth = +$("#gdepth").value || 2;
+  const depth = clampInt($("#gdepth").value, 1, 5, 2);
   const seen = new Map(), eds = [];
 
   // Seed with the documents themselves: they are the centres, so they never
@@ -629,36 +733,59 @@ async function trace(){
   if(!id) return sweep();
   const wantSplit = $("#gsplit").checked;
   // min_degree 1: a node asked for by name should not have neighbours hidden.
-  const g = await rpc("query_graph", {node_id:id, max_depth:+$("#gdepth").value || 2,
+  const g = await rpc("query_graph", {node_id:id, max_depth:clampInt($("#gdepth").value, 1, 5, 2),
                                       min_degree:1, split:wantSplit});
+  // A miss is a result carrying `error`, not a failed call, so it has to be
+  // read here. Unread, the typed id was drawn as a lone document node -- a node
+  // the graph does not have, presented as one it does.
+  if(g.error){
+    ev(`query_graph — ${g.error}`, null, true);
+    $("#gstat").textContent = "";
+    draw([], [], g.corpus === "absent" ? ""
+      : `${esc(g.error)}.<br>Pick a document from the Corpus tab, or click a node in a sweep to fill its id in.`);
+    return;
+  }
   const ns = [...(g.related_nodes || [])];
   if(g.center_node && !ns.some(n => n.id === g.center_node))
     // The centre is on its own side by definition; it is what the split is
-    // oriented on.
-    ns.unshift({id:g.center_node, label:g.center_node, node_type:"document", side:"center"});
+    // oriented on. Its record comes from the server, because only the graph
+    // knows whether it is a document or an entity: assuming "document" drew
+    // every traced entity as a file. The fallback is for a server that
+    // predates `center`.
+    ns.unshift({...(g.center || {id:g.center_node, label:g.center_node, node_type:"document"}),
+                side:"center"});
   // mu_2 is shown rather than hidden behind a verdict: a sign cut exists for
   // any connected subgraph, and this number is the only thing that says
   // whether the division drawn corresponds to anything. A trace that stays
   // inside one topic area splits it arbitrarily and reads ~0.2 here; one that
   // spans two reads an order of magnitude lower.
   const sp = g.split;
-  $("#gstat").textContent = !wantSplit ? ""
+  const splitNote = !wantSplit ? ""
     : !sp ? ""
     : !sp.available ? `no split — ${sp.note}`
     : `split ${sp.center_side}/${sp.other_side}`
       + (sp.detached ? ` · ${sp.detached} detached` : "")
       + ` · mu_2 ${sp.mu_2.toFixed(4)}${sp.mu_2 > 0.1 ? " (weak — no real division here)" : ""}`;
+  // A loose id resolves to its best match. Say which, and what else it could
+  // have been, so a trace of the wrong node reads as a choice.
+  const matched = g.resolved_from
+    ? `"${g.resolved_from}" matched ${g.center_node}`
+      + (g.alternatives && g.alternatives.length ? ` (also: ${g.alternatives.join(", ")})` : "")
+    : "";
+  $("#gstat").textContent = [matched, splitNote].filter(Boolean).join(" · ");
   draw(ns, dedupe(g.edges || []));
 }
 
-function draw(ns, es){
+// `emptyNote` replaces the corpus-state message when the canvas is empty for a
+// reason of its own: a trace that matched nothing is not "no graph yet".
+function draw(ns, es, emptyNote){
   const svg = $("#g"), W = svg.clientWidth || 900, H = svg.clientHeight || 520;
   $("#gempty").style.display = ns.length ? "none" : "grid";
-  if(!ns.length) $("#gempty").innerHTML = CORPUS === "absent"
+  if(!ns.length) $("#gempty").innerHTML = emptyNote || (CORPUS === "absent"
     ? "No corpus &mdash; nothing is indexed until something asks for it."
       + (BUILDS_ON_RUN ? "<br>Start a run: it indexes the project before the Architect opens."
                        : "<br><code>INDEX_PROJECT_BEFORE_RUN</code> is off, so nothing will.")
-    : "No graph yet &mdash; start a run and the corpus is rebuilt before it.";
+    : "No graph yet &mdash; start a run and the corpus is rebuilt before it.");
 
   NODES = ns.map((n, i) => ({...n,
     x: W/2 + Math.cos(i/ns.length*6.283) * Math.min(W,H)*.3,
@@ -668,9 +795,22 @@ function draw(ns, es){
   EDGES = es.filter(e => idx.has(e.source_id) && idx.has(e.target_id))
             .map(e => ({...e, s:idx.get(e.source_id), t:idx.get(e.target_id)}));
 
+  // Who neighbours whom, for the hover focus and for a drag to redraw; and
+  // which documents are connected enough to keep a label on a busy graph.
+  NODES.forEach(n => { n.nbrs = new Set(); n.lines = []; });
+  EDGES.forEach(e => { e.s.nbrs.add(e.t); e.t.nbrs.add(e.s); e.s.lines.push(e); e.t.lines.push(e); });
+  const docs = NODES.filter(n => n.node_type === "document");
+  const major = new Set(docs.length <= LABELLED_DOCUMENTS ? docs
+    : [...docs].sort((a, b) => b.nbrs.size - a.nbrs.size).slice(0, LABELLED_DOCUMENTS));
+
   svg.innerHTML = "";
-  const gE = mk("g"), gN = mk("g");
-  svg.append(gE, gN);
+  // Everything drawn sits in one viewport group, so zoom and pan are a single
+  // transform and the layout keeps working in graph coordinates.
+  const viewport = mk("g"), gE = mk("g"), gN = mk("g");
+  viewport.id = "g-viewport";
+  viewport.append(gE, gN);
+  svg.append(viewport);
+  resetView();
 
   EDGES.forEach(e => {
     e.el = mk("line");
@@ -681,7 +821,9 @@ function draw(ns, es){
   NODES.forEach(n => {
     const isDoc = n.node_type === "document";
     const g = mk("g");
-    g.setAttribute("class", "node" + (isDoc ? "" : " entity"));
+    g.setAttribute("class", "node" + (isDoc
+      ? " doc" + (major.has(n) || n.side === "center" ? " major" : "")
+      : " entity"));
     const c = mk("circle");
     c.setAttribute("r", isDoc ? 9 : 6);
     c.setAttribute("fill", isDoc ? "#76d13a" : "#4ea3ff");
@@ -704,10 +846,13 @@ function draw(ns, es){
     n.el = g; n.c = c;
 
     g.onclick = () => { $("#gnode").value = n.id; };
+    g.onpointerenter = () => focusOn(n);
+    g.onpointerleave = () => focusOn(null);
     g.onpointerdown = ev0 => {
+      ev0.stopPropagation();     // a node drag, not a pan
       n.fix = true; g.setPointerCapture(ev0.pointerId);
-      const mv = e2 => { const r = svg.getBoundingClientRect();
-        n.x = e2.clientX - r.left; n.y = e2.clientY - r.top; n.vx = n.vy = 0; };
+      const mv = e2 => { const p = toGraph(e2.clientX, e2.clientY);
+        n.x = p.x; n.y = p.y; n.vx = n.vy = 0; place(n); };
       const up = () => { n.fix = false;
         g.removeEventListener("pointermove", mv); g.removeEventListener("pointerup", up); };
       g.addEventListener("pointermove", mv); g.addEventListener("pointerup", up);
@@ -730,7 +875,15 @@ function tick(W, H, step){
   // the ideal separation between nodes falls as the canvas is divided up, so
   // repulsion range, strength and edge rest length have to fall with it.
   const count  = Math.max(NODES.length, 1);
-  const FRAMES = count > 60 ? 900 : 600;
+  // Every pair is compared on every frame, so a frame costs count squared, and
+  // a fixed frame count made the whole layout grow with it: a depth-3 trace of
+  // 713 nodes ran 900 frames at ~40ms each, half a minute of a stuttering tab.
+  // Frames are capped by pair comparisons instead, at about what a 237-node
+  // sweep spends settling, so a graph that size or smaller lays out as before
+  // and a larger one stops while the page is still usable.
+  const PAIR_BUDGET = 25e6;
+  const FRAMES = Math.max(60, Math.min(count > 60 ? 900 : 600,
+    Math.round(PAIR_BUDGET / Math.max(1, count * (count - 1) / 2))));
   const spread = Math.sqrt((W * H) / count);
   const REST   = Math.max(52, Math.min(150, spread * 0.62));
   // Repulsion has to reach well past one hop, or separate clusters never push
@@ -765,9 +918,39 @@ function tick(W, H, step){
   if(step < FRAMES) raf = requestAnimationFrame(() => tick(W, H, step+1));
 }
 
-$("#gbtn").onclick = () => trace().catch(()=>{});
-$("#gall").onclick = () => sweep().catch(()=>{});
-$("#gnode").onkeydown = e => { if(e.key === "Enter") trace().catch(()=>{}); };
+// Likewise a trace or sweep the server refused says so on the canvas.
+const graphFailed = e => { $("#gstat").textContent = `graph request failed: ${e.message}`; };
+$("#gbtn").onclick = () => trace().catch(graphFailed);
+$("#gall").onclick = () => sweep().catch(graphFailed);
+$("#gfit").onclick = () => resetView();
+// The wheel zooms about the pointer, so what is under it stays under it.
+$("#g").addEventListener("wheel", e => {
+  if(!NODES.length) return;
+  e.preventDefault();
+  const r = $("#g").getBoundingClientRect();
+  const px = e.clientX - r.left, py = e.clientY - r.top;
+  const k = Math.max(0.25, Math.min(6, VIEW.k * Math.exp(-e.deltaY * 0.0015)));
+  VIEW.x = px - (px - VIEW.x) * (k / VIEW.k);
+  VIEW.y = py - (py - VIEW.y) * (k / VIEW.k);
+  VIEW.k = k;
+  applyView();
+}, {passive:false});
+// Dragging the background pans. A node's own handler stops its pointerdown
+// before it arrives here, so dragging a node still moves the node.
+$("#g").addEventListener("pointerdown", e => {
+  if(e.target.closest && e.target.closest(".node")) return;
+  const svg = $("#g"), from = {x:e.clientX, y:e.clientY, vx:VIEW.x, vy:VIEW.y};
+  svg.setPointerCapture(e.pointerId);
+  svg.classList.add("panning");
+  const move = m => { VIEW.x = from.vx + m.clientX - from.x; VIEW.y = from.vy + m.clientY - from.y; applyView(); };
+  const up = () => { svg.classList.remove("panning");
+    svg.removeEventListener("pointermove", move); svg.removeEventListener("pointerup", up); };
+  svg.addEventListener("pointermove", move); svg.addEventListener("pointerup", up);
+});
+$("#g").addEventListener("dblclick", e => {
+  if(!(e.target.closest && e.target.closest(".node"))) resetView();
+});
+$("#gnode").onkeydown = e => { if(e.key === "Enter") trace().catch(graphFailed); };
 addEventListener("resize", () => { if(NODES.length){
   const svg = $("#g"); cancelAnimationFrame(raf); tick(svg.clientWidth, svg.clientHeight, 400); }});
 
@@ -775,7 +958,7 @@ addEventListener("resize", () => { if(NODES.length){
 async function search(){
   const query = $("#q").value.trim();
   if(!query) return;
-  const r = await rpc("search_documents", {query, top_k:+$("#topk").value || 5});
+  const r = await rpc("search_documents", {query, top_k:clampInt($("#topk").value, 1, 25, 5)});
   const hits = r.results || [];
   // "no results" and "there is nothing to search" are different answers, and
   // the second one is not a property of the query.
@@ -785,15 +968,18 @@ async function search(){
     return;
   }
   $("#hits").innerHTML = hits.length ? hits.map((h,i) =>
-    `<div class="hit"><div class="t"><span>${esc(h.metadata?.path || h.id)}</span>`+
+    `<div class="hit"><div class="t"><span>${esc((h.metadata?.path || h.id) + (h.line ? ":" + h.line : ""))}</span>`+
     `<span class="sc">${(h.score ?? 0).toFixed(3)}</span></div>`+
     `<div class="barw"><div class="barf" data-w="${Math.max(0, Math.min(1, h.score ?? 0))*100}"></div></div>`+
     `<p>${esc(String(h.content || "").slice(0, 320))}</p></div>`).join("")
     : `<div class="muted">no results</div>`;
   $$("#hits .barf").forEach((b,i) => setTimeout(() => b.style.width = b.dataset.w+"%", 70*i));
 }
-$("#qbtn").onclick = () => search().catch(()=>{});
-$("#q").onkeydown = e => { if(e.key === "Enter") search().catch(()=>{}); };
+// A refused or failed search says so where its results would go. The telemetry
+// line alone left the previous results standing under a query that never ran.
+const searchFailed = e => { $("#hits").innerHTML = `<div class="muted">search failed: ${esc(e.message)}</div>`; };
+$("#qbtn").onclick = () => search().catch(searchFailed);
+$("#q").onkeydown = e => { if(e.key === "Enter") search().catch(searchFailed); };
 
 /* ---------- corpus ---------- */
 
@@ -1425,20 +1611,37 @@ function stagesFrom(messages){
 // information" means: what got written, what nobody proved, what blocked.
 function recoveryBlock(r){
   const files = r.files_changed || [];
-  const unproven = r.failed_verification || [];
+  const failedList = r.failed_verification || [];
   const parts = [];
   parts.push(files.length
     ? `Written: ${files.length} file(s) — ${files.join(", ")}`
     : "Written: nothing reached disk.");
-  if(unproven.length){
-    // Said plainly, because this is where the safeguard checkbox stops
-    // mattering: a file nobody executed is unproven, not expected-to-fail, so
-    // "expect failures" does not clear it.
-    parts.push(`Unproven (nobody ran these): ${unproven.join(", ")}`
-      + (r.expect_failures
-          ? " — expect failures was ON, and does not clear an unrun file."
-          : ""));
+  if(r.unverified === undefined){
+    // A snapshot from before `unverified` existed cannot tell a file nobody
+    // ran from one that ran and failed, so it gets a line claiming neither.
+    // Every entry used to read "nobody ran these", including files that had.
+    if(failedList.length) parts.push(`Did not pass verification: ${failedList.join(", ")}`);
+  }else{
+    if(r.unverified.length){
+      // Said plainly, because this is where the safeguard checkbox stops
+      // mattering: a file nobody executed is unproven, not expected-to-fail,
+      // so "expect failures" does not clear it.
+      parts.push(`Unproven (nobody ran these): ${r.unverified.join(", ")}`
+        + (r.expect_failures
+            ? " — expect failures was ON, and does not clear an unrun file."
+            : ""));
+    }
+    const ranAndFailed = failedList.filter(path => !r.unverified.includes(path));
+    if(ranAndFailed.length)
+      parts.push(`Ran and failed: ${ranAndFailed.join(", ")}`
+        + (r.expect_failures ? " — expected for this run." : ""));
   }
+  if(r.builder_cut_off)
+    parts.push(r.builder_cut_off === "turn_cap"
+      ? "The Builder ran out of tool turns before it finished."
+      : "The Builder hit its deadline before it finished.");
+  if(r.lint_failed && r.lint_failed.length)
+    parts.push(`Fails lint: ${r.lint_failed.join(", ")}`);
   if(r.blockers) parts.push(`Blockers: ${r.blockers}`);
   if(r.plan) parts.push(`Plan so far:\n${r.plan}`);
   return parts.join("\n\n");
@@ -1616,6 +1819,95 @@ function staleChip(stats){
   return `<span class="stale" title="${title.replace(/"/g,"&quot;")}">stale: ${parts.join(", ")}</span>`+big;
 }
 
+// The upload controls accept what the corpus indexes, and only the server knows
+// what that is. The list used to be written into this page twice, so it had to
+// be kept in step with PROJECT_INDEX_PATTERNS by hand -- and was not, the day
+// that list grew to take in the console itself.
+function applyIndexableSuffixes(suffixes){
+  if(!Array.isArray(suffixes) || !suffixes.length) return;
+  for(const input of [$("#eng-upload"), $("#up-input")]){
+    input.accept = suffixes.join(",");
+    const label = input.closest("label");
+    if(label.dataset.baseTitle === undefined) label.dataset.baseTitle = label.title;
+    label.title = `${label.dataset.baseTitle} Accepted: ${suffixes.join(", ")}.`;
+  }
+}
+
+// Where the embedder runs, which only a loaded model can say: the setting names
+// a device, and a card with no kernels for this torch build, or no room beside
+// a local seat, leaves the model on the CPU. That fallback is the one reading
+// here worth colouring -- the embedder still works, only slower, which is
+// exactly the kind of failure nobody notices -- and its reason is on hover.
+function showEmbeddingDevice(dev){
+  const box = $("#embed"), where = $("#embed-where");
+  if(!dev){ where.textContent = "runs on this machine"; return; }
+  const fell = Boolean(dev.active) && dev.active !== dev.configured;
+  box.classList.toggle("fellback", fell);
+  where.title = dev.note || "";
+  where.textContent = dev.configured === "ollama" ? "runs in Ollama"
+    : !dev.active ? `runs on ${dev.configured} once loaded`
+    : fell ? `runs on cpu, not ${dev.configured}`
+    : `runs on ${dev.active}`;
+}
+
+// The embedding dropdown. Rebuilt from the server on every poll like the seat
+// cards, and left alone while it has focus for the same reason: a repaint
+// under an open <select> closes it on whoever is choosing.
+async function loadEmbedding(quiet, force){
+  const data = await rpc("embedding_options", {}, quiet);
+  if(!force && $("#embed").contains(document.activeElement)) return;
+  const groups = new Map();
+  for(const o of data.options || []){
+    if(!groups.has(o.group)) groups.set(o.group, []);
+    groups.get(o.group).push(o);
+  }
+  let html = "";
+  for(const [name, opts] of groups){
+    html += `<optgroup label="${esc(name)}">`;
+    for(const o of opts)
+      html += `<option value="${esc(o.model)}"${o.model === data.active ? " selected" : ""}>${esc(o.label)}</option>`;
+    html += `</optgroup>`;
+  }
+  const select = $("#embed-select");
+  select.innerHTML = html;
+  select.disabled = data.switchable === false;
+  const current = (data.options || []).find(o => o.model === data.active) || {};
+  $("#embed-chips").innerHTML = embeddingChips(current);
+  const hits = $("#hits-model");
+  if(hits) hits.textContent = data.active;
+  showEmbeddingDevice(data.device);
+}
+
+// What the chosen model's corpus and floor mean for the next run, which is
+// the real cost of the choice: no corpus means the next run builds one -- hours
+// for a large model -- and no floor means every search goes to the
+// Researcher's model instead of being answered from the corpus.
+function embeddingChips(o){
+  const chips = [];
+  if(o.corpus === "absent")
+    chips.push(`<span class="chip warn" title="The next run indexes the project with this model before the Architect opens.">no corpus yet</span>`);
+  else if(o.corpus === "empty") chips.push(`<span class="chip warn">corpus empty</span>`);
+  else if(o.corpus) chips.push(`<span class="chip">corpus built</span>`);
+  if(typeof o.floor === "number"){
+    const how = o.floor_source === "measured" ? "Measured by hand for this model." : "Measured on this model's corpus by the run that built it.";
+    chips.push(`<span class="chip" title="${esc(how)}">floor ${o.floor.toFixed(2)}</span>`);
+  } else if(o.floor_source === "no_gap"){
+    chips.push(`<span class="chip bad" title="This model could not separate questions the corpus answers from questions it cannot, so every search goes to the Researcher's model.">no floor</span>`);
+  } else if(o.floor_source){
+    chips.push(`<span class="chip warn" title="Measured by the run that finishes this model's corpus. Until then every search goes to the Researcher's model.">floor not measured</span>`);
+  }
+  return chips.join(" ");
+}
+
+async function setEmbeddingModel(model){
+  // Repainted from the server's answer either way, so a refused switch cannot
+  // leave the dropdown showing a model the corpus is not using.
+  try{ await rpc("set_embedding_model", {model}); }
+  catch(e){ /* the refusal is already on the telemetry log */ }
+  await loadEmbedding(true, true).catch(()=>{});
+  await poll(true).catch(()=>{});
+}
+
 async function poll(quiet){
   if(EXITING) return;
   try{
@@ -1623,8 +1915,9 @@ async function poll(quiet){
       rpc("status", {}, true),
       rpc("rag_stats", {}, true),
     ]);
-    $("#embed-model").textContent = st.embedding;
+    showEmbeddingDevice(st.embedding_device);
     BUILDS_ON_RUN = st.indexes_on_run !== false;
+    applyIndexableSuffixes(st.indexable_suffixes);
     setCorpusState(stats.corpus || (stats.total_chunks ? "indexed" : "empty"));
     // Four zeros read as a knowledge base that happens to be empty. When none
     // has been built there is nothing to count, and saying so is the honest
@@ -1638,10 +1931,12 @@ async function poll(quiet){
         staleChip(stats)+
         healthChip(stats);
     await loadCrew(true);
+    await loadEmbedding(true);
   }catch(e){ /* goOffline already reported it */ }
 }
 
 (async () => {
+  $("#embed-select").onchange = e => setEmbeddingModel(e.target.value);
   await poll(true);
   setClearButton();
   await reattach();

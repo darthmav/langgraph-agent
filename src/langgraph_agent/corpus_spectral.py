@@ -144,16 +144,23 @@ class CorpusSpectralMixin:
         # staleness verdict that flickers teaches the operator to ignore the one
         # that does not. They are reported separately as `web_documents`, so the
         # exclusion is visible rather than silent.
-        from langgraph_agent.graphrag_server import _is_web_document
+        # Markup, script and config files are entity-free for the same reason
+        # (`ENTITY_FREE_SUFFIXES`) and excluded the same way, but counted apart
+        # as `entity_free_sources`, so neither number claims the other's files.
+        from langgraph_agent.graphrag_server import _is_web_document, _mints_entities
 
-        web = {n for n in self.graph if _is_web_document(n)}
-        source = self.graph.subgraph([n for n in self.graph if n not in web])
-        undirected = source.to_undirected(as_view=True)
+        documents = [n for n, a in self.graph.nodes(data=True) if a.get("type") == "document"]
+        web = {n for n in documents if _is_web_document(n)}
+        sources = {n for n in documents if n not in web and not _mints_entities(n)}
+        excluded = web | sources
+        linked = self.graph.subgraph([n for n in self.graph if n not in excluded])
+        undirected = linked.to_undirected(as_view=True)
         n = undirected.number_of_nodes()
 
         if n == 0:
             return {"components": 0, "largest_component": 0, "isolated_nodes": 0,
-                    "lambda_2": None, "web_documents": len(web)}
+                    "lambda_2": None, "web_documents": len(web),
+                    "entity_free_sources": len(sources)}
 
         components = nx.number_connected_components(undirected)
         largest = max(nx.connected_components(undirected), key=len)
@@ -195,6 +202,7 @@ class CorpusSpectralMixin:
             "isolated_nodes": isolated,
             "lambda_2": lambda_2,
             "web_documents": len(web),
+            "entity_free_sources": len(sources),
         }
         if unavailable is not None:
             result["lambda_2_unavailable"] = unavailable

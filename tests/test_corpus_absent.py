@@ -208,7 +208,7 @@ async def test_a_graph_query_with_no_corpus_is_empty_not_stubbed(nowhere):
 
 def _fake_index(calls, report=None):
     """Stand in for `index_project_files`, recording the corpus it was given."""
-    def index(kb):
+    def index(kb, **kwargs):
         calls.append(kb)
         return dict(report or {"indexed": 2, "embedded": 2, "reused": 0,
                                "dropped": 0, "skipped": 0, "errors": [],
@@ -344,7 +344,7 @@ def test_the_corpus_is_built_before_the_online_phase_and_not_after(nowhere, monk
     monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", True)
     monkeypatch.setattr(serve, "get_knowledge_base", lambda: object())
 
-    def index(kb):
+    def index(kb, **kwargs):
         order.append("corpus")
         return {"indexed": 1, "skipped": 0, "errors": [], "total_chunks": 1}
 

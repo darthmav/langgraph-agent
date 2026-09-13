@@ -22,6 +22,11 @@ from quisce.quisce_engine import (
     SpectralContext,
     create_quisce_model,
 )
+from quisce.spectral_analysis import (
+    SpectralAnalyzer,
+    SpectralProperties,
+    analyze_quiesce_state,
+)
 
 __all__ = [
     "BaselineModule",
@@ -31,4 +36,8 @@ __all__ = [
     "SpectralContext",
     "create_baseline_model",
     "create_quisce_model",
+    # Spectral analysis module
+    "SpectralAnalyzer",
+    "SpectralProperties",
+    "analyze_quiesce_state",
 ]

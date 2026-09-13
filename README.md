@@ -37,7 +37,8 @@ An upload is **written to `uploads/` and indexed from there**, rather than
 embedded directly into the store. That is what makes it survive: a reindex
 rebuilds the corpus from the files on disk and prunes everything else, so a
 document that lived only in the index would vanish at the next rebuild without
-anything saying so. Text only — `.md`, `.py`, `.rst`, `.txt`. There is no PDF
+anything saying so. Text only — the types a reindex reads, which the upload
+buttons list on hover. There is no PDF
 extractor here, and one is refused rather than embedded as whatever its bytes
 decode to, which would look like a real source in the corpus afterwards. The
 same size limit a reindex applies is applied on the way in, for the same
@@ -70,7 +71,13 @@ three states apart: *absent* (nobody has indexed here),
 and the counts, once there is something to count. *Export* and *Clear* are
 disabled while it is absent; creating a store in order to empty it would leave
 behind the thing you were asking to be rid of. The local embedding model loads
-on the first index or search, not at startup.
+on the first index or search, not at startup. It runs on the CPU unless
+`EMBEDDING_DEVICE` names a card (`cuda:1`), and beside a local seat on a small
+card that also needs the seat's KV cache at q8_0 — the Important Notes in
+`CLAUDE.md` carry the measurements. The Crew panel's embedder card switches the
+embedding model itself — MiniLM, or any Ollama model that can embed — and each
+model gets its own corpus, built by the next run, and its own relevance floor,
+measured on that corpus.
 
 *Clear corpus* and an upload are both refused while a run is in flight, and
 the refusal says which run. (The rebuild is the exception that proves it: it

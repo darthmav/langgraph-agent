@@ -47,6 +47,9 @@ def initial_state(goal: str) -> AgentState:
         "blockers": "",
         "files_changed": [],
         "failed_verification": [],
+        "unverified": [],
+        "builder_cut_off": "",
+        "lint_failed": [],
         "expect_failures": False,
         "step_count": 0,
     }
@@ -68,6 +71,9 @@ def test_state_schema_initialization():
     assert state["research_status"] == ""
     assert state["blockers"] == ""
     assert state["files_changed"] == []
+    assert state["unverified"] == []
+    assert state["builder_cut_off"] == ""
+    assert state["lint_failed"] == []
     assert state["step_count"] == 0
 
 
@@ -550,6 +556,73 @@ def test_builder_reports_clean_when_the_file_runs(monkeypatch, tmp_path):
     assert "Implementation complete" in result["messages"][-1]
 
 
+class _NeverFinishesLLM(_ToolCallingLLM):
+    """A Builder seat that asks for another read on every turn.
+
+    It never writes the closing report, which is the shape that runs a pass
+    into `MAX_BUILDER_TOOL_TURNS`.
+    """
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        return AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "filesystem_read",
+                "args": {"path": str(self._path)},
+                "id": f"call_{self.calls}",
+            }],
+        )
+
+
+def test_a_builder_out_of_turns_does_not_claim_completion(monkeypatch, tmp_path):
+    """The turn cap is a Builder that did not finish, and the feed must say so.
+
+    The blocker always did. The feed line beside it read "Implementation
+    complete", and on 2026-09-12 the Architect approved a run on that line.
+    """
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "notes.txt"
+    target.write_text("read me\n")
+    llm = _NeverFinishesLLM(target)
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+    monkeypatch.setattr("langgraph_agent.nodes.MAX_BUILDER_TOOL_TURNS", 2)
+
+    result = builder_node(initial_state("Read the notes"))
+
+    assert llm.calls == 2
+    assert "2 tool turns without finishing" in result["blockers"]
+    assert "Implementation complete" not in result["messages"][-1]
+    assert "Stopped after 2 tool turns" in result["messages"][-1]
+    assert result["builder_cut_off"] == "turn_cap"
+    # Not "No report produced." above a report listing every call it made.
+    assert "used all 2 tool turns" in result["builder_report"]
+
+
+def test_a_pass_that_finishes_clears_the_cut_off(monkeypatch, tmp_path):
+    """The record is per pass: finishing the work lifts the block."""
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "fine.py"
+    llm = _WritesFileLLM(target, "print('ok')\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+    state = initial_state("Write a module")
+    state["builder_cut_off"] = "turn_cap"
+
+    result = builder_node(state)
+
+    assert result["builder_cut_off"] == ""
+
+
 def test_builder_only_executes_runnable_files(monkeypatch, tmp_path):
     """Markdown has nothing to run; the verification pass must skip it."""
     # The Builder writes inside the project root (`_resolve_write_path`),
@@ -635,6 +708,55 @@ def test_step_ceiling_still_ends_a_permanently_failing_run():
     state["step_count"] = MAX_STEPS
 
     assert _route_from_architect(state) == "__end__"
+
+
+def _gate_with(monkeypatch, **fields):
+    """Run the approval gate over an Architect that always approves."""
+    from langgraph_agent.nodes import architect_node
+
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _ApprovingLLM(),
+    )
+    state = initial_state("Write a module")
+    state["plan"] = "1. Write it"
+    state["builder_report"] = "wrote it"
+    state.update(fields)
+    return architect_node(state)
+
+
+def test_an_unrun_file_blocks_approval_even_under_expect_failures(monkeypatch):
+    """The opt-out is for a file meant to fail, never for one nobody ran.
+
+    The gate used to clear the whole of failed_verification under the opt-out,
+    so a file the deadline left unrun was approved along with the fixture.
+    """
+    result = _gate_with(
+        monkeypatch,
+        failed_verification=["fixture.py", "unrun.py"],
+        unverified=["unrun.py"],
+        expect_failures=True,
+    )
+
+    assert result["verdict"] == Verdict.REVISE.value
+    assert "1 file(s) never executed" in result["messages"][-1]
+    assert "do not run" not in result["messages"][-1]
+
+
+def test_a_builder_pass_cut_off_before_finishing_blocks_approval(monkeypatch):
+    """A Builder that ran out of turns did not finish, whatever was approved."""
+    result = _gate_with(monkeypatch, builder_cut_off="turn_cap")
+
+    assert result["verdict"] == Verdict.REVISE.value
+    assert "ran out of tool turns" in result["messages"][-1]
+
+
+def test_an_unknown_cut_off_still_blocks(monkeypatch):
+    """A reason nobody has wording for is still a pass that did not finish."""
+    result = _gate_with(monkeypatch, builder_cut_off="something_new")
+
+    assert result["verdict"] == Verdict.REVISE.value
+    assert "something_new" in result["messages"][-1]
 
 
 class _WritesNothingLLM:
@@ -1007,16 +1129,41 @@ def test_expect_failures_still_runs_and_reports_the_file(monkeypatch, tmp_path):
     assert result["blockers"] == ""
 
 
-def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
-    """`python pkg/mod.py` cannot import pkg, so running it proves nothing.
+def test_a_package_module_is_proven_by_importing_it(monkeypatch, tmp_path):
+    """`python pkg/mod.py` cannot import pkg, so the module is imported instead.
 
     A module that imports its own package absolutely dies with
-    ModuleNotFoundError under direct execution however correct it is. Treating
-    that as a failure pinned failed_verification open on a working package and
-    the gate rewrote every `approved` to `revise` until the step ceiling.
+    ModuleNotFoundError under direct execution however correct it is. It used
+    to be skipped, which proved nothing: a run whose only products were two
+    package modules was approved with neither ever executed.
     """
     # The Builder writes inside the project root (`_resolve_write_path`),
     # so the root moves to the tmp dir rather than the write escaping it.
+    monkeypatch.chdir(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "helper.py").write_text("VALUE = 42\n")
+    target = pkg / "mod.py"
+
+    llm = _WritesFileLLM(target, "from pkg.helper import VALUE\n\nassert VALUE == 42\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a package module"))
+
+    assert result["files_changed"] == [str(target)]
+    assert result["failed_verification"] == []
+    assert result["blockers"] == ""
+    assert "imported clean" in result["builder_report"]
+    assert "imported as `pkg.mod`" in result["builder_report"]
+
+
+def test_a_broken_package_module_fails_its_import(monkeypatch, tmp_path):
+    """Importing is a real check: a module that cannot import is a failure."""
     monkeypatch.chdir(tmp_path)
     from langgraph_agent.nodes import builder_node
 
@@ -1032,12 +1179,9 @@ def test_a_package_module_is_skipped_not_failed(monkeypatch, tmp_path):
 
     result = builder_node(initial_state("Write a package module"))
 
-    assert result["files_changed"] == [str(target)]
-    assert result["failed_verification"] == []
-    assert result["blockers"] == ""
-    # Skipped loudly: the Architect must see that nothing ran it.
-    assert "SKIPPED" in result["builder_report"]
-    assert "root-level script" in result["builder_report"]
+    assert result["failed_verification"] == [str(target)]
+    assert "pkg.missing" in result["blockers"]
+    assert "FAILED" in result["builder_report"]
 
 
 def test_a_root_level_script_is_still_executed(monkeypatch, tmp_path):
@@ -1059,15 +1203,15 @@ def test_a_root_level_script_is_still_executed(monkeypatch, tmp_path):
     assert "do not run" in result["blockers"]
 
 
-def test_package_module_skip_does_not_hide_a_failing_script(monkeypatch, tmp_path):
-    """A skipped module beside a failing script still leaves the run blocked."""
+def test_an_imported_module_does_not_hide_a_failing_script(tmp_path):
+    """A package module that imports clean beside a failing script: both reported."""
     from langgraph_agent.nodes import _verify_written_files
 
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
     module = pkg / "mod.py"
-    module.write_text("from pkg.missing import nothing\n")
+    module.write_text("import pkg\n")
     script = tmp_path / "verify_it.py"
     script.write_text("assert False\n")
 
@@ -1075,9 +1219,48 @@ def test_package_module_skip_does_not_hide_a_failing_script(monkeypatch, tmp_pat
     results = _verify_written_files([str(module), str(script)], log)
     statuses = {path: status for path, status, _ in results}
 
-    assert statuses[str(module)] == "skipped"
+    assert statuses[str(module)] == "imported"
     assert statuses[str(script)] == "failed"
-    assert f"verify({module}) -> skipped" in log
+    assert f"verify({module}) -> imported" in log
+
+
+def test_import_target_names_the_package_and_its_root(tmp_path):
+    """The walk stops above the outermost package; an __init__ is the package."""
+    from langgraph_agent.nodes import _import_target
+
+    inner = tmp_path / "src" / "outer" / "inner"
+    inner.mkdir(parents=True)
+    (tmp_path / "src" / "outer" / "__init__.py").write_text("")
+    (inner / "__init__.py").write_text("")
+
+    root = str((tmp_path / "src").resolve())
+    assert _import_target(str(inner / "mod.py")) == (root, "outer.inner.mod")
+    assert _import_target(str(inner / "__init__.py")) == (root, "outer.inner")
+    assert _import_target(str(tmp_path / "loose.py")) is None
+
+
+def test_a_package_directory_that_cannot_be_imported_runs_as_a_script(tmp_path):
+    """`my-pkg` is not a module name, so its files are executed like any other."""
+    from langgraph_agent.nodes import _import_target, _verify_written_files
+
+    odd = tmp_path / "my-pkg"
+    odd.mkdir()
+    (odd / "__init__.py").write_text("")
+    tool = odd / "tool.py"
+    tool.write_text("print('standalone')\n")
+
+    assert _import_target(str(tool)) is None
+    assert [status for _, status, _ in _verify_written_files([str(tool)], [])] == ["ok"]
+
+
+def test_a_path_with_a_space_is_still_executed(tmp_path):
+    """There is no shell to split on, so the path is quoted, not word-split."""
+    from langgraph_agent.nodes import _verify_written_files
+
+    spaced = tmp_path / "my script.py"
+    spaced.write_text("print('ran')\n")
+
+    assert [status for _, status, _ in _verify_written_files([str(spaced)], [])] == ["ok"]
 
 
 def test_expect_failures_defaults_off():
@@ -1587,6 +1770,7 @@ def test_an_unverified_file_blocks_and_is_carried(monkeypatch, tmp_path):
     target, result = _builder_with_unverified_file(monkeypatch, tmp_path)
 
     assert result["failed_verification"] == [target]
+    assert result["unverified"] == [target]
     assert "Not executed before the deadline" in result["blockers"]
     assert "NOT RUN" in result["builder_report"]
     assert not any("Implementation complete" in m for m in result["messages"])
@@ -2372,3 +2556,234 @@ def test_the_discussion_mode_reaches_every_seat_through_state(monkeypatch):
     block = _get_state_injection(state)
     assert "DISCUSSION ONLY" in block
     assert "rule on" in block
+
+
+# --- The lint pass ------------------------------------------------------------
+#
+# A file can run clean and still fail the lint CI runs over it. These use a
+# ruff.toml in the tmp dir, since ruff's defaults select no whitespace rules.
+
+
+def _ruff_config(directory):
+    (directory / "ruff.toml").write_text('[lint]\nselect = ["E", "W", "F", "I"]\n')
+
+
+def test_lint_fixes_whitespace_and_leaves_the_rest_to_the_builder(tmp_path):
+    """Whitespace is fixed for the Builder; an unused import is the Builder's."""
+    from langgraph_agent import nodes
+
+    _ruff_config(tmp_path)
+    target = tmp_path / "mod.py"
+    target.write_text("import os\n\n\ndef f():  \n    return 1\n")
+
+    log: list[str] = []
+    failures, fixed, unavailable = nodes._lint_written_files([str(target)], log)
+
+    assert unavailable == ""
+    assert fixed == [str(target)]
+    assert "def f():\n" in target.read_text()      # the trailing spaces went
+    assert "import os" in target.read_text()       # the import was left alone
+    ((path, findings),) = failures
+    assert path == str(target)
+    assert [code for _, code, _ in findings] == ["F401"]
+    assert f"lint({target}) -> failed" in log
+
+
+def test_a_clean_file_passes_lint_untouched(tmp_path):
+    from langgraph_agent import nodes
+
+    _ruff_config(tmp_path)
+    target = tmp_path / "clean.py"
+    target.write_text("def f():\n    return 1\n")
+
+    assert nodes._lint_written_files([str(target)], []) == ([], [], "")
+
+
+def test_a_missing_linter_is_reported_and_blocks_nothing(tmp_path, monkeypatch):
+    """No ruff is a fact about the machine, not a defect in the file."""
+    from langgraph_agent import nodes
+
+    target = tmp_path / "mod.py"
+    target.write_text("import os\n")
+    monkeypatch.setattr(
+        nodes,
+        "_call_mcp_tool_sync",
+        lambda name, args: {
+            "success": False, "stdout": "", "stderr": "python: No module named ruff",
+        },
+    )
+
+    failures, fixed, unavailable = nodes._lint_written_files([str(target)], [])
+
+    assert failures == [] and fixed == []
+    assert "not installed" in unavailable
+
+
+def test_a_pass_whose_file_runs_but_fails_lint_is_not_complete(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    _ruff_config(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "runs_fine.py"
+    llm = _WritesFileLLM(target, "import os\n\nprint('ok')\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm", lambda agent, temperature=0.1: llm
+    )
+
+    result = builder_node(initial_state("Write a module"))
+
+    assert result["lint_failed"] == [str(target)]
+    assert result["failed_verification"] == []        # it runs clean
+    assert "1 fail lint" in result["messages"][-1]
+    assert "Files that fail lint" in result["blockers"]
+    assert "F401" in result["builder_report"]
+
+
+def test_a_lint_failure_blocks_approval_even_under_expect_failures(monkeypatch):
+    result = _gate_with(monkeypatch, lint_failed=["mod.py"], expect_failures=True)
+
+    assert result["verdict"] == Verdict.REVISE.value
+    assert "1 file(s) fail lint" in result["messages"][-1]
+
+
+def test_a_lint_failure_is_carried_until_it_is_fixed(monkeypatch, tmp_path):
+    """A pass that touches nothing re-lints what failed, and clears it once clean."""
+    monkeypatch.chdir(tmp_path)
+    _ruff_config(tmp_path)
+    from langgraph_agent.nodes import builder_node
+
+    target = tmp_path / "mod.py"
+    target.write_text("import os\n")
+    monkeypatch.setattr(
+        "langgraph_agent.nodes.get_agent_llm",
+        lambda agent, temperature=0.1: _WritesNothingLLM(),
+    )
+    state = initial_state("Tidy up")
+    state["lint_failed"] = [str(target)]
+
+    assert builder_node(dict(state, messages=[]))["lint_failed"] == [str(target)]
+
+    target.write_text("VALUE = 1\n")
+    assert builder_node(dict(state, messages=[]))["lint_failed"] == []
+
+
+# --- The Planner's project map ------------------------------------------------
+
+
+class _RecordingPlannerLLM:
+    """A Planner seat that records what it was shown and answers in format."""
+
+    def __init__(self):
+        self.seen = ""
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.seen = "\n".join(str(message.content) for message in messages)
+        return AIMessage(content=(
+            "## Goal\nx\n\n## Steps\n1. Edit src/app.py\n\n"
+            "## Next Agent\nBuilder\n\n## Notes\nnone\n"
+        ))
+
+
+def _search_answering(results):
+    def fake(name, args):
+        assert name == "search_knowledge_graph"
+        return {"results": results, "source": "local_graphrag"}
+    return fake
+
+
+def test_the_planner_is_shown_the_files_the_corpus_ranks_closest(monkeypatch):
+    from langgraph_agent import nodes
+
+    monkeypatch.setattr(nodes, "PLANNER_PROJECT_MAP", True)
+    monkeypatch.setattr(nodes, "_call_mcp_tool_sync", _search_answering([
+        {"id": "src/app.py", "score": 0.61, "content": "def render_graph():\n    ...",
+         "metadata": {"path": "src/app.py"}},
+        {"id": "notes/unrelated.md", "score": 0.12, "content": "nothing to do with it"},
+    ]))
+    llm = _RecordingPlannerLLM()
+    monkeypatch.setattr(nodes, "get_agent_llm", lambda agent, temperature=0.1: llm)
+
+    nodes._make_plan(initial_state("Fix the graph rendering"))
+
+    assert "src/app.py (0.61): def render_graph(): ..." in llm.seen
+    # Under RETRIEVAL_RELEVANCE_FLOOR is not a related file, so it is not shown.
+    assert "notes/unrelated.md" not in llm.seen
+
+
+def test_no_map_when_nothing_clears_the_floor(monkeypatch):
+    from langgraph_agent import nodes
+
+    monkeypatch.setattr(nodes, "_call_mcp_tool_sync", _search_answering([
+        {"id": "a.md", "score": 0.10, "content": "x"},
+    ]))
+
+    assert nodes._project_map("anything") == ""
+
+
+def test_a_failed_search_leaves_the_planner_planning(monkeypatch):
+    from langgraph_agent import nodes
+
+    def boom(name, args):
+        raise RuntimeError("no corpus here")
+
+    monkeypatch.setattr(nodes, "_call_mcp_tool_sync", boom)
+
+    assert nodes._project_map("anything") == ""
+    assert nodes._project_map("   ") == ""
+
+
+def test_the_map_stays_off_when_switched_off(monkeypatch):
+    """conftest switches it off; a switched-off map must not even search."""
+    from langgraph_agent import nodes
+
+    def must_not_search(name, args):
+        raise AssertionError("searched with the project map switched off")
+
+    monkeypatch.setattr(nodes, "_call_mcp_tool_sync", must_not_search)
+    llm = _RecordingPlannerLLM()
+    monkeypatch.setattr(nodes, "get_agent_llm", lambda agent, temperature=0.1: llm)
+
+    nodes._make_plan(initial_state("Fix the graph rendering"))
+
+    assert "Project files the corpus ranks" not in llm.seen
+
+
+# --- Blockers -----------------------------------------------------------------
+
+
+def test_the_blockers_heading_parses_in_both_spellings():
+    from langgraph_agent.nodes import _parse_builder_output
+
+    for heading in ("## Blockers", "## Next Steps / Blockers"):
+        parsed = _parse_builder_output(f"{heading}\nneeds the API key\n")
+        assert parsed["next_steps_blockers"] == "needs the API key", heading
+
+
+class _ProposingLLM:
+    """A discussion Builder that fills its Blockers section with boilerplate."""
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content=(
+            "## Changes Made\nWould add a not-found message to trace().\n\n"
+            "## Blockers\nThis proposal requires approval from the Architect to proceed.\n"
+        ))
+
+
+def test_a_discussion_builder_s_blockers_stay_in_its_proposal(monkeypatch):
+    """Nothing blocks a run that cannot act; the text is part of the proposal."""
+    from langgraph_agent import nodes
+
+    monkeypatch.setattr(
+        nodes, "get_agent_llm", lambda agent, temperature=0.1: _ProposingLLM()
+    )
+    state = initial_state("Discuss the graph tab")
+    state["discuss_only"] = True
+
+    result = nodes.builder_node(state)
+
+    assert result["blockers"] == ""
+    assert "requires approval from the Architect" in result["builder_report"]

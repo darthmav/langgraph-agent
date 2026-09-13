@@ -1,4 +1,8 @@
-"""Tests for keeping fetched web pages out of the knowledge graph's entities.
+"""Tests for keeping retrieval-only documents out of the graph's entities.
+
+Two kinds: pages the research phase fetched, and markup, script and config
+files (`ENTITY_FREE_SUFFIXES`). The web pages came first, and the reasoning is
+theirs.
 
 A page the research phase fetched is a *retrieval source*, not knowledge-graph
 material, and `add_document`'s capital rule is far worse on web prose than on
@@ -25,7 +29,12 @@ from __future__ import annotations
 import pytest
 from test_chunking import _make_kb
 
-from langgraph_agent.graphrag_server import WEB_RESEARCH_DIR, _is_web_document
+from langgraph_agent.graphrag_server import (
+    WEB_RESEARCH_DIR,
+    _is_web_document,
+    _mints_entities,
+    iter_project_files,
+)
 
 PROSE = (
     "Although the parameter saturates, Afterward the ranking changes. "
@@ -136,3 +145,68 @@ def test_entity_free_pages_do_not_read_as_a_broken_extractor(kb):
     assert after["components"] == before["components"]
     # Excluded, but said out loud rather than silently dropped.
     assert after["web_documents"] == 3
+
+
+# ---------------------------------------------------------------------------
+# markup, script and config: retrievable, entity-free
+# ---------------------------------------------------------------------------
+
+UI_SOURCE = (
+    "<script>const BRIDGE_VERDICTS = {}; // Copying the list, Dimming the rest\n"
+    "let CLEAR_ARMED = null;</script><p>The Architect rules on the Builder.</p>"
+)
+
+
+@pytest.mark.parametrize("path", [
+    "frontend/index.html", "install.sh", "pyproject.toml",
+    ".github/workflows/ci.yml", "static/app.js", "uploads/page.HTML",
+])
+def test_markup_script_and_config_mint_no_entities(kb, path):
+    """Their capitals are identifiers and interface strings, not project terms."""
+    kb.add_document(path, UI_SOURCE, {"path": path, "type": "html"})
+
+    assert _entities(kb) == set()
+    assert not _mints_entities(path)
+
+
+def test_python_and_prose_still_mint():
+    for path in ("serve.py", "CLAUDE.md", "prompts/builder.txt", "docs/guide.rst"):
+        assert _mints_entities(path), path
+
+
+def test_the_console_is_a_retrievable_document(kb):
+    chunks = kb.add_document("frontend/index.html", UI_SOURCE,
+                             {"path": "frontend/index.html", "type": "html"})
+
+    assert chunks >= 1
+    documents = [n for n, a in kb.graph.nodes(data=True) if a.get("type") == "document"]
+    assert documents == ["frontend/index.html"]
+
+
+def test_entity_free_sources_are_excluded_from_isolates_and_counted(kb):
+    kb.add_document("notes.md", PROSE, {"path": "notes.md", "type": "markdown"})
+    before = kb.connectivity()
+
+    kb.add_document("frontend/index.html", UI_SOURCE,
+                    {"path": "frontend/index.html", "type": "html"})
+    after = kb.connectivity()
+
+    assert after["isolated_nodes"] == before["isolated_nodes"] == 0
+    assert after["entity_free_sources"] == 1
+    assert after["web_documents"] == 0
+
+
+def test_the_walk_takes_the_console_and_ci_but_not_the_git_directory(tmp_path, monkeypatch):
+    """`.git` as a plain substring also excluded `.github/`; the entry is `.git/`."""
+    for relative in ("frontend/index.html", ".github/workflows/ci.yml", "install.sh",
+                     "pyproject.toml", ".git/hooks/pre-commit.sh", ".git/config.toml"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n")
+    monkeypatch.chdir(tmp_path)
+
+    walked = {str(path) for path in iter_project_files(".")}
+
+    assert {"frontend/index.html", ".github/workflows/ci.yml", "install.sh",
+            "pyproject.toml"} <= walked
+    assert not any(path.startswith(".git/") for path in walked)

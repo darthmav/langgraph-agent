@@ -28,6 +28,7 @@ from langgraph_agent.graphrag_server import (
     CHUNK_ID_SEPARATOR,
     CHUNK_MAX_TOKENS,
     CHUNK_OVERLAP_TOKENS,
+    EMBEDDING_BATCH_SIZE,
     ENTITY_STOPWORDS,
     GraphRAGKnowledgeBase,
     _chunk_windows,
@@ -88,7 +89,7 @@ class _FakeEmbedder:
     def __init__(self, piece: int = 4) -> None:
         self.tokenizer = _FakeTokenizer(piece)
 
-    def encode(self, text: str | list[str]) -> Any:
+    def encode(self, text: str | list[str], **kwargs: Any) -> Any:
         import numpy as np
 
         if isinstance(text, list):
@@ -551,7 +552,7 @@ class _CountingEmbedder(_FakeEmbedder):
         super().__init__(piece)
         self.batches = 0
 
-    def encode(self, text: str | list[str]) -> Any:
+    def encode(self, text: str | list[str], **kwargs: Any) -> Any:
         if isinstance(text, list):
             self.batches += 1
         return super().encode(text)
@@ -659,3 +660,116 @@ def test_the_fingerprint_is_written_by_the_store_not_by_the_caller(counting_kb):
 
     shas = {row[1]["sha"] for row in counting_kb.collection.rows.values()}
     assert shas == {_content_sha(text)}
+
+
+# ---------------------------------------------------------------------------
+# where a passage sits, and an embedder that stays quiet
+# ---------------------------------------------------------------------------
+
+
+def test_a_passage_is_anchored_to_its_line_and_reaches_back_to_its_start(tmp_path):
+    from langgraph_agent.graphrag_server import _passage_location
+
+    source = tmp_path / "mod.py"
+    source.write_text("import os\n\ndef neighbours(graph):\n    return list(graph.neighbors(node))\n")
+
+    line, text = _passage_location(str(source), "graph.neighbors(node))\n")
+
+    assert line == 4
+    assert text == "    return list(graph.neighbors(node))\n"
+
+
+def test_a_passage_the_file_no_longer_holds_gets_no_line(tmp_path):
+    """A guessed line would point at the wrong code."""
+    from langgraph_agent.graphrag_server import _passage_location
+
+    source = tmp_path / "mod.py"
+    source.write_text("rewritten since it was indexed\n")
+
+    assert _passage_location(str(source), "the old text") is None
+    assert _passage_location(str(tmp_path / "gone.py"), "anything") is None
+
+
+def test_a_minified_line_is_not_reached_back_into(tmp_path):
+    from langgraph_agent.graphrag_server import MAX_PASSAGE_LEAD_CHARS, _passage_location
+
+    source = tmp_path / "bundle.js"
+    source.write_text("x" * (MAX_PASSAGE_LEAD_CHARS + 50) + "needle();\n")
+
+    assert _passage_location(str(source), "needle();") == (1, "needle();")
+
+
+class _RecordingEmbedder(_FakeEmbedder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[dict[str, Any]] = []
+
+    def encode(self, text: str | list[str], **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return super().encode(text, **kwargs)
+
+
+def test_embedding_draws_no_progress_bar(tmp_path):
+    """sentence-transformers draws one per call when logging is at INFO."""
+    kb = _make_kb(tmp_path)
+    embedder = _RecordingEmbedder()
+    kb._embedder = embedder  # type: ignore[assignment]
+
+    kb.add_document("notes.md", "Some words to embed. " * 30, {"path": "notes.md", "type": "markdown"})
+    kb.search("words", 1)
+
+    assert len(embedder.calls) >= 2
+    assert all(call.get("show_progress_bar") is False for call in embedder.calls)
+
+
+def test_embedding_goes_in_batches_of_the_cap(tmp_path):
+    """sentence-transformers' default of 32 measured a seat layer on a shared card.
+
+    Both call sites go through `_encode`, so neither a document nor a query
+    reaches the model at the library's own batch size.
+    """
+    kb = _make_kb(tmp_path)
+    embedder = _RecordingEmbedder()
+    kb._embedder = embedder  # type: ignore[assignment]
+
+    kb.add_document("notes.md", "Some words to embed. " * 30, {"path": "notes.md", "type": "markdown"})
+    kb.search("words", 1)
+
+    assert len(embedder.calls) >= 2
+    assert all(call.get("batch_size") == EMBEDDING_BATCH_SIZE for call in embedder.calls)
+
+
+def test_the_model_is_loaded_from_the_cache_before_the_network(tmp_path, monkeypatch):
+    """Loading by name asked huggingface.co on every server's first embed."""
+    import sys
+    import types
+
+    calls: list[bool] = []
+    cached = {"present": True}
+
+    class _Model:
+        def __init__(self, name, device=None, local_files_only=False):
+            calls.append(local_files_only)
+            if local_files_only and not cached["present"]:
+                raise OSError("not in the local cache")
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=_Model))
+
+    kb = _make_kb(tmp_path)
+    kb._embedder = None
+    assert isinstance(kb.embedder, _Model)
+    assert calls == [True]
+
+    calls.clear()
+    cached["present"] = False
+    kb = _make_kb(tmp_path)
+    kb._embedder = None
+    assert isinstance(kb.embedder, _Model)
+    assert calls == [True, False]
+
+
+def test_importing_the_corpus_does_not_switch_every_library_to_info():
+    """The MCP SDK runs `logging.basicConfig` at the level its server is built with."""
+    from langgraph_agent.graphrag_server import server
+
+    assert server.settings.log_level == "WARNING"

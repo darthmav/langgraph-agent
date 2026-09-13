@@ -484,6 +484,9 @@ def probe_state(role: str) -> dict[str, Any]:
         "blockers": "",
         "files_changed": [],
         "failed_verification": [],
+        "unverified": [],
+        "builder_cut_off": "",
+        "lint_failed": [],
         "expect_failures": False,
         "step_count": 1,
     }
@@ -946,7 +949,9 @@ def run_team(
         "messages": [], "architecture": "", "verdict": "", "plan": "",
         "research": "", "builder_report": "", "next_agent": "Researcher",
         "research_status": "", "blockers": "", "files_changed": [],
-        "failed_verification": [], "expect_failures": False, "step_count": 0,
+        "failed_verification": [], "unverified": [], "builder_cut_off": "",
+        "lint_failed": [],
+        "expect_failures": False, "step_count": 0,
     }
 
     run_id = uuid.uuid4().hex

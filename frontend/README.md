@@ -65,15 +65,20 @@ The *×* in the top right ends the session: it shuts down `serve.py` itself, not
 just the page. With a run going it asks first, then stops the run and lets it
 save its state before the server exits.
 
-**Graph** — the knowledge graph. *Sweep all* walks every document through
-`query_graph` and dedupes the edges; *Trace* centres on one node. Documents are
-green with permanent labels, entities are blue with labels on hover (they
-outnumber documents and their labels would otherwise pile up). Nodes are
-draggable. The depth spinner controls how far each query walks.
+**Graph** — the knowledge graph. *Sweep all* draws the whole corpus from one
+`graph_overview` call; *Trace* centres on one node, and the depth spinner
+controls how far a trace walks. Documents are green, entities blue. Entities
+are labelled on hover; documents are labelled while there are few enough to
+read — all of them on a small trace, the best-connected on a sweep — and every
+one once you zoom in. Scroll to zoom about the pointer, drag the background to
+pan, and double-click it or press *Reset view* to reset. Hovering a node keeps
+it and its neighbours and steps everything else back. Nodes are draggable.
 
 The sweep keeps only entities shared by four or more documents — below that,
-per-document noise buries the structure. A trace keeps everything, since a node
-asked for by name should not have neighbours hidden.
+per-document noise buries the structure — and leaves out documents that share no
+entity with the rest (fetched pages and config files among them), saying how
+many. A trace keeps everything, since a node asked for by name should not have
+neighbours hidden.
 
 **Retrieval** — semantic search with score bars, plus a rolling telemetry log of
 every non-quiet RPC (time, method, milliseconds; red on error).
@@ -85,7 +90,8 @@ clear them. Clicking a document jumps to the Graph tab and traces it.
 That is the point rather than an implementation detail: a reindex rebuilds the
 corpus from the files on disk and prunes everything else, so a document
 embedded only into the index would disappear at the next rebuild with nothing
-reporting it. Text only — `.md`, `.py`, `.rst`, `.txt`; a PDF is refused rather
+reporting it. Text only — the types a reindex reads, listed on hover; a PDF is
+refused rather
 than embedded as whatever its bytes decode to. Re-uploading a name replaces
 that document rather than adding a second copy of it.
 

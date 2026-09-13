@@ -46,8 +46,10 @@ from langgraph_agent.config import (  # noqa: E402
     AGENTS,
     get_agent_status,
     list_ollama_models,
+    ollama_model_capabilities,
     set_agent_llm,
     set_agent_thinking,
+    unload_local_seat_models,
 )
 from langgraph_agent.control import ACTIVITY, RUN_CONTROL  # noqa: E402
 from langgraph_agent.corpus_health import (  # noqa: E402
@@ -56,14 +58,22 @@ from langgraph_agent.corpus_health import (  # noqa: E402
 )
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
+    EMBEDDING_MODEL_NAME,
     INDEXABLE_SUFFIXES,
     NO_CORPUS_NOTE,
     GraphRAGKnowledgeBase,
+    active_embedding_model,
+    calibrate_relevance_floor,
     corpus_state,
+    embedding_backend,
+    embedding_device_status,
+    floor_calibration,
     get_knowledge_base,
     index_project_files,
     iter_project_files,
     open_knowledge_base,
+    relevance_floor,
+    set_embedding_model,
     store_uploaded_document,
 )
 from langgraph_agent.web_research import research_online  # noqa: E402
@@ -87,6 +97,94 @@ kb: GraphRAGKnowledgeBase | None = None
 INDEX_PROJECT_BEFORE_RUN = os.getenv(
     "INDEX_PROJECT_BEFORE_RUN", "1"
 ).strip() not in {"0", "false", "no"}
+
+
+# --------------------------------------------------------------------------
+# Request and parameter checking
+# --------------------------------------------------------------------------
+
+# The largest request body read. An upload is the largest thing the console
+# sends -- MAX_INDEXABLE_BYTES of text, JSON-escaped -- and this sits well
+# above that, so it refuses what is not a console request without reading it.
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
+# Bounds for the numbers a caller may ask for. Each is past anything the
+# console's own controls offer, and short of what would make a call expensive.
+MAX_TOP_K = 100
+MAX_GRAPH_DEPTH = 10
+MAX_MIN_DEGREE = 1_000_000
+MAX_LIST_LIMIT = 500
+MAX_TOPICS = 100
+
+# Every method used to take its parameters through a bare `int()`, `float()`,
+# `bool()` or `str()`. `top_k="abc"` came back as Python's own "invalid literal
+# for int() with base 10"; a negative `top_k` as an empty result the console
+# showed as "no results", as though the query had found nothing; and the string
+# "false" as True -- which on `research_web` fetched and permanently embedded
+# pages, and on `expect_failures` stopped failing files blocking approval. These
+# refuse by name instead, and the methods parse before they touch anything.
+
+
+def _refusal(name: str, wanted: str, value: Any) -> ValueError:
+    return ValueError(f"{name} must be {wanted}; got {value!r}.")
+
+
+def _int_param(
+    params: dict[str, Any], name: str, default: int, *, low: int, high: int
+) -> int:
+    """A whole number from `low` to `high`, or `default` when it is absent."""
+    value = params.get(name)
+    if value is None or value == "":
+        return default
+    wanted = f"a whole number from {low} to {high}"
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise _refusal(name, wanted, value)
+    try:
+        number = float(value)
+    except ValueError:
+        raise _refusal(name, wanted, value) from None
+    if not number.is_integer() or not low <= number <= high:
+        raise _refusal(name, wanted, value)
+    return int(number)
+
+
+def _float_param(
+    params: dict[str, Any], name: str, default: float | None, *, low: float, high: float
+) -> float | None:
+    """A number from `low` to `high`, or `default` when it is absent."""
+    value = params.get(name)
+    if value is None or value == "":
+        return default
+    wanted = f"a number from {low:g} to {high:g}"
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise _refusal(name, wanted, value)
+    try:
+        number = float(value)
+    except ValueError:
+        raise _refusal(name, wanted, value) from None
+    if not low <= number <= high:  # NaN fails this too
+        raise _refusal(name, wanted, value)
+    return number
+
+
+def _bool_param(params: dict[str, Any], name: str, default: bool = False) -> bool:
+    """A JSON boolean, or `default` when it is absent. Nothing else is coerced."""
+    value = params.get(name)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise _refusal(name, "true or false", value)
+    return value
+
+
+def _str_param(params: dict[str, Any], name: str, default: str = "") -> str:
+    """A string, or `default` when it is absent."""
+    value = params.get(name)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise _refusal(name, "a string", value)
+    return value
 
 
 def _open_kb() -> GraphRAGKnowledgeBase | None:
@@ -197,7 +295,10 @@ def rpc_query_graph(params: dict[str, Any]) -> dict[str, Any]:
     `min_degree` defaults to 2 because the common caller is a sweep, where the
     one-document entities bury the structure. A trace passes 1 explicitly.
     """
-    node_id = str(params.get("node_id", ""))
+    node_id = _str_param(params, "node_id")
+    max_depth = _int_param(params, "max_depth", 2, low=1, high=MAX_GRAPH_DEPTH)
+    min_degree = _int_param(params, "min_degree", 2, low=1, high=MAX_MIN_DEGREE)
+    split = _bool_param(params, "split")
     kb_or_none = _open_kb()
     if kb_or_none is None:
         return {
@@ -212,11 +313,36 @@ def rpc_query_graph(params: dict[str, Any]) -> dict[str, Any]:
 
     return kb_or_none.neighborhood(
         node_id,
-        max_depth=int(params.get("max_depth", 2)),
-        min_degree=int(params.get("min_degree", 2)),
+        max_depth=max_depth,
+        min_degree=min_degree,
         # Off unless asked for: it triples the cost of a call the console makes
         # on every click, and only a caller drawing the division wants it.
-        split=bool(params.get("split", False)),
+        split=split,
+    )
+
+
+def rpc_graph_overview(params: dict[str, Any]) -> dict[str, Any]:
+    """The whole corpus as one drawable graph, for the console's sweep.
+
+    One call where the console used to make one per document; see
+    `GraphRAGKnowledgeBase.overview` for why the result is the same.
+    """
+    min_degree = _int_param(params, "min_degree", 4, low=1, high=MAX_MIN_DEGREE)
+    include_isolated = _bool_param(params, "include_isolated")
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        return {
+            "corpus": "absent",
+            "note": NO_CORPUS_NOTE,
+            "nodes": [],
+            "edges": [],
+            "total_nodes": 0,
+            "total_edges": 0,
+            "unlinked_documents": 0,
+        }
+    return kb_or_none.overview(
+        min_degree=min_degree,
+        include_isolated=include_isolated,
     )
 
 
@@ -226,13 +352,13 @@ def rpc_search_documents(params: dict[str, Any]) -> dict[str, Any]:
     With no corpus this returns no results and says so, rather than building
     one to search. Searching is a read like any other.
     """
+    query = _str_param(params, "query")
+    top_k = _int_param(params, "top_k", 5, low=1, high=MAX_TOP_K)
     kb_or_none = _open_kb()
     if kb_or_none is None:
         return {"results": [], "source": "no_corpus", "note": NO_CORPUS_NOTE}
 
-    results = kb_or_none.search(
-        str(params.get("query", "")), int(params.get("top_k", 5))
-    )
+    results = kb_or_none.search(query, top_k)
     return {"results": results, "source": "local_graphrag"}
 
 
@@ -328,10 +454,10 @@ def rpc_bottleneck(params: dict[str, Any]) -> dict[str, Any]:
     takes no run guard -- reading the corpus takes nothing away from the run
     using it.
     """
+    limit = _int_param(params, "limit", 12, low=1, high=MAX_LIST_LIMIT)
     kb_or_none = _open_kb()
     if kb_or_none is None:
         raise ValueError(f"There is no corpus to analyse. {NO_CORPUS_NOTE}")
-    limit = int(params.get("limit", 12))
     return kb_or_none.bottleneck(limit=limit)
 
 
@@ -342,11 +468,14 @@ def rpc_topics(params: dict[str, Any]) -> dict[str, Any]:
     optional; omitted, the eigengap chooses it and the answer may come back
     `no_clear_structure` rather than a map of a corpus that has no topics.
     """
+    # Omitted or blank means "choose one", not k = 0.
+    k = None if params.get("k") in (None, "") else _int_param(
+        params, "k", 0, low=2, high=MAX_TOPICS
+    )
     kb_or_none = _open_kb()
     if kb_or_none is None:
         raise ValueError(f"There is no corpus to cluster. {NO_CORPUS_NOTE}")
-    raw_k = params.get("k")
-    return kb_or_none.topics(k=int(raw_k) if raw_k not in (None, "") else None)
+    return kb_or_none.topics(k=k)
 
 
 def rpc_duplicate_entities(params: dict[str, Any]) -> dict[str, Any]:
@@ -362,15 +491,14 @@ def rpc_duplicate_entities(params: dict[str, Any]) -> dict[str, Any]:
     not the other way round -- see `duplicate_entities` for the measurement
     that settled which way that runs.
     """
+    limit = _int_param(params, "limit", 20, low=1, high=MAX_LIST_LIMIT)
+    name_similarity = _float_param(params, "name_similarity", None, low=0.0, high=1.0)
+    containment = _float_param(params, "containment", None, low=0.0, high=1.0)
     kb_or_none = _open_kb()
     if kb_or_none is None:
         raise ValueError(f"There is no corpus to scan. {NO_CORPUS_NOTE}")
-    raw_name = params.get("name_similarity")
-    raw_containment = params.get("containment")
     return kb_or_none.duplicate_entities(
-        limit=int(params.get("limit", 20)),
-        name_similarity=float(raw_name) if raw_name not in (None, "") else None,
-        containment=float(raw_containment) if raw_containment not in (None, "") else None,
+        limit=limit, name_similarity=name_similarity, containment=containment
     )
 
 
@@ -411,9 +539,9 @@ def rpc_list_seats(_: dict[str, Any]) -> dict[str, Any]:
 
 def rpc_set_seat(params: dict[str, Any]) -> dict[str, Any]:
     """Reassign one seat for the lifetime of this process."""
-    agent = str(params.get("agent") or params.get("role", ""))
-    provider = str(params.get("provider", ""))
-    model = str(params.get("model", ""))
+    agent = _str_param(params, "agent") or _str_param(params, "role")
+    provider = _str_param(params, "provider")
+    model = _str_param(params, "model")
 
     if agent not in AGENTS:
         raise ValueError(f"Unknown agent: {agent!r}")
@@ -430,7 +558,7 @@ def rpc_set_thinking(params: dict[str, Any]) -> dict[str, Any]:
     `thinking` must be a JSON boolean. Anything else is refused rather than
     coerced, because the obvious coercion reads the string "false" as on.
     """
-    agent = str(params.get("agent") or params.get("role", ""))
+    agent = _str_param(params, "agent") or _str_param(params, "role")
     thinking = params.get("thinking")
 
     if agent not in AGENTS:
@@ -449,6 +577,80 @@ def rpc_llm_options(_: dict[str, Any]) -> dict[str, Any]:
     at a tag that is pulled but not in the curated list.
     """
     return {"options": AGENT_LLM_OPTIONS, "ollama_tags": list_ollama_models()}
+
+
+def _embedding_choice(model: str, group: str) -> dict[str, Any]:
+    """One entry of the embedding dropdown, with what choosing it would cost."""
+    state, _ = corpus_state(model=model)
+    floor = relevance_floor(model)
+    if model == EMBEDDING_MODEL_NAME:
+        floor_source = "measured"
+    elif floor_calibration(model) is None:
+        floor_source = "not_measured"
+    else:
+        floor_source = "calibrated" if floor is not None else "no_gap"
+    return {
+        "model": model,
+        "label": model,
+        "group": group,
+        "backend": embedding_backend(model),
+        "corpus": state,
+        "floor": floor,
+        "floor_source": floor_source,
+    }
+
+
+def rpc_embedding_options(_: dict[str, Any]) -> dict[str, Any]:
+    """The embedding models the console can switch between, and the active one.
+
+    MiniLM, which runs in this process, plus every tag the Ollama daemon says
+    can embed -- asked of the daemon's capabilities rather than guessed from a
+    name, the way the seat cards ask about thinking. Each entry carries the
+    state of that model's own corpus and where its relevance floor came from,
+    because those two are what switching costs: a model with no corpus is built
+    by the next run, and a model with no floor hands every search to the
+    Researcher's model.
+    """
+    active = active_embedding_model()
+    choices = [_embedding_choice(EMBEDDING_MODEL_NAME, "In this process")]
+    installed = [
+        tag for tag in list_ollama_models()
+        if "embedding" in (ollama_model_capabilities(tag) or [])
+    ]
+    choices += [_embedding_choice(tag, "Ollama (installed)") for tag in installed]
+    if all(choice["model"] != active for choice in choices):
+        choices.insert(0, _embedding_choice(active, "Current"))
+    with _run_lock:
+        running = bool(_run_progress["running"])
+    return {
+        "active": active,
+        "options": choices,
+        "switchable": not running,
+        "device": embedding_device_status(),
+    }
+
+
+def rpc_set_embedding_model(params: dict[str, Any]) -> dict[str, Any]:
+    """Switch the embedding model for the lifetime of this process.
+
+    Refused mid-run, because switching models is switching corpora and the
+    corpus a run searches must not change underneath it. Refused for a model
+    the console does not offer, so a typo cannot point the corpus at a tag that
+    embeds nothing. Nothing is built here: the next run builds the new model's
+    corpus if it has none, the one act allowed to bring a corpus into being.
+    """
+    global kb
+    model = _str_param(params, "model").strip()
+    offered = {choice["model"] for choice in rpc_embedding_options({})["options"]}
+    if model not in offered:
+        raise ValueError(
+            f"{model!r} is not an embedding model this machine offers: "
+            f"{', '.join(sorted(offered))}"
+        )
+    _refuse_while_a_run_is_in_flight("switched to another embedding model")
+    set_embedding_model(model)
+    kb = None
+    return rpc_embedding_options({})
 
 
 def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
@@ -472,6 +674,11 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
         # The embedding model is the one thing that would run on this machine,
         # and it is not loaded until something indexes or searches.
         "embedding": embedding_model,
+        # Where it runs, which only a loaded model can say: the setting names a
+        # device, and a card with no kernels or no room leaves the model on the
+        # CPU. Read without loading anything, so `active` is None until
+        # something has embedded.
+        "embedding_device": embedding_device_status(),
         "corpus": state,
         # Whether a run would build the corpus itself from here. Reported
         # rather than assumed by the console, which otherwise has to promise
@@ -479,6 +686,9 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
         # a promise `INDEX_PROJECT_BEFORE_RUN=0` makes false, in the one place
         # someone looks to find out why retrieval is empty.
         "indexes_on_run": INDEX_PROJECT_BEFORE_RUN,
+        # What an upload may be, for the console's pickers and tooltips. From
+        # the walk's own list, so the page cannot promise a different one.
+        "indexable_suffixes": list(INDEXABLE_SUFFIXES),
         "graphrag": state == "indexed",
         "llm": f"{architect['model']} ({architect['provider']})",
         "agents": seats,
@@ -602,8 +812,8 @@ def rpc_stop_run(params: dict[str, Any]) -> dict[str, Any]:
     its own request thread for the whole run, which is why the server is a
     ThreadingHTTPServer.
     """
-    run_id = str(params.get("run_id", ""))
-    reason = str(params.get("reason", ""))
+    run_id = _str_param(params, "run_id")
+    reason = _str_param(params, "reason")
 
     if not RUN_CONTROL.stop(run_id, reason):
         armed = RUN_CONTROL.run_id()
@@ -684,7 +894,7 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     snapshot on disk before the process ends, so an exit mid-run is as
     recoverable as a stop.
     """
-    stop_first = bool(params.get("stop_first", False))
+    stop_first = _bool_param(params, "stop_first")
 
     # Read the run's state and claim the exit in one hold of `_run_lock`.
     # Claiming it afterwards lost the exit outright: `RUN_CONTROL.stop()` below
@@ -733,6 +943,156 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
 
     _shutdown_requested.set()
     return {"exiting": True, "running": False, "detail": "The server is exiting."}
+
+
+def _claim_the_embedder_before_the_run() -> dict[str, Any]:
+    """Put the embedder on its card before any local seat is fitted beside it.
+
+    The order is the whole point, and it cannot be left to whatever embeds
+    first. llama.cpp fits a model around what a card already carries and never
+    moves it afterwards, so a 3 GB card shared with a local seat takes both in
+    exactly one arrangement: the embedder holds its memory, and the seat loads
+    into the rest. Measured with the seat's KV cache at q8_0, that left the
+    seat 49 of 49 layers on the GPU at unchanged speed; the other way round,
+    the embedder found 11 MiB free and failed. A run's first search is inside
+    the Planner's node, after the previous run's seat may still be loaded --
+    so the placement is made here, before the corpus phase, which then embeds
+    on the card too.
+
+    When the card is full because a seated model is still loaded, that model
+    is unloaded first (`unload_local_seat_models`) and reloads around the
+    embedder on its next call. That happens once per server rather than once
+    per run: an embedder already on its card is left there.
+
+    Silent on `cpu`, and opens nothing there: a CPU embedder has no order to
+    get right, and the setting is the machine's, which the header reports.
+    Never raises; a failure leaves the embedder on the CPU and the run goes on.
+    """
+    where = embedding_device_status()
+    if where["configured"] in ("cpu", "ollama"):
+        # Nothing to order: a CPU embedder takes no card, and an Ollama one is
+        # placed by the daemon.
+        return {"source": where["configured"]}
+    if RUN_CONTROL.stopped():
+        return {"source": "stopped"}
+    kb_or_none = _open_kb()
+    if kb_or_none is None:
+        # Nothing indexed yet, so nothing searches before the corpus phase
+        # builds the store -- and that phase embeds, which loads the model onto
+        # the card by itself.
+        return {"source": "no_corpus"}
+    if where["active"] != where["configured"]:
+        # Said before the work, for the reason the corpus phase says its line
+        # first: a load plus an unload takes a while, and `running` with no
+        # node and no message is what a wedged run looks like.
+        with _run_lock:
+            _run_progress["messages"] = [
+                f"[Embedder] Placing the embedding model on {where['configured']} "
+                "before the run starts."
+            ]
+    try:
+        return kb_or_none.claim_embedding_device(make_room=unload_local_seat_models)
+    except Exception as exc:
+        return {"source": "error", "configured": where["configured"], "note": str(exc)}
+
+
+def _embedder_feed_line(report: dict[str, Any]) -> str | None:
+    """A line only when placing the embedder did something worth knowing.
+
+    Silence is right here most of the time, unlike the corpus line: where the
+    embedder runs is on the console header on every poll, and an embedder
+    already on its card did nothing this run. What the header cannot say is
+    that a seat was unloaded to make room -- which is why that seat's next call
+    is slow -- or why a card was refused.
+    """
+    source = report.get("source")
+    if source == "claimed":
+        unloaded = report.get("unloaded") or []
+        room = ""
+        if unloaded:
+            one = len(unloaded) == 1
+            room = (
+                f" {', '.join(unloaded)} {'was' if one else 'were'} unloaded to make "
+                f"room, and {'reloads' if one else 'reload'} around it on the next call."
+            )
+        return f"[Embedder] Loaded onto {report.get('device')} before the seats open.{room}"
+    if source == "unavailable":
+        return (
+            f"[Embedder] {report.get('configured')} could not take the embedding model, "
+            f"so it runs on the CPU: {report.get('note')}"
+        )
+    if source == "error":
+        return (
+            f"[Embedder] The embedding model could not be placed: {report.get('note')}. "
+            "It loads when first needed, on the CPU if the card still refuses."
+        )
+    return None
+
+
+def _calibrate_the_floor_before_the_run(corpus_report: dict[str, Any]) -> dict[str, Any]:
+    """Take the active model's relevance floor, the first time its corpus is whole.
+
+    MiniLM's floor was measured by hand and is never re-measured here. Any
+    other model has none until its corpus exists, and without one retrieval
+    cannot tell an answer from noise -- `_gather_research` hands every search
+    to the Researcher's model and the Planner gets no project map. So the run
+    that finishes a model's corpus measures its floor before any seat
+    searches, with the questions `calibrate_relevance_floor` keeps out of the
+    corpus, and the measurement is kept beside that corpus from then on.
+
+    Skipped when the corpus phase did not leave a whole corpus: a stopped or
+    failed build would calibrate against a fraction of the project.
+    """
+    model = active_embedding_model()
+    if model == EMBEDDING_MODEL_NAME or floor_calibration(model) is not None:
+        return {"source": "known", "model": model}
+    if RUN_CONTROL.stopped() or corpus_report.get("stopped"):
+        return {"source": "stopped", "model": model}
+    if corpus_report.get("source") in ("error", "nothing_to_index"):
+        return {"source": "no_corpus", "model": model}
+    kb_or_none = _open_kb()
+    if kb_or_none is None or corpus_state()[0] != "indexed":
+        return {"source": "no_corpus", "model": model}
+    with _run_lock:
+        _run_progress["messages"] = [
+            f"[Embedder] Measuring a relevance floor for {model} on its corpus "
+            "before the run starts."
+        ]
+    try:
+        record = calibrate_relevance_floor(kb_or_none)
+    except Exception as exc:
+        return {"source": "error", "model": model, "note": str(exc)}
+    return {"source": "calibrated", **record}
+
+
+def _calibration_feed_line(report: dict[str, Any]) -> str | None:
+    """Said when a floor was measured or could not be: the outcomes that change retrieval."""
+    source = report.get("source")
+    model = report.get("model")
+    if source == "calibrated":
+        answered = report.get("answered") or [0.0]
+        unanswerable = report.get("unanswerable") or [0.0]
+        span = (
+            f"questions the corpus answers scored from {min(answered):.3f}, questions "
+            f"it cannot up to {max(unanswerable):.3f}"
+        )
+        if report.get("floor") is None:
+            return (
+                f"[Embedder] {model} left no gap between the two populations ({span}), "
+                "so it has no relevance floor: the Researcher's model answers every "
+                "search and the Planner gets no project map."
+            )
+        return (
+            f"[Embedder] Measured a relevance floor for {model}: {span}, so retrieval "
+            f"over {report['floor']:.3f} counts as an answer."
+        )
+    if source == "error":
+        return (
+            f"[Embedder] The relevance floor for {model} could not be measured: "
+            f"{report.get('note')}. Until it is, the Researcher's model answers every "
+            "search."
+        )
+    return None
 
 
 def _index_the_project_before_the_run() -> dict[str, Any]:
@@ -817,26 +1177,43 @@ def _index_the_project_before_the_run() -> dict[str, Any]:
     # the console. This is the same reason `#run-live` names the last stage
     # instead of only counting seconds. A rebuild that changes nothing
     # overwrites this line in under a second and nobody ever reads it.
+    model = active_embedding_model()
     with _run_lock:
         _run_progress["messages"] = [
-            f"[Corpus] Checking {len(files)} project file(s) against the corpus "
-            "before the run starts."
+            f"[Corpus] Checking {len(files)} project file(s) against the {model} "
+            "corpus before the run starts."
         ]
+
+    def progress(done: int, total: int) -> None:
+        # Rewritten in place as the phase goes, so a build that takes hours --
+        # any model but MiniLM -- reads as moving rather than wedged.
+        with _run_lock:
+            _run_progress["messages"] = [
+                f"[Corpus] Indexing with {model}: {done} of {total} project file(s) "
+                "checked."
+            ]
 
     started = time.monotonic()
     try:
-        report = index_project_files(_kb_for_indexing())
+        report = index_project_files(
+            _kb_for_indexing(), progress=progress, should_stop=RUN_CONTROL.stopped
+        )
     except Exception as exc:
         return {"source": "error", "corpus": state, "note": str(exc)}
 
-    if state != "indexed":
+    if report.get("stopped"):
+        source = "stopped_midway"
+    elif state != "indexed":
         source = "built"
     elif report.get("embedded") or report.get("dropped"):
         source = "updated"
     else:
         source = "current"
     report.update(
-        source=source, corpus=state, elapsed_s=round(time.monotonic() - started, 1)
+        source=source,
+        corpus=state,
+        model=model,
+        elapsed_s=round(time.monotonic() - started, 1),
     )
     return report
 
@@ -908,6 +1285,14 @@ def _corpus_feed_line(report: dict[str, Any]) -> str | None:
             f"to date first: {', '.join(parts)}, {report.get('reused', 0)} "
             f"unchanged, in {report.get('elapsed_s', 0)}s.{note} The Researcher "
             "searches the project as it is now."
+        )
+    if source == "stopped_midway":
+        return (
+            f"[Corpus] Stopped while indexing with {report.get('model')}: "
+            f"{report.get('indexed', 0)} document(s) checked and "
+            f"{report.get('embedded', 0)} embedded, in {report.get('elapsed_s', 0)}s. "
+            "The next run carries on from there: what is already embedded keeps its "
+            "vectors."
         )
     if source == "nothing_to_index":
         return (
@@ -1049,7 +1434,18 @@ def _research_feed_line(report: dict[str, Any]) -> str:
 def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     """Run a goal through the four-agent loop and return the final state."""
     run_id = uuid.uuid4().hex
-    goal = str(params.get("goal", ""))
+    goal = _str_param(params, "goal")
+    # Refused before the lock is claimed or the corpus touched. A blank goal
+    # otherwise indexed the project and put four seats to work on nothing, and
+    # only the console's own textarea stood in the way -- `/api/run` and any
+    # other caller went straight through.
+    if not goal.strip():
+        raise ValueError("A run needs a goal, and this one was empty.")
+    # Parsed before anything is claimed, so a refused flag never leaves a run
+    # armed with nothing behind it.
+    discuss_only = _bool_param(params, "discuss_only")
+    research_web = _bool_param(params, "research_web")
+    expect_failures = _bool_param(params, "expect_failures")
 
     # One run at a time, said out loud. The server already assumed it --
     # `_run_progress` is a single global -- and the console could break the
@@ -1075,6 +1471,15 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             stopping=False,
         )
 
+    # The embedder goes onto its card before anything else: the corpus phase
+    # embeds, and a local seat has to be fitted around the embedder rather than
+    # the embedder squeezed in beside the seat -- see
+    # `_claim_the_embedder_before_the_run`.
+    embedder_report = _claim_the_embedder_before_the_run()
+    embedder_line = _embedder_feed_line(embedder_report)
+    if embedder_line:
+        print(f"[run] embedder -> {embedder_line}")
+
     # The corpus first, then online research, then the Architect opens. Both
     # phases write to the corpus and both run outside `graph.stream`, because
     # `_refuse_while_a_run_is_in_flight` forbids every other writer from
@@ -1086,6 +1491,14 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     if corpus_line:
         print(f"[run] corpus -> {corpus_line}")
 
+    # A model other than MiniLM has no relevance floor until its corpus is
+    # whole, so it is measured here: after the corpus phase, before any seat
+    # searches.
+    calibration_report = _calibrate_the_floor_before_the_run(corpus_report)
+    calibration_line = _calibration_feed_line(calibration_report)
+    if calibration_line:
+        print(f"[run] calibration -> {calibration_line}")
+
     # Online research is off unless the caller asks, the same shape as
     # `expect_failures` below and for the same reason: what this turns on
     # cannot be judged from the goal. A discussion run never researches online
@@ -1093,13 +1506,16 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     # embeds them, which is a change to this machine and to every later run's
     # corpus. "No actions" has to mean that too, so the two flags are resolved
     # here rather than left to the operator to keep consistent.
-    discuss_only = bool(params.get("discuss_only", False))
     research_report = _research_online_before_the_run(
-        goal, bool(params.get("research_web", False)) and not discuss_only
+        goal, research_web and not discuss_only
     )
     research_line = _research_feed_line(research_report)
     print(f"[run] research -> {research_line}")
-    opening = [line for line in (corpus_line, research_line) if line]
+    opening = [
+        line
+        for line in (embedder_line, corpus_line, calibration_line, research_line)
+        if line
+    ]
     with _run_lock:
         _run_progress["messages"] = list(opening)
 
@@ -1120,13 +1536,16 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         "blockers": "",
         "files_changed": [],
         "failed_verification": [],
+        "unverified": [],
+        "builder_cut_off": "",
+        "lint_failed": [],
         # Opt-out for goals whose product is a file that does not run. Off
         # unless the caller asks, so the default stays strict. Untouched by the
         # stop: a file nobody executed is unproven, not expected-to-fail, and
         # goes on blocking approval either way.
-        "expect_failures": bool(params.get("expect_failures", False)),
-        # Reasoning without acting: the Builder is offered read-only tools
-        # alone. Set by the caller, never by an agent.
+        "expect_failures": expect_failures,
+        # Reasoning without acting: the Builder is offered no tools at all.
+        # Set by the caller, never by an agent.
         "discuss_only": discuss_only,
         "step_count": 0,
     }
@@ -1223,6 +1642,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             elapsed_s=elapsed,
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             web_research=research_report,
+            embedder=embedder_report,
         )
         _save_snapshot(payload)
         return payload
@@ -1239,6 +1659,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             error=str(exc),
             web_research=research_report,
+            embedder=embedder_report,
         )
         _save_snapshot(payload)
         raise
@@ -1253,6 +1674,7 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "duplicate_entities": rpc_duplicate_entities,
     "list_documents": rpc_list_documents,
     "query_graph": rpc_query_graph,
+    "graph_overview": rpc_graph_overview,
     "search_documents": rpc_search_documents,
     "upload_document": rpc_upload_document,
     "export_corpus": rpc_export_corpus,
@@ -1261,6 +1683,8 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "set_seat": rpc_set_seat,
     "set_thinking": rpc_set_thinking,
     "llm_options": rpc_llm_options,
+    "embedding_options": rpc_embedding_options,
+    "set_embedding_model": rpc_set_embedding_model,
     "status": rpc_status,
     "run_goal": rpc_run_goal,
     "run_progress": rpc_run_progress,
@@ -1280,6 +1704,7 @@ QUIET_METHODS = {
     "rag_stats",
     "list_seats",
     "llm_options",
+    "embedding_options",
     "run_progress",
 }
 
@@ -1305,11 +1730,28 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        length = int(self.headers.get("Content-Length", 0))
+        # A body whose length is unusable is refused before it is read, and one
+        # that is not a JSON object after. `data.get` on a list or a string
+        # raised in `handle_rpc` ahead of its error handling, so a body of `[]`
+        # came back as a dropped connection and a traceback in the log.
         try:
-            data: dict[str, Any] = json.loads(self.rfile.read(length)) if length else {}
-        except json.JSONDecodeError:
-            self.send_json({"error": {"message": "bad JSON"}, "elapsed_ms": 0})
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._refuse("Content-Length is not a number.")
+            return
+        if not 0 <= length <= MAX_REQUEST_BYTES:
+            self._refuse(
+                f"A request body is limited to {MAX_REQUEST_BYTES:,} bytes; "
+                f"this one declared {length:,}."
+            )
+            return
+        try:
+            data = json.loads(self.rfile.read(length)) if length else {}
+        except ValueError:  # bad JSON, or bytes that are not UTF-8
+            self._refuse("bad JSON")
+            return
+        if not isinstance(data, dict):
+            self._refuse("The request body must be a JSON object.")
             return
 
         if parsed.path == "/rpc":
@@ -1339,9 +1781,21 @@ class Handler(SimpleHTTPRequestHandler):
         Errors come back as a 200 with an `error` member rather than an HTTP
         status: the console renders them into its telemetry log, and a failed
         method is not a failed request.
+
+        The reply is written apart from the method's outcome, because the caller
+        can be gone by then without anything having failed. A console reloaded
+        mid-run drops the request that started the run and reattaches through
+        `run_progress` -- a supported path; the run still finishes and saves its
+        snapshot. With the write inside the same `try`, the closed socket was
+        caught as the method failing: the log read `run_goal FAILED ... Broken
+        pipe` for a run that had ended cleanly, then carried two tracebacks,
+        because the error reply hit the same socket.
         """
         method = str(data.get("method", ""))
         params = data.get("params") or {}
+        if not isinstance(params, dict):
+            self._refuse("params must be a JSON object.")
+            return
         started = time.perf_counter()
 
         handler = RPC_METHODS.get(method)
@@ -1354,16 +1808,32 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             result = handler(params)
             elapsed = int((time.perf_counter() - started) * 1000)
+            # Encoded inside the `try`, so a result that will not serialise is
+            # still reported as this method failing.
+            payload = self._encode({"result": result, "elapsed_ms": elapsed})
             if method not in QUIET_METHODS:
                 print(f"[RPC] {method} {elapsed}ms")
-            self.send_json({"result": result, "elapsed_ms": elapsed})
         except Exception as exc:
             elapsed = int((time.perf_counter() - started) * 1000)
             print(f"[RPC] {method} FAILED {elapsed}ms: {exc}")
-            self.send_json({"error": {"message": str(exc)}, "elapsed_ms": elapsed})
+            payload = self._encode({"error": {"message": str(exc)}, "elapsed_ms": elapsed})
+
+        try:
+            self._send_payload(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            print(f"[RPC] {method}: the caller disconnected before the reply was sent")
+
+    def _refuse(self, message: str) -> None:
+        self.send_json({"error": {"message": message}, "elapsed_ms": 0})
+
+    @staticmethod
+    def _encode(obj: Any) -> bytes:
+        return json.dumps(obj, default=str).encode()
 
     def send_json(self, obj: Any) -> None:
-        payload = json.dumps(obj, default=str).encode()
+        self._send_payload(self._encode(obj))
+
+    def _send_payload(self, payload: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))

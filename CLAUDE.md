@@ -50,6 +50,7 @@ python example_usage.py
 │   ├── graph.py               # StateGraph wiring + conditional edges
 │   ├── control.py             # RUN_CONTROL: the emergency stop signal
 │   ├── graphrag_server.py     # GraphRAG MCP server (knowledge graph + vector store)
+│   ├── embedding_calibration.json # Floor questions for a new embedding model (JSON: never indexed)
 │   ├── mcp_client.py          # MCP client / local tool bindings
 │   ├── lexical.py             # BM25 + rank fusion: the lexical half of search
 │   ├── web_research.py        # Online research: keyless search, our own selection gate
@@ -65,6 +66,7 @@ python example_usage.py
 ├── src/quisce/                # QuICSE engine prototype. Ships in the
 │   ├── quisce_engine.py       #   distribution, imported by nothing here --
 │   ├── baseline.py            #   see the note below the tree
+│   ├── spectral_analysis.py
 │   └── test_harness.py
 ├── prompts/
 │   ├── architect.txt          # System prompt (loaded by nodes.py)
@@ -82,6 +84,8 @@ python example_usage.py
 │   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
 │   ├── test_chunking.py       # Document chunking, chunk ids, search collapse
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
+│   ├── test_embedding_device.py # Where the embedder runs, and a card that says no
+│   ├── test_embedding_models.py # Switching models: its own corpus, backend and floor
 │   ├── test_mcp_tools.py      # Builder tool belt
 │   ├── test_imports.py        # Pins the package's public surface
 │   ├── test_lexical.py        # BM25, rank fusion, the relevance floor
@@ -94,6 +98,7 @@ python example_usage.py
 │   ├── test_corpus_staleness.py   # Corpus vs disk, and not crying wolf
 │   ├── test_graph_queries.py  # Undirected traversal of the knowledge graph
 │   ├── test_research_length.py # How much retrieved evidence reaches the Builder
+│   ├── test_rpc_params.py     # RPC parameters: typed, bounded, refused by name
 │   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── verify_and_test.py     # Manual verification runner
@@ -117,14 +122,21 @@ python example_usage.py
 
 ### `src/quisce/` is a prototype, and nothing here depends on it
 
-Roughly 960 lines: `quisce_engine.py`, a `baseline.py` to measure it against,
-and a `test_harness.py`. Three facts about it are worth knowing before anyone
-edits or removes it, because none is visible from the code.
+Roughly 1,600 lines: `quisce_engine.py`, a `baseline.py` to measure it against,
+a `test_harness.py`, and `spectral_analysis.py`, which an agent run added on
+2026-09-12 to wrap the root-level `spectral_graph` package in a
+`SpectralAnalyzer`. Three facts about it are worth knowing before anyone edits
+or removes it, because none is visible from the code.
 
 It **ships**. `[tool.setuptools.packages.find]` says `where = ["src"]`, so
 `pip install` puts `quisce` on the path beside `langgraph_agent` -- unlike
 `spectral_graph/`, which lives at the root precisely so it does not. Importing
-it pulls in torch, which is why nothing imports it at module scope.
+it pulls in torch, which is why nothing imports it at module scope. The two
+facts now collide: `spectral_analysis.py` reaches `spectral_graph` by putting
+the checkout root on `sys.path` when it is imported -- which importing `quisce`
+does, since `__init__.py` re-exports it -- so it works from a checkout and
+nowhere else. Installed elsewhere, `SPECTRAL_GRAPH_AVAILABLE` is False and
+`analyze()` raises `RuntimeError`.
 
 Nothing in this project imports it at all, and no test covers it. The pytest
 suite does not touch it, and CI reaches it only through `ruff`, which lints
@@ -196,6 +208,9 @@ Every node reads/writes `AgentState`:
     "blockers": str,
     "files_changed": list[str],
     "failed_verification": list[str],
+    "unverified": list[str],
+    "builder_cut_off": "" | "turn_cap" | "deadline",
+    "lint_failed": list[str],
     "expect_failures": bool,
     "discuss_only": bool,
     "step_count": int,
@@ -278,6 +293,16 @@ takes one document per call, so one PDF among the markdown fails on its own
 instead of taking the batch down. The `/api/*` routes are compatibility wrappers over
 the same functions — `launch_console.sh` polls `/api/status` as its readiness
 check, so it must keep working.
+
+Parameters are typed and bounded, and refused by name (`_int_param`,
+`_float_param`, `_bool_param`, `_str_param`), and every method parses before it
+touches anything. They used to go through a bare `int()` or `bool()`:
+`top_k="abc"` answered with Python's own "invalid literal for int()", a negative
+`top_k` with an empty result the console showed as "no results", and the string
+"false" became True -- on `research_web` that fetches and permanently embeds
+pages. A body that is not a JSON object, `params` that are not one, an unusable
+`Content-Length` or one past `MAX_REQUEST_BYTES` get an error envelope instead
+of the traceback and dropped connection a body of `[]` used to cause.
 
 `run_goal` blocks its own HTTP thread for the whole run, which is why the server
 is a `ThreadingHTTPServer` — `stop_run` and `run_progress` are served on other
@@ -466,22 +491,43 @@ four the moment this file described the problem.
   `files_changed` is: the Builder's account of its own work is not evidence.
   A file clears only by running clean: files that failed on an earlier pass are
   re-verified even when the current pass did not touch them, because otherwise
-  the Builder retires a failure by doing nothing. Two paths are exempt. The
-  first is a carried path that no longer exists on disk — deleting the file is
-  a real fix,
+  the Builder retires a failure by doing nothing. One path is exempt: a
+  carried path that no longer exists on disk — deleting the file is a real fix,
   and re-running a missing path fails forever, which pinned
   `failed_verification` open and made the gate rewrite every `approved` to
   `revise` until the step ceiling. That exception applies only to carried
   paths; a path in `files_changed` was just written by a tool that reported
-  success. The second is a **module inside a package** (`_is_package_module`:
-  its directory has an `__init__.py`). `python pkg/mod.py` puts `pkg/` on
-  `sys.path` instead of the project root, so a module importing its own package
-  absolutely — the normal way to write one — raises `ModuleNotFoundError`
-  however correct it is; executing it proves nothing and produces a failure no
-  edit to the file can clear. Such a file is reported `SKIPPED`, not passed:
-  the report says how many were skipped and that a package module only proves
-  itself through a root-level script that imports it. Those scripts are
-  ordinary files and still get executed.
+  success.
+  **A module inside a package is imported, not executed, and it used to be
+  skipped.** `python pkg/mod.py` puts `pkg/` on `sys.path` instead of the
+  directory above it, so a module importing its own package absolutely — the
+  normal way to write one — raises `ModuleNotFoundError` however correct it
+  is. Such a file was reported `SKIPPED`, and a skip proves nothing: on
+  2026-09-12 a run whose only products were two package modules was approved
+  as "complete and verified" with neither ever executed. `_import_target` now
+  finds the directory above the outermost package and the dotted name, and the
+  file is verified the way its callers use it — `python -c "import pkg.mod"`
+  with that directory prepended to `PYTHONPATH` — reading `imported clean` or
+  `FAILED`. An import runs the module's syntax, its imports and its
+  module-level code. Its `__main__` block is deliberately not run: in a package
+  that is a CLI or a server, and its wait would be reported as a hang. A package
+  directory whose name is not a valid module name cannot be imported at all, so
+  its files are executed as scripts like any other.
+- **What the Builder writes is linted the way CI lints it.** Running a file
+  proves it does not raise; it says nothing about whether CI accepts it. The
+  module an agent run wrote on 2026-09-12 imported, ran and was approved -- and
+  carried 103 ruff errors, so its first push would have failed.
+  `_lint_written_files` runs `ruff check` over every Python file a pass wrote
+  or carried, with the project's own configuration, before those files are
+  executed. ruff fixes only what cannot change behaviour
+  (`LINT_AUTOFIX_RULES`: trailing whitespace, a missing final newline, import
+  order), which was 60 of those 103; the rest is the Builder's, because a fix
+  ruff marks "safe" can still delete an import kept for its side effect. What is
+  left lands in `lint_failed`, is re-linted on every later pass until it is
+  clean, and blocks approval whatever `expect_failures` says -- CI lints a
+  fixture meant to fail at runtime all the same. A machine without ruff says so
+  in the report and blocks nothing, since a missing linter is not a defect in
+  the file.
 - **Verification runs headless, and never with a keyboard.** The subprocess
   gets `MPLBACKEND=Agg` with `DISPLAY`/`WAYLAND_DISPLAY` removed
   (`HEADLESS_VERIFY_ENV`), and `stdin` closed. Both are about the same
@@ -522,6 +568,25 @@ four the moment this file described the problem.
   all answer with nothing, while `qwen3.5:397b-cloud` and `kimi-k3:cloud`
   answer in full. Re-run it before changing the seat rather than trusting that
   list, which is one machine on one day.
+- **The Planner sees a map of the project before it plans.** It used to plan
+  from the goal and the Architect's direction alone, so it could name no file
+  the goal did not -- and `_gather_research` searches on `plan`, so a plan
+  naming nothing retrieves nothing in particular. `_project_map` hands it the
+  files the corpus ranks closest to the goal, a short excerpt each, only above
+  `RETRIEVAL_RELEVANCE_FLOOR`. It is context, like the state injection, so the
+  Planner still calls no tool. Measured on 2026-09-12 with the local 9B seat,
+  three goals each way: without the map no plan named a project file, and one
+  listed the Planner's own instructions as its steps; with it, the
+  seat-timeout goal was planned against `config.py`, `mcp_client.py` and
+  `nodes.py`. The two UI goals still named none, because that corpus had not
+  yet indexed `frontend/index.html` -- the map is exactly as good as
+  retrieval. `tests/conftest.py` switches it off (`PLANNER_PROJECT_MAP`), so no
+  planning test reads the developer's corpus.
+  The Builder's section is `## Blockers` now, not `## Next Steps / Blockers`
+  -- a heading that invites next steps gets them -- and on a discussion run
+  whatever it writes there stays in its report rather than in `blockers`. A run
+  that cannot act cannot be blocked, and "requires approval from the
+  Architect" had sat in the recovery block as though the run were stuck.
 - **The opening cycle always reaches the Researcher, and the Planner's routing
   stands on every cycle after it.** `_route_from_planner` overrides a first-hop
   `Builder` because the alternative was not a run that researched less -- it was
@@ -631,6 +696,31 @@ four the moment this file described the problem.
   second account of the same corpus, free to disagree with it. A store that
   cannot answer `get` falls back to dense-only instead of raising: the lexical
   half improves an ordering that is already correct without it.
+- **Every retrieved passage says where it came from, and the log says only what
+  matters.** The findings the Builder is handed named no file at all, and each
+  passage began wherever a chunk boundary fell -- "in self.graph: neighbors =
+  ..." -- so the Builder was given code it could not open the file of. `search`
+  now reads each hit's file and anchors the passage (`_passage_location`): its
+  1-based `line`, and the text from the start of that line. A file edited since
+  it was indexed gets no line rather than a guessed one, and a minified line is
+  not reached back into. The findings put `path:line` above every passage, and
+  the Retrieval tab shows the same.
+  A loose node id resolves by rank -- the id ignoring case, a document by file
+  name, a prefix, a substring, the shorter id first -- where it used to take the
+  first node containing the text in enumeration order, so the same query could
+  trace a different node after a reindex. `neighborhood` and `query_graph`
+  return `resolved_from` and `alternatives` whenever the id typed was not the
+  id found.
+  The server log held 1,772 lines on 2026-09-12: 1,177 were a sweep's
+  per-document `query_graph` calls (see *a sweep is one call*), 84 were HTTP
+  requests logged at INFO -- every call to Ollama and to huggingface.co -- and
+  33 were embedding progress bars. The MCP SDK's constructor runs
+  `logging.basicConfig` at the level its server is built with, so importing
+  `graphrag_server` switched every library's INFO on; the server is built at
+  WARNING now, and `encode` is told `show_progress_bar=False`. The embedding
+  model loads from the local cache first, so a warm start asks huggingface.co
+  nothing, and a machine without a network still embeds once the model is on
+  disk.
 - **The Builder gets the whole retrieved passage, from every result.**
   `RESEARCH_RESULTS` feeds both the `top_k` the Researcher asks for and the
   slice it forwards, so the two cannot drift: the search used to request five
@@ -656,18 +746,26 @@ four the moment this file described the problem.
   in the text (`_research_snippet`), for the reason `_fit_to_index_limit`
   writes its note onto the page: a silent trim is indistinguishable from a
   source that had nothing more to say, and the Builder cannot ask.
-- **A failed verification blocks approval.** `failed_verification` carries the
-  paths, and the Architect rewrites its own `approved` to `revise` while that
-  list is non-empty — the one place the gate's ruling is overridden. The step
-  ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot hang
-  it. The cost is real: a goal that legitimately wants a failing file (a
-  deliberate fixture, an expected-to-fail test) can no longer be approved and
-  will run to one of those limits — unless the run opts out.
+- **Work without evidence cannot be approved.** The Architect's `approved` is
+  rewritten to `revise` — the one place the gate's ruling is overridden — while
+  any of three things holds: a file in `failed_verification` that ran and
+  failed; a file in `unverified`, which nobody executed; or a Builder pass cut
+  off before it finished (`builder_cut_off`: `turn_cap` or `deadline`). The
+  step ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot
+  hang it. The last two were missing until 2026-09-12, and both let unchecked
+  work through. The gate held one list and cleared all of it under
+  `expect_failures`, unrun files included — against the rule below that the
+  opt-out never excuses an unrun file. And a Builder stopped at its tool-turn
+  cap, with a blocker saying so, was approved as "complete and verified". The
+  cost is real: a goal that legitimately wants a failing file (a deliberate
+  fixture, an expected-to-fail test) cannot be approved without the opt-out,
+  and work too large for one pass is not approved until a pass finishes it.
 - **`expect_failures` is the per-run opt-out**, set by the caller (the console
   checkbox, or `run_goal({goal, expect_failures: true})`) and never by an
   agent. It suppresses the block, not the check: the file is still executed,
   still reported as `FAILED`, and still listed in `failed_verification`. It
-  just stops overruling the gate and sets no blocker. It is per-run rather
+  just stops that file overruling the gate and sets no blocker — a file nobody
+  executed, or a pass cut off before it finished, still blocks. It is per-run rather
   than per-file because the Builder chooses the filenames, so a run with it on
   will not block on an unintended failure either — which is why the failure
   stays visible in the report instead of being dropped. Defaults off.
@@ -1325,7 +1423,99 @@ four the moment this file described the problem.
   `search` embed; counting the corpus, listing its documents, drawing its graph
   and exporting it do not, and those are what the console does on a timer.
   Loading it in `__init__` meant every header poll paid for the model and
-  importing the module pulled in torch behind it.
+  importing the module pulled in torch behind it. A machine that names a card
+  also loads it at the start of a run, on purpose; the next bullet is why.
+- **The embedder can run on a card, and beside a local seat on a 3 GB card
+  only one arrangement works.** `EMBEDDING_DEVICE` is `cpu` by default, or a
+  card numbered the way `nvidia-smi` numbers cards (`cuda:1`). It is worth
+  having where it fits: a full index of 2,446 passages measured 81.0s on this
+  machine's CPU and 17.0s on a GTX 1060. The CPU pin it replaces (commit
+  `2e8230c`) gave two reasons, and measurement kept one. *A build with no
+  kernels for the card still reports CUDA available* -- the 2026-09-10
+  `+cu130` venv -- so a named card is proven with a real encode
+  (`_warm_to_peak`) and the CPU takes over when it refuses. *A 3 GB card is
+  wanted whole for the seat* is true of the seat as it was configured and
+  false of the seat with its KV cache at q8_0. Measured on 2x GTX 1060 3GB
+  with Ollama's own `llama-server` arguments and fit target:
+
+  | arrangement | seat layers on GPU | generation | prompt reading |
+  |---|---|---|---|
+  | seat alone, f16 KV | 49/49 | 19.8 tok/s | 162.6 tok/s |
+  | embedder + seat, f16 KV | 47/49 | 16.3 | 97.2 |
+  | seat alone, q8_0 KV | 49/49 | 19.8 | 159.3 |
+  | embedder + seat, q8_0 KV | **49/49** | **19.7** | **154.8** |
+
+  The q8_0 half lives outside this repository, in Ollama's systemd drop-in
+  beside `LLAMA_ARG_FIT_TARGET` (`LLAMA_ARG_CACHE_TYPE_K=q8_0` and
+  `LLAMA_ARG_CACHE_TYPE_V=q8_0`), which is why it is written down here:
+  `journalctl -u ollama | grep "KV buffer"` reads about 102 MiB a card with it
+  and 192 without.
+  Four decisions in it are not interchangeable with the obvious alternatives.
+  *The embedder is placed before the seat loads, at the start of every run*
+  (`_claim_the_embedder_before_the_run`), because llama.cpp fits a model
+  around what a card already holds and never moves it: loaded second, the
+  embedder found 11 MiB free and failed. A lazy load cannot promise that
+  order -- a run's first search is inside the Planner's node, and the previous
+  run's seat may still be loaded -- so a card full of a seated model has that
+  model unloaded first (`unload_local_seat_models`), and it reloads around the
+  embedder on its next call. That is once per server, not once per run.
+  *Batches are capped* (`EMBEDDING_BATCH_SIZE` is 8): the library's 32 was no
+  faster on either device, and its 406 MiB peak cost the seat a layer -- 48/49,
+  prompts at 98 tok/s. *The warm-up encodes mixed lengths*, so the pool the
+  seat is fitted around is the one an index uses: one full-window batch
+  reserved 148 MiB, the mix 154, and a real index then peaked at 166 either
+  way; padding the pool to 176 up front was tried and ended at 182. *And a
+  full card is asked again where a card without kernels is not* -- the first
+  clears when a seat lets go, the second never will, and asking it would
+  unload a seat on every run for nothing.
+  An out-of-memory in the middle of an index finishes that encode on the CPU
+  (`_encode`) rather than reaching `index_project_files` as a per-file error,
+  which would skip the document and call the rebuild a success. The
+  import-time `CUDA_VISIBLE_DEVICES=""`, there since 2026-08-31, stays for
+  `cpu` and is gone for a card, because it hid the named card as well. The
+  header's embedding line names the device once something has embedded, and
+  turns red, with the reason on hover, when the model fell back to the CPU.
+- **The embedding model is chosen in the console, and a model is more than a
+  name here.** The Crew panel's embedder card switches between MiniLM, which
+  runs in this process, and every tag the Ollama daemon says can embed
+  (`rpc_embedding_options` asks the daemon's capabilities, the way the seat
+  cards ask about thinking). The choice lasts until the server restarts, like a
+  seat's, and `EMBEDDING_MODEL` sets the default. Measured before it was built,
+  on 2x GTX 1060 3GB, for the one other embedding model on this machine:
+  `qwen3-embedding:latest` is 7.6B parameters and 4,096 dimensions, took 7,117
+  MiB of which Ollama put 5,516 on the cards, and embedded 24 median passages
+  in 101s. That is 0.24 passages/s -- about 2.9 hours to build this project's
+  corpus, against MiniLM's 17s -- and at that size it cannot share two 3 GB
+  cards with the local 9B at all.
+  Four decisions follow from what a model is. *Every model has its own
+  corpus* (`persist_dir_for`): vectors from two models share no space, and a
+  corpus built with one and searched with another answers with noise that
+  still scores. MiniLM keeps `knowledge/`; any other model gets a directory
+  under `knowledge/models/`, inside the directory the walk already excludes.
+  Switching builds nothing -- the next run does, the one act allowed to bring a
+  corpus into being -- and it is refused mid-run, because switching models is
+  switching corpora. *Every model chunks with MiniLM's tokenizer*
+  (`OllamaEmbedder`): the chunker needs a tokenizer in this process, MiniLM's
+  loads from the cache alone with offsets identical to the full model's, and
+  keeping every corpus's passages at the same 254 tokens -- far inside a
+  40,960-token window -- means passage size, and what was tuned against it,
+  does not move with the model. *A floor is measured per model and never
+  borrowed* (`relevance_floor`, `calibrate_relevance_floor`):
+  `RETRIEVAL_RELEVANCE_FLOOR` is MiniLM's, and a cosine means nothing across
+  models. The run that finishes a model's corpus asks twelve questions it
+  answers and twelve it cannot, and puts the floor in the middle of the gap;
+  checked against MiniLM first, those questions separated it at 0.503-0.715
+  against 0.156-0.369, with the hand-measured floor inside the gap. A model
+  that leaves no gap gets no floor, and then `_gather_research` hands every
+  search to the Researcher's model and the Planner gets no map, rather than a
+  number that misfiles some question silently. The questions live in
+  `embedding_calibration.json` because the walk does not index JSON: anywhere
+  the corpus reads, the unanswerable ones would be answered by their own text.
+  *And a long build says how far it has got and stops when asked*
+  (`index_project_files` takes `progress` and `should_stop`, the second asked
+  between files and between Ollama batches): hours behind one unchanging line
+  read as wedged. A stopped build is finished by the next run rather than
+  repeated, because what is already embedded keeps its vectors.
 - **Online research costs nothing, and that is a constraint rather than a
   happy accident.** `web_research` reaches the internet through DuckDuckGo's
   keyless HTML endpoint, or a SearxNG instance the operator hosts
@@ -1469,6 +1659,26 @@ four the moment this file described the problem.
   the only place an entity-extraction regression shows at all. So
   `connectivity()` excludes them and reports `web_documents` alongside, because
   15 permanent false isolates would bury the one reading that matters.
+- **The console, its launchers and its config are in the corpus, and none of
+  them votes on entities.** `PROJECT_INDEX_PATTERNS` read only `.py`, `.md`,
+  `.txt` and `.rst`, so `frontend/index.html` -- the console itself -- could not
+  be retrieved, and asked about the Corpus tab a discussion Builder proposed
+  changes to "a React/Vue/Angular component" the project does not have.
+  Measured on 2026-09-12 by embedding that file's passages against five
+  questions about the console: it would rank first on three -- "how does the
+  console reattach to a run after a page reload" at 0.644 against a best of
+  0.426 -- and lifts one question the corpus could not answer at all over the
+  relevance floor, 0.308 before and 0.383 after. So `.html`, `.js`, `.css`,
+  `.sh`, `.toml`, `.yml`, `.yaml`, `.ini` and `.cfg` are indexed, and
+  `INDEXABLE_SUFFIXES` follows; the upload controls now take their list from
+  `status` rather than hard-coding one. None of them mints entities
+  (`ENTITY_FREE_SUFFIXES`, decided from the path like `_is_web_document`): the
+  seven such files here would add 72 entities the graph does not hold, 56 from
+  `frontend/index.html` alone, and they are JavaScript constants and the first
+  words of interface strings (`BRIDGE_VERDICTS`, `CLEAR_ARMED`, `Copying`,
+  `Dimming`). `connectivity()` leaves them out of its isolate count as it does
+  fetched pages, reporting them as `entity_free_sources`, and the claims census
+  skips them for the reason it skips web pages.
 - **The staleness verdict is withheld while a run is in flight.** The research
   phase writes each page to disk and embeds it as a separate step, so between
   those two there is a file the walk can see and the store cannot. Observed
@@ -1573,6 +1783,24 @@ four the moment this file described the problem.
   five seconds; `forget_expected_documents` drops it, and
   `rpc_upload_document` calls it because an upload is the one writer that
   changes what the walk would find.
+- **A sweep is one call, and the Graph tab is read one node at a time.** The
+  console used to assemble a sweep itself: `list_documents`, then a
+  `query_graph` per document -- 97 round trips on this corpus, each one a line
+  in the server log, before anything was drawn. Every document is always kept
+  and entities are kept by degree, so for any depth of one or more the union of
+  those neighbourhoods is exactly every document plus every entity with at
+  least `min_degree` edges. `GraphRAGKnowledgeBase.overview` computes that once
+  (`graph_overview`), and a test holds it equal to the old union. Documents
+  that share no entity with the rest -- fetched pages and entity-free sources
+  among them -- are left out of the drawing and counted. A page newer than its
+  server falls back to the per-document loop rather than drawing nothing.
+  Reading the result is the other half: labelling all 97 documents stacked the
+  middle of the canvas with overlapping text, so only the best-connected
+  (`LABELLED_DOCUMENTS`) keep a label until the view is zoomed in. The wheel
+  zooms about the pointer, the background pans, and hovering a node steps
+  everything but it and its neighbours back. Dragging a node after the layout
+  had settled moved nothing on screen -- the handler updated the model and only
+  the animation loop drew it -- so a drag now places the node itself.
 - **`query_graph` traverses undirected, and must.** Every edge in the knowledge
   graph runs **document -> entity**, so an entity has in-edges only and a
   *directed* walk from one reaches nothing. It traversed directed until
@@ -1674,7 +1902,7 @@ four the moment this file described the problem.
   discovered. The graph half is `node_link_data`, the same format
   `_save_graph` writes, so it compares directly against
   `knowledge/knowledge_graph.json`.
-- `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing.
+- `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing, and a substring also over-matches: `.git` excluded `.github/` with the object store, so the CI workflow could not be retrieved until the entry became `.git/`.
 - A seat with no credentials silently becomes `StubLLM`. `get_agent_status()` is the only thing that reports the difference — keep the chip and banner wired to it.
 - **Key presence is not liveness.** A key can authenticate and the seat still be unusable (no credits, rate limit, model not on the account). `_SeatLLM` records the real outcome of each call in `_seat_failures`, and `get_agent_status()` reports that over any static check. Never re-add a presence-only check as the sole signal.
 - `stubbed` and `live` are different failures: a stubbed seat completes the run with canned text, a failing seat kills it. The console words them differently; keep it that way.
@@ -1693,4 +1921,5 @@ four the moment this file described the problem.
 - **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus` when none has been built. A run builds one before the Architect opens, from the directory the server was started in, so the usual causes are a server started somewhere with nothing to index or `INDEX_PROJECT_BEFORE_RUN=0`. Nothing else builds one: there is no script and no install step.
 - **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
+- **Embedding runs on the CPU although `EMBEDDING_DEVICE` names a card** — Hover the header's embedding line for the reason. *No kernel image* means the torch build has no kernels for the card — this venv's `+cu126` build carries Pascal's, and the CUDA 13 build that broke it on 2026-09-10 does not — and nothing changes until the venv does. *Out of memory* means something held the card when the run placed the embedder; the next run unloads seated models and asks again, and a model loaded outside the seats is yours to unload. A local seat that got slower with the embedder on its card is a seat fitted around the embedder with an f16 KV cache: check `journalctl -u ollama | grep "KV buffer"` and `ollama ps`.
 - **Graph tab is empty** — Start a run; the corpus is rebuilt before the Architect opens. A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.

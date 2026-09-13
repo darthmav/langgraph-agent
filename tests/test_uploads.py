@@ -309,3 +309,13 @@ def test_the_method_is_registered_and_not_quiet():
     show it, the way reindex and clear do."""
     assert serve.RPC_METHODS["upload_document"] is serve.rpc_upload_document
     assert "upload_document" not in serve.QUIET_METHODS
+
+
+def test_the_console_is_told_the_accepted_suffixes():
+    """The upload pickers take their list from `status` rather than the page.
+
+    The page used to hard-code four types, and went stale the day the walk
+    learned to read the console's own markup.
+    """
+    assert serve.rpc_status({})["indexable_suffixes"] == list(INDEXABLE_SUFFIXES)
+    assert ".html" in INDEXABLE_SUFFIXES

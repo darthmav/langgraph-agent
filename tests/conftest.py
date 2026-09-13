@@ -86,3 +86,46 @@ def _no_corpus_bootstrap(monkeypatch):
     """
     import serve
     monkeypatch.setattr(serve, "INDEX_PROJECT_BEFORE_RUN", False)
+
+
+@pytest.fixture(autouse=True)
+def _no_planner_project_map(monkeypatch):
+    """No planning test searches the developer's corpus.
+
+    `_make_plan` shows the Planner the files the corpus ranks closest to the
+    goal. Left on, every test that plans would search `knowledge/` -- the real
+    one on a developer's machine and nothing at all in CI -- so a planning test
+    would pass or fail by what the checkout it ran in had indexed. The tests
+    that exercise the map turn it back on and answer the search themselves.
+    """
+    monkeypatch.setattr(_nodes, "PLANNER_PROJECT_MAP", False)
+
+
+@pytest.fixture(autouse=True)
+def _embedder_on_the_cpu(monkeypatch):
+    """No test puts the embedding model on a card.
+
+    `EMBEDDING_DEVICE` comes from the developer's environment, and on a machine
+    that names a card every test that embeds would load the model there --
+    taking memory a local seat may be using, and making results depend on
+    which machine ran the suite. The tests that exercise a card set the
+    setting themselves and answer with a fake model.
+    """
+    import langgraph_agent.graphrag_server as graphrag_server
+
+    monkeypatch.setattr(graphrag_server, "EMBEDDING_DEVICE", "cpu")
+
+
+@pytest.fixture(autouse=True)
+def _the_default_embedding_model(monkeypatch):
+    """Every test indexes and searches with MiniLM, whatever the developer chose.
+
+    `EMBEDDING_MODEL` comes from the environment, and the console's choice is a
+    process-global: either one leaking into a test would point its corpus at
+    another directory and its searches at a daemon. The tests that exercise
+    another model set it themselves and answer with fakes.
+    """
+    import langgraph_agent.graphrag_server as graphrag_server
+
+    monkeypatch.setattr(graphrag_server, "EMBEDDING_MODEL", graphrag_server.EMBEDDING_MODEL_NAME)
+    monkeypatch.setattr(graphrag_server, "_embedding_model_override", None)
