@@ -41,8 +41,8 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
     ("anthropic", "researcher"): "claude-sonnet-5",
     ("anthropic", "builder"): "claude-sonnet-5",
     ("ollama", "architect"): "qwen3.5:397b-cloud",
-    ("ollama", "planner"): "qwen3.5:397b-cloud",
-    ("ollama", "researcher"): "qwen3.5:397b-cloud",
+    ("ollama", "planner"): "kimi-k3:cloud",
+    ("ollama", "researcher"): "kimi-k3:cloud",
     ("ollama", "builder"): "qwen3.5:397b-cloud",
     ("openai", "architect"): "gpt-4o",
     ("openai", "planner"): "gpt-4o",
@@ -59,8 +59,8 @@ _DEFAULT_AGENT_MODELS: dict[tuple[str, str], str] = {
 # from the console dropdown.
 DEFAULT_SEATS: dict[str, dict[str, str]] = {
     "architect": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
-    "planner": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
-    "researcher": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
+    "planner": {"provider": "ollama", "model": "kimi-k3:cloud"},
+    "researcher": {"provider": "ollama", "model": "kimi-k3:cloud"},
     "builder": {"provider": "ollama", "model": "qwen3.5:397b-cloud"},
 }
 
@@ -387,16 +387,17 @@ def _accepts_temperature(provider: str, model: str) -> bool:
     return model.startswith("claude-3") or "-4-5" in model
 
 
-# Whether a seat thinks before it answers, until someone switches it. On,
-# because that is what the default seats were already doing: measured on
-# 2026-09-11, `qwen3.5:397b-cloud` given no flag spent 336 output tokens and
-# 4.4s answering "391" to 17*23, against 3 tokens and 1.3s told not to think --
-# and langchain_ollama discarded every token of the reasoning, so the cost was
-# paid and nothing showed it. Opus 5 and Sonnet 5 likewise think when the
-# parameter is left out. On those seats the switch makes the thinking visible
-# rather than changing it; a model that did not think by default -- Haiku 4.5
-# is one -- does now, and its card says so.
-DEFAULT_THINKING = True
+# Whether a seat thinks before it answers, until someone switches it. Off, so a
+# fresh console starts with every thinking box unticked. That is a real change
+# on the wire, not a relabelling: a switchable model is always sent the flag
+# (`_thinking_for_call`), and leaving it out means *on* for several of them.
+# Measured on 2026-09-11, `qwen3.5:397b-cloud` given no flag spent 336 output
+# tokens and 4.4s answering "391" to 17*23, against 3 tokens and 1.3s told not
+# to think -- and langchain_ollama discarded every token of the reasoning, so
+# the cost was paid and nothing showed it. Opus 5 and Sonnet 5 likewise think
+# when the parameter is left out. Tick a seat's box for the hard steps; the
+# choice lasts until the server restarts.
+DEFAULT_THINKING = False
 
 # The ceiling on a pre-4.6 Claude model's thinking, the only way those models
 # can be told to think at all. Anthropic's floor is 1024; this is kept low
@@ -770,8 +771,8 @@ def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
 
     Default seats (cloud only -- see DEFAULT_SEATS):
         Architect  -> Ollama    qwen3.5:397b-cloud (leading authority)
-        Planner    -> Ollama    qwen3.5:397b-cloud
-        Researcher -> Ollama    qwen3.5:397b-cloud
+        Planner    -> Ollama    kimi-k3:cloud
+        Researcher -> Ollama    kimi-k3:cloud
         Builder    -> Ollama    qwen3.5:397b-cloud
     """
     seat = _resolve_seat(agent)

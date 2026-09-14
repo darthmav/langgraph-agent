@@ -103,11 +103,18 @@ _prepare_cuda_environment(EMBEDDING_DEVICE, os.environ)
 # instead of 155.
 EMBEDDING_BATCH_SIZE = 8
 
-# Which embedding model builds and searches the corpus. MiniLM unless the
-# environment or the console names another, and anything but MiniLM is an
-# Ollama tag: the console offers only tags the daemon says can embed. The
+# Which embedding model builds and searches the corpus. `qwen3-embedding:latest`
+# unless the environment or the console names another, and anything but MiniLM
+# is an Ollama tag: the console offers only tags the daemon says can embed. The
 # console's choice lasts until the server restarts, the way a seat's does.
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "").strip() or EMBEDDING_MODEL_NAME
+# MiniLM stays `EMBEDDING_MODEL_NAME` rather than the default because it is
+# still loaded whichever model embeds: every corpus is chunked with its
+# tokenizer, and its relevance floor is the one measured by hand. The default
+# being an Ollama tag has two costs worth knowing on a fresh machine: the tag
+# must be pulled (`install.sh` pulls it beside the seats), and it has no floor
+# until the run that finishes its corpus calibrates one.
+DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:latest"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "").strip() or DEFAULT_EMBEDDING_MODEL
 _embedding_model_override: str | None = None
 
 

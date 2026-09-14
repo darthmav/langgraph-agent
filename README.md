@@ -75,7 +75,8 @@ on the first index or search, not at startup. It runs on the CPU unless
 `EMBEDDING_DEVICE` names a card (`cuda:1`), and beside a local seat on a small
 card that also needs the seat's KV cache at q8_0 — the Important Notes in
 `CLAUDE.md` carry the measurements. The Crew panel's embedder card switches the
-embedding model itself — MiniLM, or any Ollama model that can embed — and each
+embedding model itself — `qwen3-embedding:latest` by default, MiniLM, or any
+other Ollama model that can embed — and each
 model gets its own corpus, built by the next run, and its own relevance floor,
 measured on that corpus.
 
@@ -96,8 +97,9 @@ actually run — `NO KEY`, `FAILING`, `OFFLINE` or `NOT PULLED`.
 
 Each card also has a **thinking** checkbox: ticked, the seat's model reasons
 before it answers; unticked, it answers straight away — faster and cheaper,
-usually weaker on hard steps. It starts ticked, because the default seats were
-already thinking without saying so. The box shows what the next call will
+usually weaker on hard steps. It starts unticked, and the flag is sent either
+way, so an unticked seat is told not to think rather than left to its model's
+own default. The box shows what the next call will
 actually do, and it is grayed out when the model offers no switch: it cannot
 think (`gpt-4o`), always thinks (Claude Fable), or the Ollama daemon did not
 say — hover for which. Like a model change, it lasts until the server restarts.
@@ -154,8 +156,8 @@ Later cycles route as the Planner asks.
 | Agent | Responsibility | Default seat | Tools |
 |---|---|---|---|
 | **Architect** | Sets direction and constraints; rules `approved` / `revise` / `need_research` | `qwen3.5:397b-cloud` (ollama) | None (reasoning only) |
-| **Planner** | Turns goals into structured plans, routes next | `qwen3.5:397b-cloud` (ollama) | None (reasoning only) |
-| **Researcher** | Gathers deep, relationship-aware knowledge | `qwen3.5:397b-cloud` (ollama) | GraphRAG MCP only |
+| **Planner** | Turns goals into structured plans, routes next | `kimi-k3:cloud` (ollama) | None (reasoning only) |
+| **Researcher** | Gathers deep, relationship-aware knowledge | `kimi-k3:cloud` (ollama) | GraphRAG MCP only |
 | **Builder** | Implements the plan (writes code, edits files) | `qwen3.5:397b-cloud` (ollama) | Filesystem, Git, Terminal |
 
 Every seat is reassignable live from its dropdown in the console; selections last
@@ -218,7 +220,9 @@ ollama.com credentials for `:cloud` tags:
 
 ```bash
 ollama signin
-ollama pull qwen3.5:397b-cloud   # every seat; others optional from the console
+ollama pull qwen3.5:397b-cloud      # Architect and Builder
+ollama pull kimi-k3:cloud           # Planner and Researcher
+ollama pull qwen3-embedding:latest  # the default embedding model
 ```
 
 ### Optional OpenAI provider
