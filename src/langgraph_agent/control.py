@@ -15,6 +15,10 @@ file and a worker still writing into the project after the node returned.
 
 import threading
 import time
+from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 # Why a run ended, when the caller did not say.
 DEFAULT_STOP_REASON = "Stopped from the console."
@@ -88,6 +92,22 @@ class RunControl:
 RUN_CONTROL = RunControl()
 
 
+# How many of a run's most recent turns `NodeActivity.turns` hands back. The
+# console asks several times a second and only ever needs the last few; the
+# bound is what stops a run with dozens of supersteps growing every reply.
+TURN_RECORD = 16
+
+
+@dataclass
+class _Turn:
+    """One node's time on the stack. `ended` is None while it is still there."""
+
+    number: int
+    node: str
+    started: float
+    ended: float | None = None
+
+
 class NodeActivity:
     """Which seat is executing *right now*, for the console's seat lights.
 
@@ -104,35 +124,66 @@ class NodeActivity:
     several return paths (a stop, a deadline fallback, the ordinary one), so a
     wrapper with a `finally` is the only way a light cannot be left on by an
     exit nobody thought about.
+
+    The seat working now is not enough on its own, because the console can only
+    sample it: a poll sees the node on the stack at the instant it lands, and a
+    turn that starts and ends between two polls is never seen at all. Measured
+    through the real page with the console polling once a second, a 0.4s
+    Researcher turn never lit. So every turn is also recorded -- numbered, and
+    kept after it ends -- and `turns()` hands the recent ones back, which is
+    what lets the console light a turn it only heard about afterwards.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._node = ""
         self._since = 0.0
+        self._count = 0
+        self._turns: deque[_Turn] = deque(maxlen=TURN_RECORD)
+
+    def begin_run(self) -> None:
+        """Forget the previous run's turns, as a new run is claimed.
+
+        The numbering carries on rather than starting again: a console still
+        holding the last number it saw must read every turn of the new run as
+        one it has not shown.
+        """
+        with self._lock:
+            self._node = ""
+            self._since = 0.0
+            self._turns.clear()
 
     def enter(self, node: str) -> None:
         with self._lock:
+            self._count += 1
             self._node = node
             self._since = time.monotonic()
+            self._turns.append(_Turn(self._count, node, self._since))
 
     def leave(self, node: str) -> None:
         """Clear the light, unless someone else already claimed it.
 
         The name check matters even though the graph runs one node at a time:
         a node abandoned by `_with_deadline` keeps a worker thread alive, and
-        nothing that finishes late may darken the seat that is working now.
+        nothing that finishes late may darken the seat that is working now --
+        or close that seat's turn in the record.
         """
         with self._lock:
             if self._node == node:
-                self._node = ""
-                self._since = 0.0
+                self._end_turn()
 
     def clear(self) -> None:
         """No seat is working. The run's `finally` calls this."""
         with self._lock:
-            self._node = ""
-            self._since = 0.0
+            self._end_turn()
+
+    def _end_turn(self) -> None:
+        """Put the light out and close the turn it belonged to. Lock held."""
+        latest = self._turns[-1] if self._turns else None
+        if latest is not None and latest.ended is None and latest.node == self._node:
+            latest.ended = time.monotonic()
+        self._node = ""
+        self._since = 0.0
 
     def current(self) -> str:
         with self._lock:
@@ -143,6 +194,85 @@ class NodeActivity:
         with self._lock:
             return time.monotonic() - self._since if self._node else 0.0
 
+    def turns(self) -> list[dict[str, object]]:
+        """The recent turns, oldest first: `turn`, `node`, `seconds`, `ended_ago`.
+
+        `ended_ago` is None while the turn is still running. Both are spans
+        rather than timestamps because this clock is monotonic, and the
+        console's is a different clock altogether.
+        """
+        with self._lock:
+            now = time.monotonic()
+            return [
+                {
+                    "turn": turn.number,
+                    "node": turn.node,
+                    "seconds": round((now if turn.ended is None else turn.ended) - turn.started, 2),
+                    "ended_ago": None if turn.ended is None else round(now - turn.ended, 2),
+                }
+                for turn in self._turns
+            ]
+
 
 # One run at a time, so one activity light, for the same reason as RUN_CONTROL.
 ACTIVITY = NodeActivity()
+
+
+class EmbedderActivity:
+    """Whether the embedding model is working, for the embedder card's light.
+
+    Measured where the work is done rather than inferred from who asked for it:
+    `graphrag_server` marks every encode and every load of the model, which is
+    everything the embedder does -- a run's corpus phase, a fetched page stored,
+    the Planner's project map, the Researcher's search, a search or an upload
+    from the console. A search against no corpus embeds nothing, and must light
+    nothing.
+
+    A count rather than a flag, because the work overlaps: the console can search
+    while a run is indexing, and an encode loads the model on its first call. And
+    like `NodeActivity` it remembers work already finished -- how many pieces
+    have started, and how long ago the last one ended -- because a query embeds
+    in tens of milliseconds, far inside the gap between two polls.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._working = 0
+        self._started = 0
+        self._since = 0.0
+        self._last_end: float | None = None
+
+    @contextmanager
+    def working(self) -> Iterator[None]:
+        """The embedder is busy for as long as this block runs, however it exits."""
+        with self._lock:
+            if not self._working:
+                self._since = time.monotonic()
+            self._working += 1
+            self._started += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._working -= 1
+                self._last_end = time.monotonic()
+
+    def snapshot(self) -> dict[str, object]:
+        """`busy`, `busy_for`, `started` (a count that only grows), and `ended_ago`.
+
+        `ended_ago` is None until something has finished. Spans rather than
+        timestamps, for the reason `NodeActivity.turns` gives.
+        """
+        with self._lock:
+            now = time.monotonic()
+            return {
+                "busy": self._working > 0,
+                "busy_for": round(now - self._since, 1) if self._working else 0.0,
+                "started": self._started,
+                "ended_ago": None if self._last_end is None else round(now - self._last_end, 2),
+            }
+
+
+# The console shows one embedder, so one meter, a process-global beside
+# ACTIVITY for the same reason.
+EMBEDDER_ACTIVITY = EmbedderActivity()

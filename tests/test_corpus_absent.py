@@ -26,6 +26,7 @@ import pytest
 
 import serve
 from langgraph_agent import graphrag_server
+from langgraph_agent.control import EmbedderActivity
 from langgraph_agent.graphrag_server import (
     GraphRAGKnowledgeBase,
     corpus_exists,
@@ -123,6 +124,18 @@ def test_a_read_never_creates_a_corpus(nowhere, method, params):
 
     assert _touched(nowhere) == []
     assert serve.kb is None
+
+
+def test_a_search_with_nothing_to_search_leaves_the_embedder_idle(nowhere, monkeypatch):
+    """The embedder card lights off a meter marked where the model works, so
+    "there is no corpus" has to come back without a load or an encode -- or the
+    light would call a search that embedded nothing busy."""
+    meter = EmbedderActivity()
+    monkeypatch.setattr(graphrag_server, "EMBEDDER_ACTIVITY", meter)
+
+    serve.RPC_METHODS["search_documents"]({"query": "the planner"})
+
+    assert meter.snapshot()["started"] == 0
 
 
 def test_the_reads_report_the_absence_rather_than_zeros(nowhere):

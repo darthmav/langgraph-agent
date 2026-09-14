@@ -22,6 +22,7 @@ import pytest
 import serve
 from langgraph_agent import config
 from langgraph_agent import graphrag_server as gs
+from langgraph_agent.control import EmbedderActivity
 from langgraph_agent.graphrag_server import (
     CHUNK_MAX_TOKENS,
     EMBEDDING_BATCH_SIZE,
@@ -287,6 +288,101 @@ def test_the_status_says_where_without_loading_anything(monkeypatch, library, ca
 
     kb.embedder  # noqa: B018
     assert embedding_device_status()["active"] == card
+
+
+# ---------------------------------------------------------------------------
+# the embedder's light: whether the model is working
+# ---------------------------------------------------------------------------
+
+
+def test_work_that_falls_between_two_looks_is_still_on_the_meter():
+    """A query embeds in tens of milliseconds, far inside the gap between two polls."""
+    meter = EmbedderActivity()
+
+    with meter.working():
+        assert meter.snapshot()["busy"] is True
+
+    after = meter.snapshot()
+    assert after["busy"] is False
+    assert after["started"] == 1
+    assert after["ended_ago"] is not None
+
+
+def test_overlapping_work_keeps_the_embedder_busy_until_the_last_of_it_ends():
+    """A search from the console can land while a run is indexing."""
+    meter = EmbedderActivity()
+
+    with meter.working():  # the index
+        with meter.working():  # the search, inside it
+            pass
+        assert meter.snapshot()["busy"] is True
+
+    assert meter.snapshot()["busy"] is False
+    assert meter.snapshot()["started"] == 2
+
+
+def test_work_that_raises_still_puts_the_light_out():
+    """A daemon that refuses an embed must not leave the embedder lit for good."""
+    meter = EmbedderActivity()
+
+    with pytest.raises(RuntimeError):
+        with meter.working():
+            raise RuntimeError("Ollama could not embed")
+
+    assert meter.snapshot()["busy"] is False
+
+
+def test_every_encode_is_marked_where_it_happens(monkeypatch, library):
+    """At the one place every embedding passes, so no caller can forget to say so:
+    the corpus phase, a stored page, the Planner's map and a search alike."""
+    meter = EmbedderActivity()
+    monkeypatch.setattr(gs, "EMBEDDER_ACTIVITY", meter)
+    kb = _kb()
+    model = kb.embedder
+    encode = model.encode
+    busy_while_encoding = []
+
+    def watched(texts, **kwargs):
+        busy_while_encoding.append(meter.snapshot()["busy"])
+        return encode(texts, **kwargs)
+
+    monkeypatch.setattr(model, "encode", watched)
+    started = meter.snapshot()["started"]
+
+    kb._encode(["a passage"])
+
+    assert busy_while_encoding == [True]
+    assert meter.snapshot()["started"] > started
+    assert meter.snapshot()["busy"] is False
+
+
+def test_loading_the_model_counts_as_work(monkeypatch, library):
+    """The first search after a start spends seconds here, before any encode."""
+    meter = EmbedderActivity()
+    monkeypatch.setattr(gs, "EMBEDDER_ACTIVITY", meter)
+    load = gs._sentence_transformer
+    busy_while_loading = []
+
+    def watched(device):
+        busy_while_loading.append(meter.snapshot()["busy"])
+        return load(device)
+
+    monkeypatch.setattr(gs, "_sentence_transformer", watched)
+
+    _kb().embedder  # noqa: B018 - the load is what is under test
+
+    assert busy_while_loading == [True]
+    assert meter.snapshot()["busy"] is False
+
+
+def test_the_console_reads_the_embedder_with_or_without_a_run():
+    """A run's poll carries the reading; between runs the console asks for it alone."""
+    fields = {"busy", "busy_for", "started", "ended_ago"}
+    assert set(serve.rpc_run_progress({})["embedding"]) == fields
+    assert set(serve.rpc_embedding_activity({})) == fields
+    assert serve.RPC_METHODS["embedding_activity"] is serve.rpc_embedding_activity
+    # Polled several times a second while a search is in flight.
+    assert "embedding_activity" in serve.QUIET_METHODS
 
 
 # ---------------------------------------------------------------------------

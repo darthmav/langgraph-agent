@@ -10,6 +10,7 @@ Or with stdio transport for MCP:
 """
 
 import asyncio
+import functools
 import hashlib
 import json
 import os
@@ -17,12 +18,13 @@ import time
 from collections.abc import Callable, Mapping, MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 import chromadb
 import networkx as nx
 from mcp.server import MCPServer
 
+from langgraph_agent.control import EMBEDDER_ACTIVITY
 from langgraph_agent.corpus_spectral import (
     BOTTLENECK_CONDUCTANCE,
     DUPLICATE_BLOCK_PREFIX,
@@ -736,6 +738,28 @@ def _embedder_on(device: str) -> "tuple[SentenceTransformer | None, str | None, 
     return None, failure[0], failure[1]
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _embedder_at_work(method: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Mark the embedder busy while `method` runs, for the console's embedder light.
+
+    Put on the only two places the embedder does anything: `_load_embedder`,
+    which loads the model and on a card proves it with a warm-up encode, and
+    `_encode`, which every embedding goes through. Loading counts as work
+    because the first search after a start spends seconds there, and a light
+    that stayed dark through it would call a busy embedder idle.
+    """
+
+    @functools.wraps(method)
+    def run(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with EMBEDDER_ACTIVITY.working():
+            return method(*args, **kwargs)
+
+    return run
+
+
 class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     """Simple GraphRAG: NetworkX graph + Chroma vector store.
 
@@ -818,6 +842,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             model, _ = self._load_embedder()
         return model
 
+    @_embedder_at_work
     def _load_embedder(
         self, make_room: "Callable[[], list[str]] | None" = None
     ) -> "tuple[SentenceTransformer | OllamaEmbedder, list[str]]":
@@ -909,6 +934,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             "unloaded": unloaded,
         }
 
+    @_embedder_at_work
     def _encode(self, texts: str | list[str]) -> Any:
         """Embed at `EMBEDDING_BATCH_SIZE`, finishing on the CPU if the card fills.
 

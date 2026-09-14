@@ -51,7 +51,7 @@ from langgraph_agent.config import (  # noqa: E402
     set_agent_thinking,
     unload_local_seat_models,
 )
-from langgraph_agent.control import ACTIVITY, RUN_CONTROL  # noqa: E402
+from langgraph_agent.control import ACTIVITY, EMBEDDER_ACTIVITY, RUN_CONTROL  # noqa: E402
 from langgraph_agent.corpus_health import (  # noqa: E402
     corpus_staleness,
     forget_expected_documents,
@@ -773,22 +773,30 @@ RUN_BUDGET_SECONDS = float(os.getenv("RUN_BUDGET_SECONDS", "300"))
 
 def rpc_run_progress(_: dict[str, Any]) -> dict[str, Any]:
     """A snapshot of the run currently in flight, for the console to poll."""
-    # Read outside `_run_lock`: `ACTIVITY` carries its own, and the node it
-    # names is set by the graph rather than by this module.
-    active = ACTIVITY.current()
-    active_for = ACTIVITY.busy_for()
     with _run_lock:
+        # `ACTIVITY` is read inside `_run_lock`, although it carries a lock of
+        # its own, because its turn record is reset as a run is claimed under
+        # this one. Read beside it, a reply could pair the new run's `running`
+        # with the last run's turns, and a console would light a seat for a
+        # turn that belongs to a run already over.
         return {
             "running": bool(_run_progress["running"]),
             "goal": str(_run_progress["goal"]),
             "node": str(_run_progress["node"]),
             # `node` is the seat that last *finished* -- `graph.stream` yields
             # on completion -- which is what the feed lists. `active` is the
-            # seat whose node is on the stack right now, which is what the
-            # console's seat lights mean. They are usually different, and
-            # during the slowest node of the run they always are.
-            "active": active,
-            "active_for": round(active_for, 1),
+            # seat whose node is on the stack right now. They are usually
+            # different, and during the slowest node of the run they always are.
+            "active": ACTIVITY.current(),
+            "active_for": round(ACTIVITY.busy_for(), 1),
+            # What the console's seat lights are driven from. `active` is only
+            # a sample, and a turn that falls between two polls is never in
+            # one; the record keeps it, finished, for the console to show.
+            "turns": ACTIVITY.turns(),
+            # The embedder card's light, which reads a meter of its own: the
+            # corpus phase and the web phase embed before any seat has a turn,
+            # and a search embeds inside one.
+            "embedding": EMBEDDER_ACTIVITY.snapshot(),
             "messages": list(_run_progress["messages"]),
             "budget": RUN_BUDGET_SECONDS,
             # The console needs both to reattach after a reload: the id to aim
@@ -797,6 +805,17 @@ def rpc_run_progress(_: dict[str, Any]) -> dict[str, Any]:
             "run_id": str(_run_progress["run_id"]),
             "stopping": bool(_run_progress["stopping"]),
         }
+
+
+def rpc_embedding_activity(_: dict[str, Any]) -> dict[str, Any]:
+    """Whether the embedding model is working, for the embedder card's light.
+
+    A run's poll already carries this as `run_progress["embedding"]`. This is
+    for the console to watch between runs, while a search or an upload of its
+    own is in flight -- the two things outside a run that make the embedder
+    work -- without polling for a run that is not there.
+    """
+    return EMBEDDER_ACTIVITY.snapshot()
 
 
 def rpc_stop_run(params: dict[str, Any]) -> dict[str, Any]:
@@ -1471,6 +1490,9 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
                 "A run is already in flight. Stop it before starting another."
             )
         RUN_CONTROL.arm(run_id)
+        # Under the lock `run_progress` reads the record through, so no reply
+        # can hand this run's console the last run's turns.
+        ACTIVITY.begin_run()
         _run_progress.update(
             running=True,
             goal=goal,
@@ -1697,6 +1719,7 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "status": rpc_status,
     "run_goal": rpc_run_goal,
     "run_progress": rpc_run_progress,
+    "embedding_activity": rpc_embedding_activity,
     "stop_run": rpc_stop_run,
     "last_run": rpc_last_run,
     "shutdown": rpc_shutdown,
@@ -1715,6 +1738,9 @@ QUIET_METHODS = {
     "llm_options",
     "embedding_options",
     "run_progress",
+    # Polled several times a second, though only while a search or an upload of
+    # the console's own is in flight; a run's poll carries the same reading.
+    "embedding_activity",
 }
 
 

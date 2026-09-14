@@ -263,8 +263,8 @@ plus a router in `graph.py`, entries in `AGENTS` / `DEFAULT_SEATS` /
 
 The Action Feed that sat to the right of the Director is gone. It was a third
 telling of one story: the stage cards repeated what the Director reports and
-what the Crew lights already say, and `run_progress.active` drives those lights
-from the seat *currently* executing, which is strictly better than the feed's
+what the Crew lights already say, and `run_progress.turns` drives those lights
+from each seat's turn as it happens, which is strictly better than the feed's
 `node` -- that names the seat which just finished.
 
 Two things it held were not repeated anywhere, so they moved rather than went.
@@ -777,7 +777,7 @@ four the moment this file described the problem.
   slowest node in the run is the one node whose light never comes on and a
   stalled Architect shows as a busy Builder. `ACTIVITY` (`control.py`, a
   process-global beside `RUN_CONTROL` for the same reason) is entered and left
-  by `_tracked` in `graph.py`, so a seat is lit for exactly as long as its node
+  by `_tracked` in `graph.py`, so a seat is lit for as long as its node
   is on the stack, and `run_progress` reports it as `active`. The marking is a
   wrapper rather than lines in the node bodies because every node has several
   exits -- the stop, a deadline fallback, the ordinary return -- and only a
@@ -785,6 +785,56 @@ four the moment this file described the problem.
   given: a worker `_with_deadline` abandoned finishes late, and must not darken
   the seat working now. `_finish_run` clears it as a backstop, since a light
   left on outlives the run in every console still open.
+  **A light fed by a poll is a sample, and a sample misses whatever falls
+  between two polls.** Measured on 2026-09-13 through the real page in
+  headless Chromium, each seat's model call held for a fixed time: polling once
+  a second, a 0.4s Researcher turn never lit at all, the opening Architect sat
+  dark for the first full second of its turn, the Planner stayed lit half a
+  second into the turn after its own -- and the five-second crew poll rebuilt
+  every card, so a Builder lit for 12s restarted its rainbow from red four
+  times. The short turn is the one that bites in practice: a Researcher
+  answering from retrieval makes no model call (see *the Researcher's model is
+  only consulted when retrieval is thin*), so on a goal the corpus answers well
+  its light was the one that never came on. So `ACTIVITY` also keeps the run's
+  recent turns -- numbered, kept after they end, cleared by `begin_run` as a
+  run is claimed -- and `run_progress` returns them as `turns`, read under
+  `_run_lock` so no reply pairs one run's `running` with the last run's record.
+  The console polls every `SEAT_POLL_MS` and lights every turn it has not yet
+  shown, one it only heard about after it ended included, for no less than
+  `SEAT_MIN_LIT_MS`, because a flicker nobody sees is not a light. That minimum
+  is the one place a light outlasts its node, and it is bounded: the next seat
+  waits at most that long, and only behind a turn that short, while a turn that
+  ended more than `SEAT_REPLAY_MS` before the console heard of it -- a hidden
+  tab's slowed timers -- is not replayed at all. `loadCrew` rebuilds the cards
+  only when something they draw has changed, which is why `setSeat` now
+  repaints from the server after a refusal, as `setThinking` always did: the
+  unconditional rebuild had been quietly putting a refused choice back.
+  Measured again after the change, same page and seats: every turn lit, the
+  0.4s Researcher included; a light came on within one poll of its turn and
+  went out within one of its end; a 0.05s turn was shown for its full minimum
+  and held the Builder's light back by exactly that; no rainbow restarted; and
+  a page reloaded mid-run met the run the same way through `reattach()`.
+  **The embedder card has a light of its own, read off a meter rather than
+  inferred from who asked.** `EMBEDDER_ACTIVITY` (`control.py`) is marked by
+  `_embedder_at_work` on the only two places the model does anything --
+  `_load_embedder` and `_encode`, which every embedding passes -- so the corpus
+  phase, a stored page, the Planner's map, a search and an upload are all
+  covered and none can forget to say so, while a search against no corpus
+  embeds nothing and lights nothing. It counts rather than flags, because the
+  work overlaps (a console search can land inside a run's index), and like the
+  turn record it remembers finished work, since a query embeds in
+  milliseconds. A run's poll carries it as `run_progress.embedding`; between
+  runs the console asks `embedding_activity` only while a search or an upload
+  of its own is in flight, rather than polling an idle server forever. Its
+  hold differs from a seat's on purpose: lit while working, and for
+  `SEAT_MIN_LIT_MS` past the last reply that showed work, because an index is
+  a string of encodes with a store write between each and a light that went
+  out in every gap would flicker. Measured on 2026-09-13 through the same page,
+  MiniLM on the CPU and a fresh five-document corpus: ten spells of work, from
+  a 4.68s corpus phase down to a 7ms query, every one lit and no light without
+  work under it; the corpus phase read as one unbroken light across its six
+  spells; each search lit within one poll for half a second; and the light went
+  out 0.64s after the last work it covered.
 - **The emergency stop is cooperative, and the recovery is the point.**
   `RUN_CONTROL` (`control.py`) is a process-global flag, not a state field: the
   graph compiles without a checkpointer, so nothing outside a node can write

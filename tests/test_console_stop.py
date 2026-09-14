@@ -14,7 +14,7 @@ import threading
 import pytest
 
 import serve
-from langgraph_agent.control import RUN_CONTROL
+from langgraph_agent.control import ACTIVITY, RUN_CONTROL
 
 
 @pytest.fixture(autouse=True)
@@ -289,6 +289,30 @@ def test_the_stop_is_visible_while_it_is_landing(monkeypatch):
     serve.rpc_run_goal({"goal": "Do a thing"})
 
     assert seen["progress"]["stopping"] is True
+
+
+def test_a_run_is_never_shown_the_last_runs_turns(monkeypatch):
+    """The seat lights are driven from the turn record, so it starts empty each run.
+
+    A turn the previous run left behind would otherwise read, to the new run's
+    console, as a seat that had only just taken its turn.
+    """
+    ACTIVITY.begin_run()
+    ACTIVITY.enter("builder")  # the last run's final turn, still on the record
+    ACTIVITY.leave("builder")
+    seen = {}
+
+    def look():
+        ACTIVITY.enter("architect")
+        seen["progress"] = serve.rpc_run_progress({})
+        ACTIVITY.leave("architect")
+
+    monkeypatch.setattr(serve, "graph", _FakeGraph(["architect"], during_step=look))
+    serve.rpc_run_goal({"goal": "Do a thing"})
+
+    turns = seen["progress"]["turns"]
+    assert [t["node"] for t in turns] == ["architect"]
+    assert turns[0]["ended_ago"] is None
 
 
 def test_expect_failures_rides_through_a_stopped_run(monkeypatch):
