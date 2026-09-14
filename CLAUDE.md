@@ -158,8 +158,8 @@ its entry point. That is the thing to fix first if it stays.
   | Seat | Provider | Model |
   |---|---|---|
   | Architect | ollama | `qwen3.5:397b-cloud` |
-  | Planner | ollama | `qwen3.5:397b-cloud` |
-  | Researcher | ollama | `qwen3.5:397b-cloud` |
+  | Planner | ollama | `kimi-k3:cloud` |
+  | Researcher | ollama | `kimi-k3:cloud` |
   | Builder | ollama | `qwen3.5:397b-cloud` |
 
   Anthropic and OpenAI remain optional cloud providers; no seat uses either by
@@ -1530,9 +1530,11 @@ four the moment this file described the problem.
   runs in this process, and every tag the Ollama daemon says can embed
   (`rpc_embedding_options` asks the daemon's capabilities, the way the seat
   cards ask about thinking). The choice lasts until the server restarts, like a
-  seat's, and `EMBEDDING_MODEL` sets the default. Measured on 2x GTX 1060 3GB
-  for the one other embedding model on this machine, `qwen3-embedding:latest`,
-  7.6B parameters and 4,096 dimensions. At the window and batch Ollama gives an
+  seat's, and `EMBEDDING_MODEL` overrides the default, `DEFAULT_EMBEDDING_MODEL`,
+  which is `qwen3-embedding:latest` -- so a clean install's first run builds
+  that model's corpus, and `install.sh` pulls the tag beside the seats'.
+  Measured on 2x GTX 1060 3GB for that model, 7.6B parameters and 4,096
+  dimensions. At the window and batch Ollama gives an
   embedding model by default -- 4,096 and 2,048 tokens -- it asked for 7,463
   MiB, 2,433 of them compute buffers sized for that batch, so the daemon ran 25
   of its 37 layers on the cards and embedded 0.24 passages/s: about 2.9 hours
@@ -1969,7 +1971,9 @@ four the moment this file described the problem.
 - `stubbed` and `live` are different failures: a stubbed seat completes the run with canned text, a failing seat kills it. The console words them differently; keep it that way.
 - **A seat's thinking box says what its next call does.** A switchable model
   is always sent the flag, off included, since omitting it means *on* for
-  `qwen3.5:397b-cloud`, Opus 5 and Sonnet 5 -- which is why it defaults on.
+  `qwen3.5:397b-cloud`, Opus 5 and Sonnet 5. That is what lets it default
+  off (`DEFAULT_THINKING`): an unticked box is a seat told not to think, not
+  one left to its model's own default.
   `thinking_support` reads support rather than listing it, and "could not
   ask" stays unknown, never "cannot think". A Claude reply that thought is a
   list of blocks, so nodes read replies through `_as_text`.

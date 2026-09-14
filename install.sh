@@ -245,17 +245,23 @@ else
             *)   problem "Ollama is not signed in: run 'ollama signin', then re-run ./install.sh" ;;
         esac
 
-        # Pull what the seats actually use -- config.py plus any .env override
-        # -- rather than a list kept here. A seat whose tag is not on the
-        # daemon shows NOT PULLED and fails its run.
+        # Pull what the seats and the embedder actually use -- config.py and
+        # graphrag_server plus any .env override -- rather than a list kept
+        # here. A seat whose tag is not on the daemon shows NOT PULLED and
+        # fails its run; an embedding tag that is missing fails the corpus
+        # phase every run starts with.
         mapfile -t seat_models < <("$PY" - <<'PY'
 from langgraph_agent.config import AGENTS, get_agent_model_info
+from langgraph_agent.graphrag_server import active_embedding_model, embedding_backend
 
 seen: list[str] = []
 for agent in AGENTS:
     info = get_agent_model_info(agent)
     if info["provider"] == "ollama" and info["model"] not in seen:
         seen.append(info["model"])
+embedder = active_embedding_model()
+if embedding_backend(embedder) == "ollama" and embedder not in seen:
+    seen.append(embedder)
 print("\n".join(seen))
 PY
         )
@@ -280,7 +286,9 @@ fi
 step "Embedding model"
 # Fetched now so the first search is not also a download, and so a machine
 # that goes offline later still has it. The name comes from graphrag_server,
-# where the relevance floor calibrated against it lives too.
+# where the relevance floor calibrated against it lives too. MiniLM is fetched
+# even when the default embedder is an Ollama tag: every corpus is chunked with
+# its tokenizer, whichever model embeds the chunks.
 if "$PY" - 2>/tmp/ambiguity-embedder.log <<'PY'
 from langgraph_agent.graphrag_server import EMBEDDING_MODEL_NAME
 from sentence_transformers import SentenceTransformer

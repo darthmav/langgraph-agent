@@ -173,9 +173,11 @@ Tests use a stub LLM — no seats, no daemon, no keys needed.
   the console renders errors into its telemetry log. A 200 does not mean the
   call worked; look at the body.
 
-- **All four seats ship dead.** `DEFAULT_SEATS` is four Ollama seats on
-  `qwen3.5:397b-cloud`, and a fresh daemon has nothing pulled, so every seat
-  badges `NOT PULLED` and `run_goal` fails. Everything read-only — Graph,
+- **All four seats ship dead.** `DEFAULT_SEATS` is four Ollama seats --
+  `qwen3.5:397b-cloud` for the Architect and Builder, `kimi-k3:cloud` for the
+  Planner and Researcher -- and the default embedder is the Ollama tag
+  `qwen3-embedding:latest`. A fresh daemon has none of them pulled, so every
+  seat badges `NOT PULLED` and `run_goal` fails. Everything read-only — Graph,
   Retrieval, Corpus, State, all of `smoke` — works fine without them. (The
   older `console.md` claimed the default backend was Anthropic and told you to
   set `ANTHROPIC_API_KEY`; both were wrong. `.env` holds no API keys at all,

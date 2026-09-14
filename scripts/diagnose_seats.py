@@ -101,11 +101,11 @@ class Candidate:
 # default nobody runs twice.
 CANDIDATES: tuple[Candidate, ...] = (
     Candidate("kimi-k3", "ollama", "kimi-k3:cloud",
-              "General; held Architect and Builder before the uniform move"),
+              "General; holds Planner and Researcher by default"),
     Candidate("kimi-code", "ollama", "kimi-k2.7-code:cloud",
               "Code-specialised sibling of kimi-k3"),
     Candidate("qwen", "ollama", "qwen3.5:397b-cloud",
-              "Large general; currently holds all four seats"),
+              "Large general; holds Architect and Builder by default"),
     Candidate("nemotron", "ollama", "nemotron-3-ultra:cloud",
               "Large reasoner; held Researcher until it probed empty"),
     Candidate("gemma", "ollama", "gemma4:cloud",
@@ -152,9 +152,10 @@ class TeamConfig:
 TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     TeamConfig(
         "baseline",
-        {"architect": "qwen", "planner": "qwen",
-         "researcher": "qwen", "builder": "qwen"},
-        "Shipped defaults: one model in all four seats. Everything else is "
+        {"architect": "qwen", "planner": "kimi-k3",
+         "researcher": "kimi-k3", "builder": "qwen"},
+        "Shipped defaults: qwen on the gate and the Builder, kimi-k3 planning "
+        "and researching. Everything else is "
         "measured against this. Keep it equal to DEFAULT_SEATS -- a control "
         "that has drifted from what the project ships is measuring nothing "
         "anyone runs.",
@@ -166,37 +167,37 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
         "Control: the seating that shipped before the probes were run, whose "
         "Researcher answers with nothing -- as did gemma4:cloud before it. "
         "Kept so the difference can be shown rather than asserted. It differs "
-        "from baseline in three seats now, so read it against `mixed` to "
+        "from baseline in all four seats now, so read it against `mixed` to "
         "isolate the Researcher.",
     ),
     TeamConfig(
         "kimi-solo",
         {"architect": "kimi-k3", "planner": "kimi-k3",
          "researcher": "kimi-k3", "builder": "kimi-k3"},
-        "The other uniform seating. With baseline now all-qwen, this is "
-        "what separates 'one model in four seats is fine' from 'qwen "
-        "is fine' -- a distinction baseline alone cannot make.",
+        "A uniform seating. Baseline already seats kimi-k3 in the two "
+        "tool-free seats, so this asks whether it also holds the gate and "
+        "the Builder -- and read against baseline, whether mixing earns its keep.",
     ),
     TeamConfig(
         "mixed",
         {"architect": "kimi-k3", "planner": "qwen",
          "researcher": "qwen", "builder": "kimi-k3"},
         "The heterogeneous seating that shipped before all four went to qwen: "
-        "kimi-k3 on the gate and the Builder. Baseline is now the uniform "
-        "one, so this is what asks whether mixing models earns its keep -- "
-        "the same question `qwen-solo` used to ask from the other side.",
+        "kimi-k3 on the gate and the Builder. Baseline is the same two models "
+        "the other way round, so this asks which of them belongs on the seats "
+        "that rule and act, rather than whether to mix at all.",
     ),
     TeamConfig(
         "code-builder",
-        {"architect": "qwen", "planner": "qwen",
-         "researcher": "qwen", "builder": "kimi-code"},
+        {"architect": "qwen", "planner": "kimi-k3",
+         "researcher": "kimi-k3", "builder": "kimi-code"},
         "Baseline with a code-specialised Builder. The Builder is the only "
         "seat that calls tools, so it is where specialisation should pay.",
     ),
     TeamConfig(
         "local-planner",
         {"architect": "qwen", "planner": "dolphin-9b",
-         "researcher": "qwen", "builder": "qwen"},
+         "researcher": "kimi-k3", "builder": "qwen"},
         "Baseline with the Planner moved off the cloud entirely. That seat is "
         "the one worth moving: it calls out every cycle, while the Researcher's "
         "model is not consulted at all whenever retrieval clears "
@@ -219,8 +220,8 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
     ),
     TeamConfig(
         "heavy-gate",
-        {"architect": "nemotron", "planner": "qwen",
-         "researcher": "qwen", "builder": "qwen"},
+        {"architect": "nemotron", "planner": "kimi-k3",
+         "researcher": "kimi-k3", "builder": "qwen"},
         "Big reasoner on the gate. The Architect ends the run, so a weak gate "
         "shows up as loops rather than as bad text.",
     ),
