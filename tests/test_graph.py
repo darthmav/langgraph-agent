@@ -16,7 +16,7 @@ import pytest
 
 from langgraph_agent import AgentState, ResearchStatus, Verdict, create_agent_graph
 from langgraph_agent.config import StubLLM
-from langgraph_agent.control import ACTIVITY
+from langgraph_agent.control import ACTIVITY, TURN_RECORD
 from langgraph_agent.graph import RECURSION_LIMIT, _tracked
 
 
@@ -2415,6 +2415,8 @@ def test_a_late_worker_cannot_darken_the_seat_that_is_working_now():
     ACTIVITY.enter("architect")
     ACTIVITY.leave("planner")  # a node that was abandoned turns after
     assert ACTIVITY.current() == "architect"
+    # Nor may it close the running turn in the record the lights are driven from.
+    assert ACTIVITY.turns()[-1]["ended_ago"] is None
     ACTIVITY.leave("architect")
     assert ACTIVITY.current() == ""
 
@@ -2426,6 +2428,61 @@ def test_no_seat_is_working_once_the_run_is_over(agent_graph):
                        {"recursion_limit": RECURSION_LIMIT})
     assert ACTIVITY.current() == ""
     assert ACTIVITY.busy_for() == 0.0
+
+
+def test_a_turn_between_two_polls_is_still_on_the_record():
+    """A poll only sees the seat on the stack at the instant it lands.
+
+    Measured through the real page with the console polling once a second, a
+    0.4s Researcher turn never lit -- and the Researcher answering from
+    retrieval alone is exactly that short. The record is what lets the console
+    light a turn it only hears about after it has ended.
+    """
+
+    def node(state: AgentState) -> AgentState:
+        return state
+
+    ACTIVITY.begin_run()
+    _tracked("researcher", node)(initial_state("g"))
+
+    assert ACTIVITY.current() == ""  # a sample taken now sees nothing...
+    (turn,) = ACTIVITY.turns()  # ...and the record still has the turn
+    assert turn["node"] == "researcher"
+    assert turn["ended_ago"] is not None
+
+
+def test_the_record_is_the_path_the_graph_actually_took(agent_graph):
+    """Every turn of a run, in order -- not a sample of them."""
+    ACTIVITY.begin_run()
+    ran = [
+        node
+        for event in agent_graph.stream(
+            initial_state("Add a health check endpoint"),
+            {"recursion_limit": RECURSION_LIMIT},
+        )
+        for node in event
+    ]
+
+    turns = ACTIVITY.turns()
+    assert [t["node"] for t in turns] == ran[-TURN_RECORD:]
+    assert all(t["ended_ago"] is not None for t in turns)
+    numbers = [t["turn"] for t in turns]
+    assert numbers == sorted(set(numbers))
+
+
+def test_a_new_run_starts_an_empty_record_and_keeps_counting():
+    """The last run's turns must not light a seat in this one, and its numbers
+    must not hide this run's turns from a console still holding them."""
+    ACTIVITY.begin_run()
+    ACTIVITY.enter("builder")
+    ACTIVITY.leave("builder")
+    last = ACTIVITY.turns()[-1]["turn"]
+
+    ACTIVITY.begin_run()
+    assert ACTIVITY.turns() == []
+    ACTIVITY.enter("architect")
+    assert ACTIVITY.turns()[0]["turn"] > last
+    ACTIVITY.leave("architect")
 
 
 # ---------------------------------------------------------------------------

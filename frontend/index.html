@@ -105,11 +105,13 @@ body::before{
   letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);margin-bottom:6px}
 .seat .dot{width:5px;height:5px;border-radius:50%;background:var(--role,var(--ink-3));flex:none;
   transition:width .15s,height .15s}
-/* The rainbow means one thing: this seat's node is on the stack right now.
-   It is driven by run_progress.active -- the node actually executing -- and
-   not by the run's last-finished node, so a seat lights for exactly as long
-   as it is working. Nothing else on the card animates, or the colour stops
-   being evidence and becomes decoration. */
+/* The rainbow means one thing: this card is working. On a seat that is its turn,
+   driven by the turns run_progress records -- the node actually executing -- and
+   not by the run's last-finished node, so a seat lights when its node starts and
+   goes out when it returns. On the embedder it is the model loading or embedding,
+   read off the server's meter. The one exception is SEAT_MIN_LIT_MS: nothing is
+   lit for less, or work quicker than a poll would never show at all. Nothing else
+   on a card animates, or the colour stops being evidence and becomes decoration. */
 .seat.working .dot{
   width:7px;height:7px;
   animation:seat-rainbow 1.5s linear infinite;
@@ -516,6 +518,16 @@ async function loadCrew(quiet, force){
   if(!force && panel.contains(document.activeElement)) return;
 
   const seats = seatData.seats || [];
+  seatBanner(seats);
+
+  // Rebuilt only when something the cards draw has changed. A rebuild replaces
+  // every dot, and a replaced dot starts its rainbow over: measured, a Builder
+  // lit for 12s restarted from red at each of these five-second polls, in step
+  // with them. `force` always rebuilds -- that is a caller putting the controls
+  // back to what the server says after asking it for a change.
+  const drawn = JSON.stringify([seats, OPTIONS, OLLAMA_TAGS]);
+  if(!force && drawn === CREW_DRAWN) return;
+  CREW_DRAWN = drawn;
   $("#crewn").textContent = seats.length;
   $("#seats").innerHTML = "";
 
@@ -546,13 +558,19 @@ async function loadCrew(quiet, force){
     $("#seats").appendChild(el);
   }
 
-  // The 5s status poll rebuilds these cards from scratch, so the working seat
-  // has to be re-lit here or a run's lights blink out every five seconds.
+  // A rebuild replaces every card, so the lit seat has to be re-lit here or its
+  // light would blink out whenever the crew changes.
   paintActiveSeat();
+}
 
-  // Two different failures, worded differently: a seat with no credentials
-  // falls back to a stub and the run still completes with canned text; a seat
-  // whose credentials do not work fails the run outright.
+// The crew cards as last built, so a poll that would build them identically
+// leaves them -- and a rainbow running on one of them -- alone.
+let CREW_DRAWN = "";
+
+// Two different failures, worded differently: a seat with no credentials
+// falls back to a stub and the run still completes with canned text; a seat
+// whose credentials do not work fails the run outright.
+function seatBanner(seats){
   const dead = seats.filter(s => !s.live);
   if(!dead.length) banner("");
   else {
@@ -594,8 +612,12 @@ function optionsHtml(seat){
 
 async function setSeat(role, value){
   const {provider, model} = JSON.parse(value);
-  await rpc("set_seat", {agent:role, provider, model});
-  await loadCrew(true, true);
+  // Repainted from the server's answer either way. A refused choice used to be
+  // put back by the next five-second poll, which rebuilt the cards regardless;
+  // that poll now leaves unchanged seats alone, and a refusal changes nothing.
+  try{ await rpc("set_seat", {agent:role, provider, model}); }
+  catch(e){ /* the refusal is already on the telemetry log */ }
+  await loadCrew(true, true).catch(()=>{});
 }
 
 // The box shows what the seat's next call will do, not a wish: a switchable
@@ -958,7 +980,7 @@ addEventListener("resize", () => { if(NODES.length){
 async function search(){
   const query = $("#q").value.trim();
   if(!query) return;
-  const r = await rpc("search_documents", {query, top_k:clampInt($("#topk").value, 1, 25, 5)});
+  const r = await watchEmbedder(rpc("search_documents", {query, top_k:clampInt($("#topk").value, 1, 25, 5)}));
   const hits = r.results || [];
   // "no results" and "there is nothing to search" are different answers, and
   // the second one is not a property of the query.
@@ -1238,7 +1260,7 @@ async function uploadFiles(files){
     try{
       if(file.size > UPLOAD_READ_CEILING)
         throw new Error(`${(file.size / 1048576).toFixed(1)}MB — far past anything the corpus indexes`);
-      ok.push(await rpc("upload_document", {name: file.name, content: await file.text()}));
+      ok.push(await watchEmbedder(rpc("upload_document", {name: file.name, content: await file.text()})));
     }catch(e){ failed.push({name: file.name, message: e.message}); }
   }
   if(ok.length){
@@ -1509,13 +1531,13 @@ async function run(){
   // look identical, which is the whole reason a slow run reads as a hang -- so
   // the live line names the last finished stage as well as the clock.
   const started = Date.now();
-  let done = [], node = "", budget = 0, polling = false;
+  let done = [], node = "", budget = 0, polling = false, painted = "", finished = false;
 
   // One line that rewrites itself, rather than a column of cards. It still has
   // to distinguish a working run from a wedged one -- that is why the feed
   // showed stages at all -- so it names the stage that finished last as well as
   // the clock. Which seat is *currently* working is not repeated here: the Crew
-  // lights answer that from `run_progress.active`, which is the better source,
+  // lights answer that from `run_progress.turns`, which is the better source,
   // since `node` is the seat that just finished rather than the one working.
   const paint = () => {
     const live = $("#run-live");
@@ -1526,13 +1548,20 @@ async function run(){
     const clock = budget ? `${secs}s / ${Math.round(budget)}s` : `${secs}s`;
     const stages = stagesFrom(done);
     const last = stages.length ? stages[stages.length - 1] : null;
-    live.innerHTML =
+    const html =
       `<b>Running</b> <span class="badge run">${esc(clock)}</span>`
       + (last ? `\n\n${stages.length} stage(s) done \u2014 last: ${esc(last.text)}`
               : `\n\nWaiting for the first stage\u2026`);
+    // Called on every poll, several a second for the seat lights, while the
+    // line itself changes about once a second. Rewriting it unchanged would
+    // also pin the pane to the bottom that much more often.
+    if(html === painted) return;
+    painted = html;
+    live.innerHTML = html;
     $("#director").scrollTop = $("#director").scrollHeight;
   };
   paint();
+  startSeatLights();
 
   CURRENT.timer = setInterval(async () => {
     paint();
@@ -1540,10 +1569,12 @@ async function run(){
     polling = true;
     try{
       const p = await rpc("run_progress", {}, true);
-      // `active` is the seat working now; between supersteps it is empty and
-      // every light is out, which is the truth for that moment.
-      setActiveSeat(p && p.running ? p.active : "");
+      // A reply that lands after the run returned describes a run that is
+      // over, and a light it turned on would have no later poll to put it out.
+      if(finished) return;
+      followEmbedder(p && p.embedding);
       if(p && p.running){
+        followTurns(p.turns);
         done = p.messages || []; node = p.node || ""; budget = p.budget || 0;
         // Learned from the server rather than assumed: it is what a Stop is
         // aimed at, and it survives the console losing track of the run.
@@ -1552,7 +1583,7 @@ async function run(){
       }
     }catch(e){ /* the run itself reports failure; a missed poll is not news */ }
     finally{ polling = false; }
-  }, 1000);
+  }, SEAT_POLL_MS);
 
   try{
     const r = await rpc("run_goal", {goal, expect_failures: expectFail, research_web: researchWeb, discuss_only: discussOnly});
@@ -1573,17 +1604,20 @@ async function run(){
     // A failed run still produced whatever it produced, and the server kept it.
     showLastRun("after the failure");
   }finally{
+    finished = true;
     clearInterval(CURRENT.timer); CURRENT.timer = null;
     CURRENT.inflight = false; CURRENT.stopping = false; CURRENT.runId = "";
-    // The poll that would have cleared these is the one just stopped, so a
-    // finished run would otherwise leave its last seat lit indefinitely.
-    setActiveSeat("");
+    // The poll that would have put these out is the one just stopped, so a
+    // finished run would otherwise leave its last seat lit indefinitely. A turn
+    // still inside its minimum light keeps it that long, then every seat goes dark.
+    releaseSeatLights();
+    releaseEmbedderLight();
     setRunButtons();
   }
 }
 
-// Which seat's node is executing right now, or "" for none. Held in a variable
-// rather than read back off the DOM because loadCrew replaces the cards.
+// Which seat's light is on, or "" for none. Held in a variable rather than
+// read back off the DOM because loadCrew replaces the cards.
 let ACTIVE_SEAT = "";
 
 function setActiveSeat(role){
@@ -1594,6 +1628,146 @@ function setActiveSeat(role){
 function paintActiveSeat(){
   document.querySelectorAll("#seats .seat").forEach(el =>
     el.classList.toggle("working", !!ACTIVE_SEAT && el.dataset.role === ACTIVE_SEAT));
+}
+
+// How often a run in flight is polled. A light is only as prompt as the poll
+// that turns it on: at once a second, the opening Architect sat dark for the
+// whole first second of its turn and each seat stayed lit up to a second into
+// the next one's. A run_progress reply is a lock and a copy of a small dict.
+const SEAT_POLL_MS = 250;
+
+// The least time any turn is lit. A turn can begin and end between two polls --
+// the Researcher answering from retrieval alone makes no model call at all --
+// and lit for exactly its length it is a flicker nobody sees, which is the same
+// as never lit. The rainbow spends a quarter-second on each colour, so this is
+// two of them. It is the one place a light outlasts its node, and the next seat
+// waits no longer than this for its own, and only behind a turn that short.
+const SEAT_MIN_LIT_MS = 500;
+
+// How long after a turn ended it may still be shown. A turn heard about late is
+// lit late on purpose; one that ended well before -- the tab was hidden and its
+// timers slowed -- belongs to a moment already gone.
+const SEAT_REPLAY_MS = 1500;
+
+// The turn lit now, and the few heard about but not yet shown. `seen` is the
+// highest turn number taken from the server, which numbers turns in order.
+let LIGHTS = {seen: 0, shown: null, queue: [], timer: null};
+
+function startSeatLights(){
+  clearTimeout(LIGHTS.timer);
+  LIGHTS = {seen: 0, shown: null, queue: [], timer: null};
+  setActiveSeat("");
+}
+
+// Fed with every run_progress reply's `turns`, oldest first.
+function followTurns(turns){
+  for(const t of turns || []){
+    const ended = t.ended_ago != null;
+    if(t.turn > LIGHTS.seen){
+      LIGHTS.seen = t.turn;
+      if(!ended || t.ended_ago * 1000 <= SEAT_REPLAY_MS)
+        LIGHTS.queue.push({turn: t.turn, role: t.node, ended});
+    }else if(ended){
+      const known = [LIGHTS.shown, ...LIGHTS.queue].find(x => x && x.turn === t.turn);
+      if(known) known.ended = true;
+    }
+  }
+  // Only turns already over pile up here. Keep the newest rather than play a
+  // backlog out one light at a time behind the seat that is working now.
+  while(LIGHTS.queue.length > 2 && LIGHTS.queue[0].ended) LIGHTS.queue.shift();
+  advanceSeatLights();
+}
+
+function advanceSeatLights(){
+  clearTimeout(LIGHTS.timer); LIGHTS.timer = null;
+  const now = performance.now();
+  let lit = LIGHTS.shown;
+  // A later turn means this one is over, whatever the last reply said.
+  if(lit && LIGHTS.queue.length) lit.ended = true;
+  if(lit && lit.ended){
+    const left = lit.since + SEAT_MIN_LIT_MS - now;
+    if(left > 0){ LIGHTS.timer = setTimeout(advanceSeatLights, left); return; }
+    lit = LIGHTS.shown = null;
+  }
+  if(!lit && LIGHTS.queue.length){
+    lit = LIGHTS.shown = LIGHTS.queue.shift();
+    lit.since = now;
+    if(lit.ended || LIGHTS.queue.length) LIGHTS.timer = setTimeout(advanceSeatLights, SEAT_MIN_LIT_MS);
+  }
+  setActiveSeat(lit ? lit.role : "");
+}
+
+// The run is over, so nothing lit is working any more. A turn still inside its
+// minimum keeps its light that long; then every seat goes dark.
+function releaseSeatLights(){
+  for(const x of [LIGHTS.shown, ...LIGHTS.queue]) if(x) x.ended = true;
+  advanceSeatLights();
+}
+
+// The embedder card's light. One model, so no queue: lit while the server's
+// meter says the embedder is working, and held for SEAT_MIN_LIT_MS past the last
+// reply that showed work. The hold does two jobs. A query embeds in tens of
+// milliseconds, which only a reply after the fact can show. And an index is a
+// string of encodes with a store write between each, which a light that went
+// out in every gap would turn into a flicker.
+let EMBED_LIGHT = {seen: 0, busy: false, heldTo: 0, timer: null, watchers: 0, poll: null, inflight: null};
+
+// Fed with `run_progress.embedding` during a run, and with `embedding_activity`
+// while a request of this console's own is embedding.
+function followEmbedder(e){
+  if(!e) return;
+  // Work that started since the last reply counts even when it is already over,
+  // unless it ended long enough ago to belong to a moment already gone.
+  const fresh = e.started > EMBED_LIGHT.seen
+    && (e.busy || (e.ended_ago != null && e.ended_ago * 1000 <= SEAT_REPLAY_MS));
+  // Taken as given rather than kept at its highest: a restarted server counts
+  // from zero again, and its work must still read as new.
+  EMBED_LIGHT.seen = e.started;
+  EMBED_LIGHT.busy = !!e.busy;
+  if(e.busy || fresh) EMBED_LIGHT.heldTo = performance.now() + SEAT_MIN_LIT_MS;
+  settleEmbedderLight();
+}
+
+function settleEmbedderLight(){
+  clearTimeout(EMBED_LIGHT.timer); EMBED_LIGHT.timer = null;
+  const left = EMBED_LIGHT.heldTo - performance.now();
+  if(!EMBED_LIGHT.busy && left > 0) EMBED_LIGHT.timer = setTimeout(settleEmbedderLight, left);
+  $("#embed").classList.toggle("working", EMBED_LIGHT.busy || left > 0);
+}
+
+// Nothing is reading the meter any more, so nothing could say the work stopped.
+function releaseEmbedderLight(){
+  EMBED_LIGHT.busy = false;
+  settleEmbedderLight();
+}
+
+function pollEmbedder(){
+  if(!EMBED_LIGHT.inflight)
+    EMBED_LIGHT.inflight = rpc("embedding_activity", {}, true)
+      .then(followEmbedder, () => {})
+      .finally(() => { EMBED_LIGHT.inflight = null; });
+  return EMBED_LIGHT.inflight;
+}
+
+// Outside a run the console watches the embedder only while a request of its
+// own can make it work -- a search, an upload -- and it watches the meter, never
+// the request: a search against no corpus embeds nothing and lights nothing.
+async function watchEmbedder(request){
+  if(CURRENT.inflight) return request;       // the run's poll is already reading it
+  if(EMBED_LIGHT.watchers++ === 0) EMBED_LIGHT.poll = setInterval(pollEmbedder, SEAT_POLL_MS);
+  try{
+    return await request;
+  }finally{
+    if(--EMBED_LIGHT.watchers === 0){
+      clearInterval(EMBED_LIGHT.poll); EMBED_LIGHT.poll = null;
+      // A look already under way asked before the request ended, and work that
+      // began and finished inside a quick search is still on the meter for the
+      // look after it.
+      await EMBED_LIGHT.inflight;
+      await pollEmbedder();
+      if(!EMBED_LIGHT.watchers) releaseEmbedderLight();
+    }
+  }
 }
 
 // Each node logs "[Role] ..." into messages; that log is the run's actual
@@ -1714,12 +1888,20 @@ async function reattach(){
       `<div class="msg sys" id="run-live"><b>Running</b></div>`;
     // This page has no run_goal fetch of its own to return the final state, so
     // it watches for the run to end and then reads the server's snapshot.
+    startSeatLights();
+    followTurns(p.turns);
+    followEmbedder(p.embedding);
+    let polling = false, shown = "", over = false;
     CURRENT.timer = setInterval(async () => {
+      if(polling || over) return;      // never stack polls behind a slow one
+      polling = true;
       let q;
       try{ q = await rpc("run_progress", {}, true); }catch(e){ return; }
-      if(!q) return;
-      setActiveSeat(q.running ? q.active : "");
+      finally{ polling = false; }
+      if(!q || over) return;
+      followEmbedder(q.embedding);
       if(q.running){
+        followTurns(q.turns);
         // No clock on this path: the console reattached partway through and
         // never saw the run start, so it cannot honestly say how long it has
         // been going. The stage count is what it does know.
@@ -1727,18 +1909,23 @@ async function reattach(){
         if(live){
           const stages = stagesFrom(q.messages || []);
           const last = stages.length ? stages[stages.length - 1] : null;
-          live.innerHTML = `<b>Running</b>`
+          const html = `<b>Running</b>`
             + (last ? `\n\n${stages.length} stage(s) done \u2014 last: ${esc(last.text)}`
                     : `\n\nWaiting for the next stage\u2026`);
+          // Polled several times a second for the lights; rewrite only a change.
+          if(html !== shown){ shown = html; live.innerHTML = html; }
         }
         if(q.stopping && !CURRENT.stopping){ CURRENT.stopping = true; setRunButtons(); }
         return;
       }
+      over = true;
       clearInterval(CURRENT.timer); CURRENT.timer = null;
+      releaseSeatLights();
+      releaseEmbedderLight();
       CURRENT.inflight = false; CURRENT.stopping = false; CURRENT.runId = "";
       setRunButtons();
       showLastRun();
-    }, 1000);
+    }, SEAT_POLL_MS);
   }catch(e){ /* offline is already reported */ }
 }
 
