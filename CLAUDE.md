@@ -9,15 +9,17 @@ This is **langgraph-agent**, a cloud-only 4-Agent AI system for software develop
 - **Researcher** — gathers context via the GraphRAG MCP tool (`search_knowledge_graph`).
 - **Builder** — implements plans using filesystem, git, terminal, and test MCP tools.
 
-Inference is cloud-only. The only thing that runs on this machine is the
-embedding model (`all-MiniLM-L6-v2`), which belongs to GraphRAG, not to a seat.
+Inference is cloud-only. The only thing that runs locally is embedding --
+`qwen3-embedding:latest` through the Ollama daemon by default, or
+`all-MiniLM-L6-v2` in this process -- which belongs to GraphRAG, not to a seat.
 
 Tech stack: Python 3.12+, LangGraph, Chroma + sentence-transformers + NetworkX, MCP (local stdio-compatible tool binding).
 
 ## Quick Reference
 
 ```bash
-# Install everything on Arch / Omarchy (system packages, venv, Ollama, corpus)
+# Install everything on Arch / Omarchy (packages, venv, Ollama models, SearxNG),
+# then prove the GPU build, the embedder, git/gh and every seat actually work
 ./install.sh
 
 # Install dependencies
@@ -574,7 +576,7 @@ four the moment this file described the problem.
   naming nothing retrieves nothing in particular. `_project_map` hands it the
   files the corpus ranks closest to the goal, a short excerpt each, only above
   `RETRIEVAL_RELEVANCE_FLOOR`. It is context, like the state injection, so the
-  Planner still calls no tool. Measured on 2026-09-12 with the local 9B seat,
+  Planner still calls no tool. Measured on 2026-09-12 with a local 9B seat,
   three goals each way: without the map no plan named a project file, and one
   listed the Planner's own instructions as its steps; with it, the
   seat-timeout goal was planned against `config.py`, `mcp_client.py` and
@@ -1059,11 +1061,9 @@ four the moment this file described the problem.
   Researcher hop with no plan is a search for the empty string, and retrieval
   that thin is exactly what falls through to the Researcher's own model. This
   matters most on a **local** seat, which is where a small model is cheap enough
-  to be worth seating: probed four times through the real prompt and parser,
-  `dolphin-2.9.1-yi-1.5-9b` Q4 held the Planner every time (4-5 plan lines,
-  11.6-32.1s, routing to both seats) — but a 9B is the size at which format
-  compliance stops being free, and this guard is what makes a lapse legible
-  instead of silently uncounted.
+  to be worth seating -- and a 9B is the size at which format compliance stops
+  being free, so this guard is what makes a lapse legible instead of silently
+  uncounted.
 - Work run under `_with_deadline` **must not write to state.** The abandoned
   worker cannot be cancelled — Python cannot interrupt a thread blocked on a
   socket — so it may finish long after the node returned and would land its
@@ -1162,8 +1162,8 @@ four the moment this file described the problem.
   being written about what a phase reports and what is computed where -- and
   the guard caught both, twice in one change, which is what the guard is for.
   It moved a third time the same afternoon, and from the other direction
-  entirely: a Builder run wrote `spectral_graph/dolphin_model.py`, and its
-  numpy docstrings took `Cached`, `Complete`, `Convert` and `Dimension` to
+  entirely: a Builder run wrote a mesh-analysis module into `spectral_graph/`
+  (removed again before rollout), and its numpy docstrings took `Cached`, `Complete`, `Convert` and `Dimension` to
   exactly four documents apiece at zero free capitals. Worth knowing because
   the vocabulary that moves this list is not only the prose a person writes --
   **a run that writes code writes docstrings, and docstrings are where the
@@ -1475,31 +1475,21 @@ four the moment this file described the problem.
   Loading it in `__init__` meant every header poll paid for the model and
   importing the module pulled in torch behind it. A machine that names a card
   also loads it at the start of a run, on purpose; the next bullet is why.
-- **The embedder can run on a card, and beside a local seat on a 3 GB card
-  only one arrangement works.** `EMBEDDING_DEVICE` is `cpu` by default, or a
-  card numbered the way `nvidia-smi` numbers cards (`cuda:1`). It is worth
-  having where it fits: a full index of 2,446 passages measured 81.0s on this
-  machine's CPU and 17.0s on a GTX 1060. The CPU pin it replaces (commit
-  `2e8230c`) gave two reasons, and measurement kept one. *A build with no
-  kernels for the card still reports CUDA available* -- the 2026-09-10
+- **The embedder can run on a card, and beside a local seat on a small card
+  the load order decides the outcome.** `EMBEDDING_DEVICE` is `cpu` by
+  default, or a card numbered the way `nvidia-smi` numbers cards (`cuda:0`).
+  It is worth having where it fits: a full index of 2,446 passages measured
+  81.0s on a desktop CPU and 17.0s on a 3 GB card. The CPU pin it replaces
+  (commit `2e8230c`) gave two reasons, and measurement kept one. *A build with
+  no kernels for the card still reports CUDA available* -- the 2026-09-10
   `+cu130` venv -- so a named card is proven with a real encode
-  (`_warm_to_peak`) and the CPU takes over when it refuses. *A 3 GB card is
-  wanted whole for the seat* is true of the seat as it was configured and
-  false of the seat with its KV cache at q8_0. Measured on 2x GTX 1060 3GB
-  with Ollama's own `llama-server` arguments and fit target:
-
-  | arrangement | seat layers on GPU | generation | prompt reading |
-  |---|---|---|---|
-  | seat alone, f16 KV | 49/49 | 19.8 tok/s | 162.6 tok/s |
-  | embedder + seat, f16 KV | 47/49 | 16.3 | 97.2 |
-  | seat alone, q8_0 KV | 49/49 | 19.8 | 159.3 |
-  | embedder + seat, q8_0 KV | **49/49** | **19.7** | **154.8** |
-
-  The q8_0 half lives outside this repository, in Ollama's systemd drop-in
-  beside `LLAMA_ARG_FIT_TARGET` (`LLAMA_ARG_CACHE_TYPE_K=q8_0` and
-  `LLAMA_ARG_CACHE_TYPE_V=q8_0`), which is why it is written down here:
-  `journalctl -u ollama | grep "KV buffer"` reads about 102 MiB a card with it
-  and 192 without.
+  (`_warm_to_peak`) and the CPU takes over when it refuses. *A small card is
+  wanted whole for a local seat* turned out to depend on how that seat is
+  served, which is the machine's configuration and not this project's:
+  measured on a 3 GB card, a 9B seat lost two layers to the embedder with an
+  f16 KV cache and none with a quantised one. The GPU build of torch, the
+  driver and Ollama's own settings are all the machine's setup; `install.sh`
+  proves they initialise and installs none of them.
   Four decisions in it are not interchangeable with the obvious alternatives.
   *The embedder is placed before the seat loads, at the start of every run*
   (`_claim_the_embedder_before_the_run`), because llama.cpp fits a model
@@ -1533,7 +1523,7 @@ four the moment this file described the problem.
   seat's, and `EMBEDDING_MODEL` overrides the default, `DEFAULT_EMBEDDING_MODEL`,
   which is `qwen3-embedding:latest` -- so a clean install's first run builds
   that model's corpus, and `install.sh` pulls the tag beside the seats'.
-  Measured on 2x GTX 1060 3GB for that model, 7.6B parameters and 4,096
+  Measured on two 3 GB cards for that model, 7.6B parameters and 4,096
   dimensions. At the window and batch Ollama gives an
   embedding model by default -- 4,096 and 2,048 tokens -- it asked for 7,463
   MiB, 2,433 of them compute buffers sized for that batch, so the daemon ran 25
@@ -1548,8 +1538,8 @@ four the moment this file described the problem.
   saw it: on 2026-09-13 a first build ran split for 24 minutes behind a
   progress line that read as wedged. `OllamaEmbedder` now reads `/api/ps` after
   each call's first batch, and the header and the corpus line both say how much
-  of the model the daemon left on the CPU. At either size it still cannot share
-  two 3 GB cards with the local 9B.
+  of the model the daemon left on the CPU. At either size it cannot share
+  two 3 GB cards with a local 9B seat.
   Four decisions follow from what a model is. *Every model has its own
   corpus* (`persist_dir_for`): vectors from two models share no space, and a
   corpus built with one and searched with another answers with noise that
@@ -1986,5 +1976,7 @@ four the moment this file described the problem.
 - **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus` when none has been built. A run builds one before the Architect opens, from the directory the server was started in, so the usual causes are a server started somewhere with nothing to index or `INDEX_PROJECT_BEFORE_RUN=0`. Nothing else builds one: there is no script and no install step.
 - **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
-- **Embedding runs on the CPU although `EMBEDDING_DEVICE` names a card** — Hover the header's embedding line for the reason. *No kernel image* means the torch build has no kernels for the card — this venv's `+cu126` build carries Pascal's, and the CUDA 13 build that broke it on 2026-09-10 does not — and nothing changes until the venv does. *Out of memory* means something held the card when the run placed the embedder; the next run unloads seated models and asks again, and a model loaded outside the seats is yours to unload. A local seat that got slower with the embedder on its card is a seat fitted around the embedder with an f16 KV cache: check `journalctl -u ollama | grep "KV buffer"` and `ollama ps`.
+- **Embedding runs on the CPU although `EMBEDDING_DEVICE` names a card** — Hover the header's embedding line for the reason. *No kernel image* means the torch build in `.venv` has no kernels for the card — CUDA 13 builds dropped compute 6.x, which is what broke it on 2026-09-10 — and nothing changes until that build does, which is the machine's own setup. *Out of memory* means something held the card when the run placed the embedder; the next run unloads seated models and asks again, and a model loaded outside the seats is yours to unload. A local seat that got slower with the embedder on its card was fitted around the embedder: `ollama ps` shows how much of it the daemon left on the CPU.
+- **Online research finds nothing, or reports DuckDuckGo's bot check** — Check that `SEARXNG_URL` is in `.env`: `install.sh` runs a SearxNG and adds it only once the instance answers. `systemctl --user status ambiguity-searxng` and `journalctl --user -u ambiguity-searxng` show the container. An HTTP 403 means `json` is missing from the instance's `search.formats`.
+- **`install.sh` stops at "no torch" or reports a CPU build** — The GPU build of torch in `.venv`, the driver and Ollama's GPU backend are the machine's own setup, and the installer deliberately installs none of them: it only proves they initialise, and refuses to let pip put a PyPI or CPU torch where a GPU build belongs. Install the build that carries kernels for the card into `.venv`, then re-run it.
 - **Graph tab is empty** — Start a run; the corpus is rebuilt before the Architect opens. A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.

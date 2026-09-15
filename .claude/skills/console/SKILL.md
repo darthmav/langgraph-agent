@@ -11,17 +11,15 @@ it with **`.claude/skills/console/driver.py`** — it speaks the same RPC surfac
 the SPA does, and screenshots the UI with headless chromium (no Playwright, no
 xvfb, no browser extension).
 
-All paths below are relative to the project root (`ambiguity2/`).
+All paths below are relative to the project root.
 
 ## Prerequisites
 
-Python ≥ 3.12 (this box runs 3.14.7 via mise; CI runs 3.12 and 3.14) and
-`chromium` on PATH for screenshots. Nothing was `apt-get`-installed for this —
-chromium was already present:
+Python ≥ 3.12 (CI runs 3.12 and 3.14) and `chromium` on PATH for screenshots:
 
 ```bash
-python3 --version   # 3.14.7
-which chromium      # /usr/bin/chromium
+python3 --version
+which chromium
 ```
 
 **Live agent runs also need the local Ollama daemon**, because every default
@@ -34,8 +32,13 @@ systemctl is-active  ollama.service   # active
 
 ## Build
 
-There is no venv in a fresh checkout. Create one and install **in this order** —
-the order is load-bearing:
+There is no venv in a fresh checkout. On Arch / Omarchy `./install.sh` builds
+it, and the order inside is load-bearing: torch goes in **before** the project,
+because `sentence-transformers` pulls torch and pip would otherwise take PyPI's
+build with its whole CUDA stack. A torch already in `.venv` is kept and pinned
+-- a GPU build is the machine's own setup, which the installer proves but never
+installs -- and a machine with no card gets the CPU build. By hand, on a
+machine with no card:
 
 ```bash
 python3 -m venv .venv
@@ -44,10 +47,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-CPU torch **first**, from the CPU index. `sentence-transformers` pulls torch,
-and torch from PyPI drags in the whole CUDA stack (19 packages). Installing it
-from the CPU index first pins it so dependency resolution cannot reach for the
-CUDA build. This ordering is in `.github/workflows/ci.yml`, not the README.
+CI uses the same CPU-first ordering (`.github/workflows/ci.yml`).
 
 Verify:
 
@@ -56,8 +56,8 @@ Verify:
 ```
 
 ```
-root        /home/darthmav/Work/ambiguity2
-interpreter /home/darthmav/Work/ambiguity2/.venv/bin/python
+root        <checkout>
+interpreter <checkout>/.venv/bin/python
 venv        present
 import      langgraph_agent OK
 chromium    /usr/bin/chromium

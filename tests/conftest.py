@@ -73,6 +73,19 @@ def _no_online_research(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _search_backend_is_duckduckgo(monkeypatch):
+    """Every test searches through the DuckDuckGo path, whatever `.env` says.
+
+    `SEARXNG_URL` is read at import, and `config.py` loads `.env` into the
+    environment, so a developer whose `install.sh` added the SearxNG it runs
+    had every web research test switch backends underneath it: seven failed,
+    serving DuckDuckGo markup to a parser expecting SearxNG's JSON. The tests
+    that mean SearxNG set it themselves.
+    """
+    monkeypatch.setattr(_web_research, "SEARXNG_URL", "")
+
+
+@pytest.fixture(autouse=True)
 def _no_corpus_bootstrap(monkeypatch):
     """No test builds a corpus, and none rebuilds the developer's.
 

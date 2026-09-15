@@ -2,7 +2,7 @@
 
 ## Goal
 
-Maintain `langgraph-agent` as a cloud-only 4-Agent AI system for software development experiments. Inference is cloud-only: every seat defaults to an Ollama `:cloud` tag proxied to ollama.com by the local daemon, which holds the credentials, so no API key of your own is required. Anthropic and OpenAI remain available per seat. The only model that runs on this machine is the `all-MiniLM-L6-v2` embedding model, which belongs to GraphRAG rather than to a seat.
+Maintain `langgraph-agent` as a cloud-only 4-Agent AI system for software development experiments. Inference is cloud-only: every seat defaults to an Ollama `:cloud` tag proxied to ollama.com by the local daemon, which holds the credentials, so no API key of your own is required. Anthropic and OpenAI remain available per seat. The only models that run locally are embedding models -- `qwen3-embedding:latest` through the Ollama daemon by default, or `all-MiniLM-L6-v2` in-process -- which belong to GraphRAG rather than to a seat.
 
 The implementation follows the documented architecture: Architect, Planner, Researcher, Builder, a shared `AgentState`, GraphRAG read-only tools for the Researcher, filesystem/git/terminal/test tools for the Builder, and LangGraph as the only router.
 
