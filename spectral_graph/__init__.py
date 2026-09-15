@@ -11,8 +11,6 @@ Core functionality:
 - Fiedler vector and algebraic connectivity
 - Spectral clustering and embedding
 - Cheeger constant and bounds
-- Dolphin model mesh representation and spectral analysis
-- Upgrade report generation based on spectral gaps
 
 Example usage:
     import networkx as nx
@@ -22,24 +20,6 @@ Example usage:
     L = laplacian_matrix(G)
     fiedler_val, fiedler_vec = fiedler_vector(G)
     labels = spectral_clustering(G, k=2)
-
-Example with DolphinModel:
-    import numpy as np
-    from spectral_graph import DolphinModel, SpectralAnalyzer
-
-    # Create a simple mesh
-    vertices = np.array([[i, 0, 0] for i in range(5)], dtype=float)
-    model = DolphinModel(vertices)
-    
-    # Analyze spectrally
-    analyzer = SpectralAnalyzer.from_dolphin_model(model)
-    eigenvalues = analyzer.get_sorted_eigenvalues()
-
-Example with upgrade analysis:
-    from spectral_graph import DolphinModel, analyze_and_report
-    
-    model = DolphinModel(vertices, faces)
-    report = analyze_and_report(model, output_format="print")
 """
 
 from spectral_graph.clustering import (
@@ -47,10 +27,6 @@ from spectral_graph.clustering import (
     conductance,
     spectral_clustering,
     sweep_cut,
-)
-from spectral_graph.dolphin_model import (
-    DolphinModel,
-    SpectralAnalyzer,
 )
 from spectral_graph.embedding import (
     embed_and_normalize,
@@ -73,13 +49,6 @@ from spectral_graph.spectrum import (
     algebraic_connectivity,
     compute_eigenpairs,
     compute_spectrum,
-)
-from spectral_graph.upgrade_report import (
-    UpgradeAnalyzer,
-    UpgradeRecommendation,
-    SpectralGap,
-    SpectralReport,
-    analyze_and_report,
 )
 
 __version__ = "0.1.0"
@@ -107,13 +76,4 @@ __all__ = [
     "conductance",
     "sweep_cut",
     "cheeger_bounds",
-    # Dolphin model and spectral analysis
-    "DolphinModel",
-    "SpectralAnalyzer",
-    # Upgrade report
-    "UpgradeAnalyzer",
-    "UpgradeRecommendation",
-    "SpectralGap",
-    "SpectralReport",
-    "analyze_and_report",
 ]

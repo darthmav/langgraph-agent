@@ -72,9 +72,10 @@ and the counts, once there is something to count. *Export* and *Clear* are
 disabled while it is absent; creating a store in order to empty it would leave
 behind the thing you were asking to be rid of. The local embedding model loads
 on the first index or search, not at startup. It runs on the CPU unless
-`EMBEDDING_DEVICE` names a card (`cuda:1`), and beside a local seat on a small
-card that also needs the seat's KV cache at q8_0 — the Important Notes in
-`CLAUDE.md` carry the measurements. The Crew panel's embedder card switches the
+`EMBEDDING_DEVICE` names a card (`cuda:0`), which needs a GPU build of torch in
+`.venv` — part of the machine's own setup, which `install.sh` checks but never
+installs; the Important Notes in `CLAUDE.md` carry the measurements. The Crew
+panel's embedder card switches the
 embedding model itself — `qwen3-embedding:latest` by default, MiniLM, or any
 other Ollama model that can embed — and each
 model gets its own corpus, built by the next run, and its own relevance floor,

@@ -506,12 +506,16 @@ def test_no_capital_forced_by_position_becomes_a_hub_entity():
 # statistic -- a record of what a human looked at and accepted. Redone on
 # 2026-09-12, when `NetworkX` displaced `Search`: the graph library this
 # project is built on, named throughout the docstrings of an agent-written
-# `src/quisce/spectral_analysis.py`. A real term, so it stays.
+# `src/quisce/spectral_analysis.py`. A real term, so it stays. Redone again on
+# 2026-09-15, the other way: removing the machine-specific dolphin-model
+# modules before rollout took `NetworkX` from 13 documents to 12, and `Search`
+# came back at 13 with 7 position-free capitals -- the entity the 2026-09-09
+# audit had already cleared by that count.
 AUDITED_TOP_ENTITIES = frozenset({
     "Architect", "Builder", "Researcher", "Laplacian", "Planner", "System",
     "ValueError", "Fiedler", "AgentState", "Spectral", "Exception", "Graph",
     "GraphRAG", "Python", "Verdict", "Cheeger", "GraphRAGKnowledgeBase",
-    "LangGraph", "RETRIEVAL_RELEVANCE_FLOOR", "NetworkX",
+    "LangGraph", "RETRIEVAL_RELEVANCE_FLOOR", "Search",
 })
 
 

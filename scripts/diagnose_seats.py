@@ -110,16 +110,6 @@ CANDIDATES: tuple[Candidate, ...] = (
               "Large reasoner; held Researcher until it probed empty"),
     Candidate("gemma", "ollama", "gemma4:cloud",
               "Researcher before nemotron; also probes empty"),
-    # Local, not proxied: the tag has no `:cloud` suffix, so the daemon runs it
-    # on this machine and the seat costs nothing per call. That is the whole
-    # reason to probe it, and also why throughput is the thing to read off the
-    # result -- measured on this machine at 5.4 tok/s against a 9B Q4, against
-    # 0.9 for the 27B, so a seat here is bounded by LLM_TIMEOUT_SECONDS in a way
-    # no cloud seat is. `paid` is False for the opposite reason to the Ollama
-    # Cloud tags above: there is no account behind it at all.
-    Candidate("dolphin-9b", "ollama",
-              "hf.co/mradermacher/Notaires_dolphin-2.9.1-yi-1.5-9b-GGUF:Q4_K_M",
-              "Local 9B Q4 on this machine; no cloud call"),
     Candidate("opus", "anthropic", "claude-opus-5", "Paid control", paid=True),
     Candidate("sonnet", "anthropic", "claude-sonnet-5", "Paid control", paid=True),
     Candidate("haiku", "anthropic", "claude-haiku-4-5", "Paid control", paid=True),
@@ -193,30 +183,6 @@ TEAM_CONFIGS: tuple[TeamConfig, ...] = (
          "researcher": "kimi-k3", "builder": "kimi-code"},
         "Baseline with a code-specialised Builder. The Builder is the only "
         "seat that calls tools, so it is where specialisation should pay.",
-    ),
-    TeamConfig(
-        "local-planner",
-        {"architect": "qwen", "planner": "dolphin-9b",
-         "researcher": "kimi-k3", "builder": "qwen"},
-        "Baseline with the Planner moved off the cloud entirely. That seat is "
-        "the one worth moving: it calls out every cycle, while the Researcher's "
-        "model is not consulted at all whenever retrieval clears "
-        "RETRIEVAL_RELEVANCE_FLOOR. Read against baseline, and read the "
-        "*plan* rather than the verdict -- a 9B is the size at which holding "
-        "the `## Steps` format stops being free, and an unreadable plan is now "
-        "caught rather than silently emptied.",
-    ),
-    TeamConfig(
-        "local-pair",
-        {"architect": "qwen", "planner": "dolphin-9b",
-         "researcher": "dolphin-9b", "builder": "qwen"},
-        "Both tool-free seats local: the two that can be moved without giving "
-        "up tool calling, which dolphin-9b does not advertise. The Researcher "
-        "is the riskier of the two -- probed four times it filled 2/3 sections "
-        "three times, always dropping `## Recommendations for Builder` -- and "
-        "with the corpus empty it is consulted on every run rather than "
-        "bypassed by retrieval. Run this on `offcorpus`, the one exercise "
-        "where that seat's model is the variable.",
     ),
     TeamConfig(
         "heavy-gate",

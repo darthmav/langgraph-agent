@@ -430,7 +430,7 @@ def test_a_build_stopped_midway_says_the_next_run_carries_on():
 
 @pytest.fixture
 def installed(monkeypatch) -> None:
-    monkeypatch.setattr(serve, "list_ollama_models", lambda: ["dolphin-9b:Q4_K_M", QWEN])
+    monkeypatch.setattr(serve, "list_ollama_models", lambda: ["llama3.1:8b", QWEN])
     monkeypatch.setattr(
         serve,
         "ollama_model_capabilities",
@@ -466,7 +466,7 @@ def test_switching_models_drops_the_servers_corpus(tmp_path, monkeypatch, instal
 
 def test_a_model_the_machine_does_not_offer_is_refused(monkeypatch, installed):
     with pytest.raises(ValueError, match="not an embedding model"):
-        serve.rpc_set_embedding_model({"model": "dolphin-9b:Q4_K_M"})
+        serve.rpc_set_embedding_model({"model": "llama3.1:8b"})
     assert gs.active_embedding_model() == gs.EMBEDDING_MODEL_NAME
 
 

@@ -99,7 +99,7 @@ def test_the_device_is_named_on_every_construction(library):
 
     It picks `cuda:0` whenever `torch.cuda.is_available()` is True, and that
     stays True on a build with no kernels for the card: a `+cu130` torch on a
-    compute-6.1 GTX 1060 made every `encode()` raise.
+    compute-6.1 card made every `encode()` raise.
     """
     kb = _kb()
 
@@ -186,7 +186,7 @@ def test_a_full_card_is_asked_again_once_a_seat_makes_room(library, card):
 
     def make_room() -> list[str]:
         asked.append(True)
-        return ["dolphin-9b:Q4_K_M"]
+        return ["llama3.1:8b"]
 
     kb = _kb()
     report = kb.claim_embedding_device(make_room)
@@ -194,7 +194,7 @@ def test_a_full_card_is_asked_again_once_a_seat_makes_room(library, card):
     assert asked == [True]
     assert report["source"] == "claimed"
     assert report["device"] == card
-    assert report["unloaded"] == ["dolphin-9b:Q4_K_M"]
+    assert report["unloaded"] == ["llama3.1:8b"]
     assert library.devices() == [card, card]
     assert kb.embedding_device == card
 
@@ -417,18 +417,18 @@ def test_only_seated_models_holding_gpu_memory_are_unloaded(monkeypatch):
     _seats(
         monkeypatch,
         architect=("ollama", "qwen3.5:397b-cloud"),
-        planner=("ollama", "dolphin-9b:Q4_K_M"),
-        researcher=("ollama", "dolphin-9b:Q4_K_M"),
+        planner=("ollama", "llama3.1:8b"),
+        researcher=("ollama", "llama3.1:8b"),
     )
     daemon = _Daemon([
-        {"name": "dolphin-9b:Q4_K_M", "size_vram": 5_600_000_000},
+        {"name": "llama3.1:8b", "size_vram": 5_600_000_000},
         {"name": "qwen3.5:397b-cloud", "size_vram": 0},
         {"name": "someone-elses:latest", "size_vram": 900_000_000},
     ])
     monkeypatch.setattr(config.urllib.request, "urlopen", daemon.urlopen)
 
-    assert config.unload_local_seat_models(timeout=1.0) == ["dolphin-9b:Q4_K_M"]
-    assert daemon.unload_requests == [{"model": "dolphin-9b:Q4_K_M", "keep_alive": 0}]
+    assert config.unload_local_seat_models(timeout=1.0) == ["llama3.1:8b"]
+    assert daemon.unload_requests == [{"model": "llama3.1:8b", "keep_alive": 0}]
 
 
 def test_a_seat_named_without_a_tag_is_the_daemons_latest(monkeypatch):
@@ -440,7 +440,7 @@ def test_a_seat_named_without_a_tag_is_the_daemons_latest(monkeypatch):
 
 
 def test_an_unreachable_daemon_unloads_nothing(monkeypatch):
-    _seats(monkeypatch, planner=("ollama", "dolphin-9b:Q4_K_M"))
+    _seats(monkeypatch, planner=("ollama", "llama3.1:8b"))
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise OSError("connection refused")
@@ -496,12 +496,12 @@ def test_placing_a_cpu_embedder_opens_nothing(monkeypatch):
 
 def test_the_feed_names_a_seat_unloaded_to_make_room():
     line = serve._embedder_feed_line(
-        {"source": "claimed", "device": "cuda:1", "unloaded": ["dolphin-9b:Q4_K_M"]}
+        {"source": "claimed", "device": "cuda:1", "unloaded": ["llama3.1:8b"]}
     )
 
     assert line is not None
     assert "cuda:1" in line
-    assert "dolphin-9b:Q4_K_M" in line
+    assert "llama3.1:8b" in line
 
 
 def test_a_refused_card_is_said_out_loud():

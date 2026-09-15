@@ -43,25 +43,26 @@ from langgraph_agent.lexical import (
 if TYPE_CHECKING:  # pragma: no cover - import cost is the whole point
     from sentence_transformers import SentenceTransformer
 
-# The one model that runs on this machine. Named once because three places
+# The embedding model that runs in this process, and whose tokenizer chunks
+# every corpus whichever model embeds it. Named once because three places
 # have to agree on it: the embedder the store is built with, the status check
 # that reports it without loading it, and the export that records which model
 # produced the corpus it is dumping.
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 # Where it runs: `cpu`, or a card numbered the way `nvidia-smi` numbers cards
-# (`cuda:1`). Always named, never left to sentence-transformers, which picks
+# (`cuda:0`). Always named, never left to sentence-transformers, which picks
 # `cuda:0` whenever `torch.cuda.is_available()` says True. That answer only
 # means a driver answered, not that the installed build carries kernels for
 # the card: on 2026-09-10 a Builder swapped the venv to `torch+cu130` on a
-# GTX 1060 (compute 6.1, which CUDA 13 dropped), `is_available()` stayed True,
+# compute-6.1 card (which CUDA 13 dropped), `is_available()` stayed True,
 # and every `encode()` raised `no kernel image is available`, taking search
 # and indexing down with it. So a named card is proven with a real encode
 # before it is trusted, and the CPU takes over when it refuses
 # (`_embedder_on`).
 #
 # `cpu` stays the default. A card is worth having -- a full index of 2,446
-# passages measured 81.0s on this machine's CPU and 17.0s on a GTX 1060 -- but
+# passages measured 81.0s on a desktop CPU and 17.0s on a 3 GB card -- but
 # a 3 GB card shared with a local seat takes it in exactly one arrangement,
 # which `claim_embedding_device` describes.
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu").strip().lower() or "cpu"
@@ -94,8 +95,8 @@ def _prepare_cuda_environment(device: str, environ: "MutableMapping[str, str]") 
 _prepare_cuda_environment(EMBEDDING_DEVICE, os.environ)
 
 # Passages per forward pass, on either device. 8 rather than
-# sentence-transformers' default of 32, and it costs nothing: measured, a GTX
-# 1060 embedded 305 passages/s at 8 against 315 at 32, and this machine's CPU
+# sentence-transformers' default of 32, and it costs nothing: measured, a 3 GB
+# card embedded 305 passages/s at 8 against 315 at 32, and a desktop CPU
 # 35.2 against 34.3 -- both are compute-bound, not batch-bound. What 32 costs
 # is memory: a peak of 406 MiB on the card against ~240 at 8, and beside a
 # local seat on a 3 GB card that difference is a layer. With the embedder at 32
@@ -156,14 +157,14 @@ def persist_dir_for(model: str) -> str:
 
 
 # Seconds one batch of passages may take through Ollama. Measured for
-# qwen3-embedding (7.6B) on 2x GTX 1060 3GB: a batch of 8 took ~35s with the
+# qwen3-embedding (7.6B) on two 3 GB cards: a batch of 8 took ~35s with the
 # model split onto the CPU and ~17s wholly on the cards (`OLLAMA_EMBED_OPTIONS`)
 # -- and the first batch of a run waits for the load too.
 OLLAMA_EMBED_TIMEOUT_SECONDS = 600.0
 
 # The window and batch every Ollama embedding model is loaded with, sent on
 # every call. Ollama loads one at a 4,096-token window with a 2,048-token batch
-# by default, and on 2x GTX 1060 3GB qwen3-embedding then asked for 7,463 MiB
+# by default, and on two 3 GB cards qwen3-embedding then asked for 7,463 MiB
 # against 6,217 free -- 4,453 of weights, 576 of KV cache and 2,433 of compute
 # buffers sized for that batch -- so the daemon ran 25 of its 37 layers on the
 # cards and the rest on the CPU, at 0.24 passages/s. At 512 it takes 4,987 MiB,
@@ -684,7 +685,7 @@ def _warm_to_peak(model: "SentenceTransformer") -> None:
     rather than its idle one.
 
     Mixed lengths rather than one full window, because the allocator keeps
-    blocks by shape. Measured on a GTX 1060: one batch at the full window
+    blocks by shape. Measured on a 3 GB card: one batch at the full window
     reserved 148 MiB, these lengths 154, and a full index of 2,446 real
     passages afterwards peaked at 166 either way -- growth the card's margin
     beside the seat absorbs. Padding the pool up front was measured too and is
@@ -901,8 +902,8 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
 
         llama.cpp fits a model around what a card already carries and never
         moves it afterwards, so on a card shared with a local seat the order of
-        the two loads decides the outcome. Measured on a GTX 1060 3GB beside
-        the local 9B with its KV cache at q8_0: embedder first, the seat kept
+        the two loads decides the outcome. Measured on a 3 GB card beside
+        a local 9B seat with its KV cache at q8_0: embedder first, the seat kept
         49 of 49 layers on the GPU at unchanged speed; seat first, the embedder
         found 11 MiB free and failed. A lazy load gets whichever order a run
         happens to produce, so a run calls this before anything embeds.
