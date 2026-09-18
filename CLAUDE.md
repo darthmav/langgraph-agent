@@ -28,8 +28,8 @@ Tech stack: Python 3.12+, LangGraph, Chroma + NetworkX, MCP (local stdio-compati
 pip install -e ".[dev]"
 
 # Run all checks
-ruff check src/ tests/ serve.py scripts/ example_usage.py test_cloud.py
-mypy src/langgraph_agent/ serve.py
+ruff check src/ tests/ serve.py scripts/ example_usage.py test_cloud.py ollama_client.py
+mypy src/langgraph_agent/ serve.py ollama_client.py
 python -m pytest tests/ -v
 
 # Start the web console
@@ -110,11 +110,27 @@ python example_usage.py
 │   └── README.md
 ├── .github/workflows/
 │   └── ci.yml                 # ruff, mypy, pytest, root scripts, on every push
+├── spectral_graph/            # the A1-A5 spectral code: at the root, outside the installed package
+│   ├── laplacian.py           # Laplacian matrix constructions
+│   ├── spectrum.py            # eigenvalues, eigenpairs, algebraic connectivity
+│   ├── fiedler.py             # the Fiedler vector and spectral bipartitioning
+│   ├── clustering.py          # spectral clustering, conductance, the Cheeger bounds
+│   ├── embedding.py           # spectral embedding via Laplacian eigenvectors
+│   ├── operations.py          # spectral graph arithmetic
+│   └── stability.py           # numerical stability utilities
+├── experimental/              # an agent run's own notes; out of the corpus (PROJECT_INDEX_EXCLUDES)
 ├── install.sh                 # Arch / Omarchy: everything, from nothing to a running console
 ├── cuda-embed-ollama.sh       # NVIDIA cards below compute 7.5: Ollama's CUDA 12 build, model 100% on the GPU
+├── launch_console.sh          # starts serve.py and waits on /api/status before opening a browser
 ├── serve.py                   # Python HTTP server + API backend
 ├── example_usage.py           # Demo script
 ├── test_cloud.py              # Cloud LLM end-to-end test
+├── ollama_client.py           # one prompt to the local daemon, bounded by the project's own timeout
+├── test_spectral_graph.py     # imports every spectral_graph module; run from the root by CI
+├── verify_spectrum.py         # spectral_graph.spectrum, run from the root by CI
+├── verify_fiedler.py          # spectral_graph.fiedler, run from the root by CI
+├── verify_clustering.py       # spectral_graph.clustering, run from the root by CI
+├── verify_embedding.py        # spectral_graph.embedding, run from the root by CI
 ├── README.md                  # User-facing documentation
 └── .env.example               # Environment variables template
 ```

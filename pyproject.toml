@@ -29,6 +29,11 @@ dependencies = [
     # on canned text and reported success. CI found it on its first run, on a
     # machine that had never had it installed by hand.
     "langchain-ollama>=0.2.0",     # every default seat
+    # The daemon's own client, which `ollama_client.py` imports directly. It
+    # arrives transitively under langchain-ollama anyway; named here for the
+    # reason httpx is -- a direct dependency left implicit breaks the day a
+    # transitive one moves, and this one breaks it at module load.
+    "ollama>=0.4.0",
     "langchain-openai>=0.2.0",     # optional; no seat uses it by default
     "langchain-anthropic>=0.2.0",  # optional; no seat uses it by default
     "mcp>=0.5.0",

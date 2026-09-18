@@ -120,11 +120,25 @@ def _excused(cited: str) -> bool:
 
 
 def _source_files() -> list[Path]:
+    """Every Python file a reader would call part of this project.
+
+    The root is a glob, not `serve.py` by name. Naming one file left the class
+    it belongs to uncovered: `example_usage.py`, `test_cloud.py` and
+    `ollama_client.py` are root-level modules too, and the last of those arrived
+    carrying a strict-mode error, absent from CLAUDE.md's tree and named in
+    neither CI check list -- invisible to all three guards below at once, on the
+    one path where a hand-written file escapes `_lint_written_files` as well.
+
+    `spectral_graph/` is in for the same reason and not because it is installed:
+    it is importable only with the project root on `sys.path`, which is exactly
+    why a reader needs the tree to know it is there.
+    """
     return sorted(
         list((ROOT / "src").rglob("*.py"))
         + list((ROOT / "tests").glob("*.py"))
         + list((ROOT / "scripts").glob("*.py"))
-        + [ROOT / "serve.py"]
+        + list((ROOT / "spectral_graph").rglob("*.py"))
+        + list(ROOT.glob("*.py"))
     )
 
 
@@ -216,6 +230,11 @@ def test_the_structure_tree_lists_every_module_test_and_script():
         if p.name != "__init__.py" and "__pycache__" not in str(p)
     }
     on_disk |= {str(p.relative_to(ROOT)) for p in (ROOT / "scripts").glob("*.sh")}
+    # Root-level shell scripts are the project's entry points -- the installer
+    # and the console launcher -- so a new one belongs in the tree as much as a
+    # module does. `launch_console.sh` was missing from it, which is what this
+    # line found.
+    on_disk |= {str(p.relative_to(ROOT)) for p in ROOT.glob("*.sh")}
     unlisted = sorted(on_disk - _structure_tree())
     assert not unlisted, f"real files missing from CLAUDE.md's tree: {unlisted}"
 
@@ -521,11 +540,20 @@ def test_no_capital_forced_by_position_becomes_a_hub_entity():
 # experiments were moved out of the checkout entirely: `NetworkX` fell from 14
 # documents to 11 and out of the top twenty, and `Embedding` (11 documents, 5
 # position-free capitals -- a term this project is about) took the last slot.
+# Redone on 2026-09-18, in both directions at once. `Research` arrived at 13
+# documents with 22 position-free capitals -- the Researcher's seat, the
+# research phase, `research/web/`, `research_status` -- so it is a term the
+# project is about and it stays. `Embedding` left at 12 documents, which is
+# `Cheeger`'s count exactly: the two tie, the ranking breaks the tie by name,
+# so the twentieth slot is settled alphabetically and one document either way
+# rotates it back. Both movements predate the change that surfaced them -- this
+# guard was already failing this way before two run artifacts were excluded
+# from the walk, and an audit left outstanding is the claim going stale quietly.
 AUDITED_TOP_ENTITIES = frozenset({
     "Architect", "Builder", "Researcher", "Laplacian", "Planner", "System",
     "ValueError", "Fiedler", "AgentState", "Spectral", "Exception", "Graph",
     "GraphRAG", "Python", "Verdict", "Cheeger", "GraphRAGKnowledgeBase",
-    "LangGraph", "Search", "Embedding",
+    "LangGraph", "Search", "Research",
 })
 
 

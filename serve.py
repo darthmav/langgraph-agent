@@ -64,11 +64,11 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     corpus_state,
     embedding_device_status,
     floor_calibration,
+    floor_from_calibration,
     get_knowledge_base,
     index_project_files,
     iter_project_files,
     open_knowledge_base,
-    relevance_floor,
     store_uploaded_document,
 )
 from langgraph_agent.web_research import research_online  # noqa: E402
@@ -596,7 +596,7 @@ def _embedding_choice() -> dict[str, Any]:
     """The one embedding model entry -- qwen3-embedding, served by the daemon."""
     state, _ = corpus_state()
     record = floor_calibration()
-    floor = relevance_floor()
+    floor = floor_from_calibration(record)
     return {
         "model": EMBEDDING_MODEL_NAME,
         "corpus": state,
@@ -638,21 +638,27 @@ def rpc_set_embedding_model(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
-    """Everything the console polls for: seats, embedding model, corpus state.
+    """Everything the console polls for: the embedding model and the corpus.
 
     `corpus` is `absent`, `empty` or `indexed`. The older `graphrag` boolean is
     kept beside it -- `launch_console.sh` polls this route as its readiness
     check -- but it collapses the first two, and they are the pair worth
     telling apart: nothing was ever indexed, versus a corpus that exists and
     holds nothing.
+
+    The seats are deliberately **not** here. They used to arrive four ways at
+    once -- `agents`, `selected` (the same dict serialised twice), `degraded`,
+    and the Architect's seat again as `llm` -- and nothing read one of them:
+    the console draws its crew from `list_seats`, which is the one place a seat
+    is reported. Both routes are polled every five seconds, so every open tab
+    swept all four seats twice a tick to build half a payload it threw away.
+    A field with no reader is worse than absent: the next person to need seat
+    state here cannot tell which of the four the page believes.
     """
     try:
         state, embedding_model = corpus_state()
     except Exception:
         state, embedding_model = "absent", "unknown"
-
-    seats = {agent: get_agent_status(agent) for agent in AGENTS}
-    architect = seats["architect"]
 
     return {
         # The embedding model is the one thing that would run on this machine,
@@ -674,10 +680,6 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
         # the walk's own list, so the page cannot promise a different one.
         "indexable_suffixes": list(INDEXABLE_SUFFIXES),
         "graphrag": state == "indexed",
-        "llm": f"{architect['model']} ({architect['provider']})",
-        "agents": seats,
-        "selected": seats,
-        "degraded": [agent for agent, seat in seats.items() if not seat["live"]],
     }
 
 
