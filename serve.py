@@ -44,6 +44,7 @@ from langgraph_agent import AgentState, create_agent_graph  # noqa: E402
 from langgraph_agent.config import (  # noqa: E402
     AGENT_LLM_OPTIONS,
     AGENTS,
+    get_agent_model_info,
     get_agent_status,
     set_agent_llm,
     set_agent_thinking,
@@ -549,7 +550,12 @@ def rpc_set_seat(params: dict[str, Any]) -> dict[str, Any]:
     # refusing it makes that option unselectable and the only way back to where
     # the process started is editing `.env` and restarting.
     allowed = {(o["provider"], o["model"]) for o in AGENT_LLM_OPTIONS}
-    seated = get_agent_status(agent)
+    # `get_agent_model_info`, not `get_agent_status`: this asks a pure config
+    # question -- which model is seated -- and the status call answers a live
+    # one, reaching the daemon for `list_ollama_models` and `thinking_support`
+    # to derive liveness fields nothing here reads. `set_agent_llm` compares
+    # the seat the same way two lines below.
+    seated = get_agent_model_info(agent)
     allowed.add((seated["provider"], seated["model"]))
     if (provider, model) not in allowed:
         offered = ", ".join(o["model"] for o in AGENT_LLM_OPTIONS)
