@@ -6,7 +6,7 @@ rebuilds it, and nothing calls that on its own -- so a project that grew past
 its last reindex retrieves against the corpus it had rather than the one it
 has. Measured on this repository on 2026-09-09: the store held **8 documents,
 all of them uploads, against a walk offering 103**. Every project query
-therefore scored under `RETRIEVAL_RELEVANCE_FLOOR`, `_gather_research`
+therefore scored under the relevance floor, `_gather_research`
 discarded retrieval and fell through to the Researcher's seat on every single
 run, and the step-burning loop that causes is already written up in CLAUDE.md.
 

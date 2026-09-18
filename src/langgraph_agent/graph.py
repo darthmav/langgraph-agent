@@ -77,7 +77,7 @@ def _route_from_planner(state: AgentState) -> Literal["researcher", "builder"]:
     It is close to free where it is redundant, which is why it can be
     unconditional: `_gather_research` calls GraphRAG first and returns those
     chunks without invoking the Researcher's model at all whenever the top hit
-    clears `RETRIEVAL_RELEVANCE_FLOOR` -- so on a goal the corpus answers, the
+    clears the measured relevance floor -- so on a goal the corpus answers, the
     hop costs a search. It is the goal the corpus *cannot* answer that reaches
     the seat, and that case routes on to the Builder anyway.
 

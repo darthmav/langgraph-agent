@@ -10,16 +10,17 @@ BM25 re-rank 65.1%, McNemar p < 0.001, measured through `search` itself. Nothing
 from inside: search returned five plausible files, all real, all mentioning the
 constant, and the one that *defines* it ranked fourth.
 
-The second is `RETRIEVAL_RELEVANCE_FLOOR`. It was 0.3, hard-coded beside the
+The second is the relevance floor. It was 0.3 once, hard-coded beside the
 comparison in `nodes.py`, and 0.3 turned out to sit inside the off-corpus score
 population rather than below it -- so a question this corpus cannot answer was
-formatted into the findings as though it had. These tests pin the calibration
-against the measurement rather than against the literal number, because the
-number is only meaningful relative to the embedding model.
+formatted into the findings as though it had. The floor is now measured per
+corpus by `calibrate_relevance_floor` and stored beside the store, never
+hard-coded: a cosine has no meaning across models, so no number is borrowed
+from one model to judge another.
 
-No test here loads sentence-transformers, for the reason `test_chunking.py`
-does not: the ordering, the fusion and the invalidation are all exercisable
-against a stand-in.
+No test here talks to a daemon or loads a real embedder, for the reason
+`test_chunking.py` does not: the ordering, the fusion and the invalidation are
+all exercisable against a stand-in.
 """
 
 from __future__ import annotations
@@ -30,23 +31,13 @@ from typing import Any
 import networkx as nx
 import pytest
 
-from langgraph_agent.graphrag_server import (
-    RETRIEVAL_RELEVANCE_FLOOR,
-    GraphRAGKnowledgeBase,
-)
+from langgraph_agent.graphrag_server import GraphRAGKnowledgeBase
 from langgraph_agent.lexical import (
     BM25Index,
     lexical_order,
     reciprocal_rank_fusion,
     tokenize,
 )
-
-# The two populations RETRIEVAL_RELEVANCE_FLOOR separates, measured on this
-# project's own corpus with all-MiniLM-L6-v2: twelve questions the corpus
-# answers against twelve it cannot. See the constant for the full table.
-MEASURED_OFF_CORPUS_MAX = 0.306
-MEASURED_ON_CORPUS_MIN = 0.442
-
 
 # --------------------------------------------------------------------------
 # tokenize
@@ -192,43 +183,72 @@ def test_the_order_is_by_score_when_there_is_an_opinion():
 
 
 # --------------------------------------------------------------------------
-# RETRIEVAL_RELEVANCE_FLOOR
+# the relevance floor
 # --------------------------------------------------------------------------
 
-def test_the_floor_sits_between_the_two_measured_populations():
-    """Pinned against the measurement, not against the literal 0.37.
+def test_a_measured_record_becomes_the_floor(tmp_path, monkeypatch):
+    """The floor is the calibrator's record, stored beside the corpus."""
+    import json
 
-    0.3 failed precisely by being inside the off-corpus population: the
-    project's own `offcorpus` probe scored 0.306 and was served straight to the
-    Builder as though the corpus had answered it. A future edit that slides the
-    floor back under 0.306 reintroduces that, and it would show up nowhere else
-    -- the run completes, the findings look like findings.
+    from langgraph_agent import graphrag_server
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "knowledge" / graphrag_server.FLOOR_CALIBRATION_FILE).write_text(
+        json.dumps({"model": graphrag_server.EMBEDDING_MODEL_NAME, "floor": 0.5}),
+        encoding="utf-8",
+    )
+
+    assert graphrag_server.relevance_floor() == 0.5
+
+
+def test_an_unmeasured_corpus_has_no_floor(tmp_path, monkeypatch):
+    """None, never a borrowed number: a cosine means nothing across models.
+
+    `nodes.py` treats a None floor as "retrieval cannot tell an answer from
+    noise" and hands every search to the Researcher's model. The last hard-coded
+    number earned its removal by filing a question the corpus cannot answer
+    under answered -- and a missing floor must fail loud in exactly the way a
+    wrong one cannot.
     """
-    assert MEASURED_OFF_CORPUS_MAX < RETRIEVAL_RELEVANCE_FLOOR, (
-        "a question the corpus cannot answer would be treated as answered"
+    from langgraph_agent import graphrag_server
+
+    monkeypatch.chdir(tmp_path)
+
+    assert graphrag_server.relevance_floor() is None
+
+
+def test_a_record_for_another_model_is_no_floor(tmp_path, monkeypatch):
+    """A corpus can outlive its model; the old number must not survive that."""
+    import json
+
+    from langgraph_agent import graphrag_server
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "knowledge").mkdir()
+    (tmp_path / "knowledge" / graphrag_server.FLOOR_CALIBRATION_FILE).write_text(
+        json.dumps({"model": "some-other-model", "floor": 0.5}),
+        encoding="utf-8",
     )
-    assert RETRIEVAL_RELEVANCE_FLOOR < MEASURED_ON_CORPUS_MIN, (
-        "a question the corpus does answer would be sent to the seat instead"
-    )
+
+    assert graphrag_server.relevance_floor() is None
 
 
-def test_the_floor_is_defined_where_the_embedding_model_is_named():
-    """It is a property of the model, and meaningless apart from it.
+def test_nodes_read_the_floor_and_never_hard_code_one():
+    """The floor is a property of the model, and meaningless apart from it.
 
-    A cosine has no absolute meaning across models, so the floor lives beside
-    EMBEDDING_MODEL_NAME rather than beside the comparison in `nodes.py`, and a
-    model other than MiniLM gets its own, measured on its own corpus. The
-    assertion with teeth is on `nodes.py`: it must *read* the active model's
-    floor through `relevance_floor`, never carry its own copy of a number, or
-    a model swap moves one and leaves the other behind.
+    It lives in `graphrag_server`, beside `EMBEDDING_MODEL_NAME`, and the
+    assertion with teeth is on `nodes.py`: it must *read* it through
+    `relevance_floor`, never carry its own copy of a number, or the two drift.
     """
     import langgraph_agent.graphrag_server as server
     import langgraph_agent.nodes as nodes
 
     assert hasattr(server, "EMBEDDING_MODEL_NAME")
-    assert isinstance(server.RETRIEVAL_RELEVANCE_FLOOR, float)
-
-    assert server.relevance_floor(server.EMBEDDING_MODEL_NAME) == server.RETRIEVAL_RELEVANCE_FLOOR
+    assert callable(server.relevance_floor)
+    assert not hasattr(server, "RETRIEVAL_RELEVANCE_FLOOR"), (
+        "the floor is measured per corpus, never a constant"
+    )
 
     source = nodes.__file__ or ""
     assert source, "the module has to be on disk to read"
@@ -243,6 +263,8 @@ def test_the_floor_is_defined_where_the_embedding_model_is_named():
 
 class _FakeEmbedder:
     """A tokenizer and a vector -- enough for chunking, no model loaded."""
+
+    placement_note: str | None = None
 
     class _Tokenizer:
         def __call__(self, text: str, **kwargs: Any) -> dict[str, Any]:
@@ -373,7 +395,7 @@ def test_a_reranked_result_still_carries_its_own_dense_score(kb):
 
     Every candidate comes from the dense window and keeps the distance that
     window gave it. A fused *rank* leaking into this field would feed
-    RETRIEVAL_RELEVANCE_FLOOR a number that is not a similarity at all.
+    the relevance floor a number that is not a similarity at all.
     """
     _seed_identifier_corpus(kb)
 

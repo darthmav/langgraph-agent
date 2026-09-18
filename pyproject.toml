@@ -39,9 +39,11 @@ dependencies = [
     "httpx>=0.27.0",
     # GraphRAG dependencies
     "chromadb>=0.5.0",
-    "sentence-transformers>=3.0.0",
+    # The chunker cuts passages with the embedding model's own tokenizer
+    # (Qwen/Qwen3-Embedding-8B), loaded through this. Nothing embeds in-process:
+    # qwen3-embedding:latest runs under the local Ollama daemon.
+    "transformers>=4.51.0",
     "networkx>=3.0",
-    "faiss-cpu>=1.8.0",
     # Self-healing (retry / circuit breaker)
     "tenacity>=8.2.0",
     "pybreaker>=1.2.0",

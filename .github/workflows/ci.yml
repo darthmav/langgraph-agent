@@ -62,17 +62,6 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install CPU-only torch
-        # Before the project, and deliberately. `sentence-transformers` pulls
-        # torch, and torch from PyPI drags in the whole CUDA stack -- measured
-        # at 19 packages including cuda-toolkit, nvidia-cudnn and triton, none
-        # of which a GPU-less runner can use. Installing torch from the CPU
-        # index first pins it, so the dependency resolution below cannot reach
-        # for the CUDA build. The project already forces CPU at import time
-        # (`CUDA_VISIBLE_DEVICES=""` in graphrag_server.py), so this only makes
-        # the install match what the code was always going to do.
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-
       - name: Install project
         run: pip install -e ".[dev]"
 

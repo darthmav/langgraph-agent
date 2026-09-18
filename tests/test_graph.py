@@ -2754,6 +2754,9 @@ def test_the_planner_is_shown_the_files_the_corpus_ranks_closest(monkeypatch):
     from langgraph_agent import nodes
 
     monkeypatch.setattr(nodes, "PLANNER_PROJECT_MAP", True)
+    # The floor is measured per corpus and `None` until then; pin one so the
+    # ranking assertion below is about the filter and not about the absence.
+    monkeypatch.setattr("langgraph_agent.graphrag_server.relevance_floor", lambda: 0.37)
     monkeypatch.setattr(nodes, "_call_mcp_tool_sync", _search_answering([
         {"id": "src/app.py", "score": 0.61, "content": "def render_graph():\n    ...",
          "metadata": {"path": "src/app.py"}},
@@ -2765,13 +2768,16 @@ def test_the_planner_is_shown_the_files_the_corpus_ranks_closest(monkeypatch):
     nodes._make_plan(initial_state("Fix the graph rendering"))
 
     assert "src/app.py (0.61): def render_graph(): ..." in llm.seen
-    # Under RETRIEVAL_RELEVANCE_FLOOR is not a related file, so it is not shown.
+    # Under the relevance floor is not a related file, so it is not shown.
     assert "notes/unrelated.md" not in llm.seen
 
 
 def test_no_map_when_nothing_clears_the_floor(monkeypatch):
     from langgraph_agent import nodes
 
+    # A pinned floor, so the empty map is the filter's doing -- with the floor
+    # unmeasured (`None`) there is no map either, and that path is not this test.
+    monkeypatch.setattr("langgraph_agent.graphrag_server.relevance_floor", lambda: 0.37)
     monkeypatch.setattr(nodes, "_call_mcp_tool_sync", _search_answering([
         {"id": "a.md", "score": 0.10, "content": "x"},
     ]))

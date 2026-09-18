@@ -98,7 +98,7 @@ def test_an_empty_query_returns_nothing_rather_than_arbitrary_passages(kb):
     """The empty string still embeds, and what it matches is not an answer.
 
     Measured on the real corpus before this guard: `search("")` returned five
-    chunks with a top score of 0.412 — *above* `RETRIEVAL_RELEVANCE_FLOOR`, so
+    chunks with a top score of 0.412 — *above* the relevance floor of the time, so
     `_gather_research` would have formatted them as findings and announced
     "Research complete" over passages selected by nothing at all. That is the
     fabricated retrieval hit this module was fixed for once already, arriving

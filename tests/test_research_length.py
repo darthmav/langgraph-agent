@@ -66,7 +66,7 @@ def test_the_cap_clears_a_typical_passage_by_a_wide_margin():
     """Measured p99 of this corpus is 1,373 characters; the cap is above it.
 
     Pinned so the cap cannot drift back under the population it has to clear —
-    that is the mistake `RETRIEVAL_RELEVANCE_FLOOR` was corrected for, one
+    that is the mistake the hard-coded relevance floor was corrected for, one
     level along.
     """
     assert RESEARCH_SNIPPET_CHARS > 1373
@@ -91,6 +91,9 @@ def test_every_retrieved_result_is_forwarded(monkeypatch):
             "source": "local_graphrag",
         }
 
+    # A floor, pinned: unmeasured (`None`) would route to the seat instead,
+    # and none of the results above would be forwarded at all.
+    monkeypatch.setattr("langgraph_agent.graphrag_server.relevance_floor", lambda: 0.37)
     monkeypatch.setattr(nodes, "_call_mcp_tool_sync", fake_tool)
     findings, status = nodes._gather_research(
         {"plan": "study bm25", "goal": "g", "research": "", "messages": []}  # type: ignore[arg-type]
@@ -113,6 +116,7 @@ def test_each_finding_names_the_file_and_line_it_came_from(monkeypatch):
             "source": "local_graphrag",
         }
 
+    monkeypatch.setattr("langgraph_agent.graphrag_server.relevance_floor", lambda: 0.37)
     monkeypatch.setattr(nodes, "_call_mcp_tool_sync", fake_tool)
     findings, _ = nodes._gather_research(
         {"plan": "p", "goal": "g", "research": "", "messages": []}  # type: ignore[arg-type]

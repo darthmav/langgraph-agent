@@ -395,7 +395,7 @@ def test_terminal_timeout_clears_this_project_own_scripts():
     """The default must outlast the scripts this repo tells people to run.
 
     Pinned against the measurement rather than the literal number, the way
-    RETRIEVAL_RELEVANCE_FLOOR is: `scripts/verify_and_test.py` completes clean
+    the relevance floor's calibration is: `scripts/verify_and_test.py` completes clean
     in ~33s, and the old default of 30 reported it FAILED for the difference.
     A default at or under that is the false accusation coming back.
     """

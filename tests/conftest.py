@@ -112,33 +112,3 @@ def _no_planner_project_map(monkeypatch):
     that exercise the map turn it back on and answer the search themselves.
     """
     monkeypatch.setattr(_nodes, "PLANNER_PROJECT_MAP", False)
-
-
-@pytest.fixture(autouse=True)
-def _embedder_on_the_cpu(monkeypatch):
-    """No test puts the embedding model on a card.
-
-    `EMBEDDING_DEVICE` comes from the developer's environment, and on a machine
-    that names a card every test that embeds would load the model there --
-    taking memory a local seat may be using, and making results depend on
-    which machine ran the suite. The tests that exercise a card set the
-    setting themselves and answer with a fake model.
-    """
-    import langgraph_agent.graphrag_server as graphrag_server
-
-    monkeypatch.setattr(graphrag_server, "EMBEDDING_DEVICE", "cpu")
-
-
-@pytest.fixture(autouse=True)
-def _the_default_embedding_model(monkeypatch):
-    """Every test indexes and searches with MiniLM, whatever the developer chose.
-
-    `EMBEDDING_MODEL` comes from the environment, and the console's choice is a
-    process-global: either one leaking into a test would point its corpus at
-    another directory and its searches at a daemon. The tests that exercise
-    another model set it themselves and answer with fakes.
-    """
-    import langgraph_agent.graphrag_server as graphrag_server
-
-    monkeypatch.setattr(graphrag_server, "EMBEDDING_MODEL", graphrag_server.EMBEDDING_MODEL_NAME)
-    monkeypatch.setattr(graphrag_server, "_embedding_model_override", None)

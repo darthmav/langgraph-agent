@@ -318,7 +318,7 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
   <div id="seats"></div>
   <div id="embed" class="seat embedder">
     <div class="nm"><span class="dot"></span>embedder</div>
-    <select id="embed-select" title="Switch the embedding model. Each model has its own corpus, which the next run builds if it has none, and its own relevance floor. Lasts until the server restarts."></select>
+    <select id="embed-select" title="The embedding model: qwen3-embedding:latest, served by the local Ollama daemon. There is only the one -- a corpus is built and searched by the model it was built with."></select>
     <div class="plc"><span id="embed-where">runs on this machine</span></div>
     <div id="embed-chips"></div>
   </div>
@@ -379,7 +379,7 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
           <input id="topk" type="number" value="5" min="1" max="25" style="width:74px" title="top k">
           <button class="go" id="qbtn">Search</button>
         </div>
-        <div class="scroll" id="hits"><div class="muted"><span id="hits-model">all-MiniLM-L6-v2</span> &middot; cosine &middot; embeddings run locally</div></div>
+        <div class="scroll" id="hits"><div class="muted"><span id="hits-model">qwen3-embedding:latest</span> &middot; cosine &middot; embeddings run locally</div></div>
       </div>
       <div class="col" id="tele">
         <div class="hd"><span>Telemetry</span><span id="clr">clear</span></div>
@@ -492,7 +492,7 @@ $$(".tab").forEach(t => t.onclick = () => {
 });
 
 /* ---------- crew ---------- */
-let OPTIONS = [], OLLAMA_TAGS = [];
+let OPTIONS = [];
 
 // `force` repaints even while the operator is using the panel. The 5s poll
 // never forces; an action that changed a seat always does.
@@ -512,7 +512,6 @@ async function loadCrew(quiet, force){
     rpc("llm_options", {}, quiet),
   ]);
   OPTIONS = optData.options || [];
-  OLLAMA_TAGS = optData.ollama_tags || [];
 
   const panel = $("#seats");
   if(!force && panel.contains(document.activeElement)) return;
@@ -525,7 +524,7 @@ async function loadCrew(quiet, force){
   // lit for 12s restarted from red at each of these five-second polls, in step
   // with them. `force` always rebuilds -- that is a caller putting the controls
   // back to what the server says after asking it for a change.
-  const drawn = JSON.stringify([seats, OPTIONS, OLLAMA_TAGS]);
+  const drawn = JSON.stringify([seats, OPTIONS]);
   if(!force && drawn === CREW_DRAWN) return;
   CREW_DRAWN = drawn;
   $("#crewn").textContent = seats.length;
@@ -590,12 +589,9 @@ function optionsHtml(seat){
     if(!groups.has(g)) groups.set(g, []);
     groups.get(g).push(o);
   }
-  // Whatever the daemon actually carries, so a pulled-but-uncurated tag is
-  // still selectable; the curated entries above it keep their labels.
-  const curated = new Set(OPTIONS.filter(o => o.provider === "ollama").map(o => o.model));
-  const extra = OLLAMA_TAGS.filter(t => !curated.has(t));
-  if(extra.length) groups.set("Ollama (installed)", extra.map(t => ({label:t, provider:"ollama", model:t})));
-
+  // Only what llm_options offers: other tags the daemon carries are left out,
+  // and set_seat refuses them. A seat already on something else (from .env)
+  // still shows it, under "Current", so the card never names the wrong model.
   let html = "";
   for(const [name, opts] of groups){
     html += `<optgroup label="${esc(name)}">`;
@@ -2042,38 +2038,24 @@ function showEmbeddingDevice(dev){
     : `runs on ${dev.active}`;
 }
 
-// The embedding dropdown. Rebuilt from the server on every poll like the seat
-// cards, and left alone while it has focus for the same reason: a repaint
-// under an open <select> closes it on whoever is choosing.
-async function loadEmbedding(quiet, force){
+// The embedder card. There is exactly one embedding model and the daemon
+// serves it, so the card reports rather than offers: the select is a caption,
+// always disabled, and the only thing that changes is the chips under it.
+async function loadEmbedding(quiet){
   const data = await rpc("embedding_options", {}, quiet);
-  if(!force && $("#embed").contains(document.activeElement)) return;
-  const groups = new Map();
-  for(const o of data.options || []){
-    if(!groups.has(o.group)) groups.set(o.group, []);
-    groups.get(o.group).push(o);
-  }
-  let html = "";
-  for(const [name, opts] of groups){
-    html += `<optgroup label="${esc(name)}">`;
-    for(const o of opts)
-      html += `<option value="${esc(o.model)}"${o.model === data.active ? " selected" : ""}>${esc(o.label)}</option>`;
-    html += `</optgroup>`;
-  }
-  const select = $("#embed-select");
-  select.innerHTML = html;
-  select.disabled = data.switchable === false;
   const current = (data.options || []).find(o => o.model === data.active) || {};
+  const select = $("#embed-select");
+  select.innerHTML = current.model ? `<option selected>${esc(current.model)}</option>` : "";
+  select.disabled = true;
   $("#embed-chips").innerHTML = embeddingChips(current);
   const hits = $("#hits-model");
   if(hits) hits.textContent = data.active;
   showEmbeddingDevice(data.device);
 }
 
-// What the chosen model's corpus and floor mean for the next run, which is
-// the real cost of the choice: no corpus means the next run builds one -- hours
-// for a large model -- and no floor means every search goes to the
-// Researcher's model instead of being answered from the corpus.
+// What the corpus and floor mean for the next run: no corpus means the next
+// run builds one, and no floor means every search goes to the Researcher's
+// model instead of being answered from the corpus.
 function embeddingChips(o){
   const chips = [];
   if(o.corpus === "absent")
@@ -2081,7 +2063,7 @@ function embeddingChips(o){
   else if(o.corpus === "empty") chips.push(`<span class="chip warn">corpus empty</span>`);
   else if(o.corpus) chips.push(`<span class="chip">corpus built</span>`);
   if(typeof o.floor === "number"){
-    const how = o.floor_source === "measured" ? "Measured by hand for this model." : "Measured on this model's corpus by the run that built it.";
+    const how = "Measured on the corpus by the run that built it.";
     chips.push(`<span class="chip" title="${esc(how)}">floor ${o.floor.toFixed(2)}</span>`);
   } else if(o.floor_source === "no_gap"){
     chips.push(`<span class="chip bad" title="This model could not separate questions the corpus answers from questions it cannot, so every search goes to the Researcher's model.">no floor</span>`);
@@ -2089,15 +2071,6 @@ function embeddingChips(o){
     chips.push(`<span class="chip warn" title="Measured by the run that finishes this model's corpus. Until then every search goes to the Researcher's model.">floor not measured</span>`);
   }
   return chips.join(" ");
-}
-
-async function setEmbeddingModel(model){
-  // Repainted from the server's answer either way, so a refused switch cannot
-  // leave the dropdown showing a model the corpus is not using.
-  try{ await rpc("set_embedding_model", {model}); }
-  catch(e){ /* the refusal is already on the telemetry log */ }
-  await loadEmbedding(true, true).catch(()=>{});
-  await poll(true).catch(()=>{});
 }
 
 async function poll(quiet){
@@ -2128,7 +2101,6 @@ async function poll(quiet){
 }
 
 (async () => {
-  $("#embed-select").onchange = e => setEmbeddingModel(e.target.value);
   await poll(true);
   setClearButton();
   await reattach();

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Maintain `langgraph-agent` as a cloud-only 4-Agent AI system for software development experiments. Inference is cloud-only: every seat defaults to an Ollama `:cloud` tag proxied to ollama.com by the local daemon, which holds the credentials, so no API key of your own is required. Anthropic and OpenAI remain available per seat. The only models that run locally are embedding models -- `qwen3-embedding:latest` through the Ollama daemon by default, or `all-MiniLM-L6-v2` in-process -- which belong to GraphRAG rather than to a seat.
+Maintain `langgraph-agent` as a cloud-only 4-Agent AI system for software development experiments. Inference is cloud-only: every seat defaults to an Ollama `:cloud` tag proxied to ollama.com by the local daemon, which holds the credentials, so no API key of your own is required. Anthropic and OpenAI remain available per seat. The embedding model (`qwen3-embedding:latest`) is served by the local Ollama daemon and belongs to GraphRAG, not to a seat.
 
 The implementation follows the documented architecture: Architect, Planner, Researcher, Builder, a shared `AgentState`, GraphRAG read-only tools for the Researcher, filesystem/git/terminal/test tools for the Builder, and LangGraph as the only router.
 
@@ -23,7 +23,7 @@ The implementation follows the documented architecture: Architect, Planner, Rese
 | Researcher | Ollama `kimi-k3:cloud` | Override with `RESEARCHER_PROVIDER` / `RESEARCHER_MODEL` |
 | Builder    | Ollama `qwen3.5:397b-cloud` | Override with `BUILDER_PROVIDER` / `BUILDER_MODEL` |
 | OpenAI fallback | `gpt-4o-mini` | Set `OPENAI_API_KEY` and `OPENAI_MODEL` to use |
-| Embeddings | Ollama `qwen3-embedding:latest` | Runs on the local daemon; `all-MiniLM-L6-v2` still chunks every corpus. Override with `EMBEDDING_MODEL` |
+| Embeddings | `qwen3-embedding:latest` (Ollama daemon) | The one embedding model; the daemon owns GPU placement. Its tokenizer is fetched for the chunker |
 | Thinking   | Off | Every seat's box starts unticked; `DEFAULT_THINKING` in `config.py` |
 
 ## Implementation Notes

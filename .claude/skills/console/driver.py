@@ -168,8 +168,8 @@ def cmd_reindex(_args: list[str]) -> int:
         rc = cmd_up([])
         if rc != 0:
             return rc
-    print("running a goal so the corpus is built (first time downloads "
-          "all-MiniLM-L6-v2 from HuggingFace)...")
+    print("running a goal so the corpus is built (first time the daemon loads "
+          "qwen3-embedding:latest, and may pull it)...")
     # Generous timeout: the index itself is under a minute, but the run that
     # carries it is four cloud seats long. `discuss_only` keeps the Builder
     # away from the working tree -- the corpus is the only thing wanted here.

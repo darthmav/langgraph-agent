@@ -33,21 +33,16 @@ systemctl is-active  ollama.service   # active
 ## Build
 
 There is no venv in a fresh checkout. On Arch / Omarchy `./install.sh` builds
-it, and the order inside is load-bearing: torch goes in **before** the project,
-because `sentence-transformers` pulls torch and pip would otherwise take PyPI's
-build with its whole CUDA stack. A torch already in `.venv` is kept and pinned
--- a GPU build is the machine's own setup, which the installer proves but never
-installs -- and a machine with no card gets the CPU build. By hand, on a
-machine with no card:
+it. Nothing in the project touches torch or a card itself -- the embedding
+model is `qwen3-embedding:latest`, served by the local Ollama daemon, which
+owns its GPU placement. The only Hugging Face download is that model's
+tokenizer, which the in-process chunker cuts passages with. By hand:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 .venv/bin/python -m pip install -e ".[dev]"
 ```
-
-CI uses the same CPU-first ordering (`.github/workflows/ci.yml`).
 
 Verify:
 
@@ -76,7 +71,7 @@ server      up
 `up` takes ~8s. A passing `smoke` looks like this:
 
 ```
-  PASS  status responds  embedding=all-MiniLM-L6-v2
+  PASS  status responds  embedding=qwen3-embedding:latest
   PASS  corpus indexed  corpus=indexed
   PASS  graph has nodes  nodes=1134 edges=2272
   PASS  graph not stale
@@ -114,8 +109,9 @@ button. Any run does it, so this is only a shortcut:
 ```
 
 It starts the server if it is down and drives one discussion-only goal. Takes a
-minute or two the first time (it downloads `all-MiniLM-L6-v2` from
-HuggingFace); after that a rebuild that changes nothing costs ~0.1s, because a
+while the first time (the local Ollama daemon loads `qwen3-embedding:latest`
+and may pull it first); after that a rebuild that changes nothing costs ~0.1s,
+because a
 document whose text has not changed keeps the vectors it has. Expect:
 
 ```

@@ -444,9 +444,9 @@ def test_the_phase_opens_the_door_only_for_a_page_it_keeps(monkeypatch):
 def test_opening_a_corpus_does_not_load_the_embedding_model(store):
     """The one thing that runs on this machine loads when something embeds.
 
-    It used to load in `__init__`, so every header poll paid for it and
-    importing the module pulled in torch behind it. Counting documents,
-    listing them, drawing the graph and exporting all touch neither.
+    It used to load in `__init__`, so every header poll paid for it. Counting
+    documents, listing them, drawing the graph and exporting all embed nothing,
+    so none of them may reach for the model -- the daemon's or otherwise.
     """
     kb = GraphRAGKnowledgeBase(store)
 
@@ -457,11 +457,18 @@ def test_opening_a_corpus_does_not_load_the_embedding_model(store):
     assert kb._embedder is None
 
 
-def test_importing_the_server_does_not_import_sentence_transformers():
+def test_importing_the_server_never_imports_an_in_process_embedder():
     """`serve` is imported by this suite already; the assertion is that its
-    import did not drag the model in. Skipped if something else has since."""
-    if "sentence_transformers" in sys.modules:
-        pytest.skip("another test in this session has already loaded the model")
+    import dragged no embedding stack in.
+
+    This is now a guarantee rather than a laziness check: there is no
+    in-process embedder at all -- the daemon embeds -- so neither package may
+    appear, whatever the test order. `transformers` is allowed the moment
+    something chunks (its tokenizer is the chunker's), but importing `serve`
+    alone must not have paid for it.
+    """
+    assert "sentence_transformers" not in sys.modules
+    assert "torch" not in sys.modules
 
     assert "serve" in sys.modules
-    assert "torch" not in sys.modules
+    assert "transformers" not in sys.modules

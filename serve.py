@@ -45,11 +45,8 @@ from langgraph_agent.config import (  # noqa: E402
     AGENT_LLM_OPTIONS,
     AGENTS,
     get_agent_status,
-    list_ollama_models,
-    ollama_model_capabilities,
     set_agent_llm,
     set_agent_thinking,
-    unload_local_seat_models,
 )
 from langgraph_agent.control import ACTIVITY, EMBEDDER_ACTIVITY, RUN_CONTROL  # noqa: E402
 from langgraph_agent.corpus_health import (  # noqa: E402
@@ -62,10 +59,8 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     INDEXABLE_SUFFIXES,
     NO_CORPUS_NOTE,
     GraphRAGKnowledgeBase,
-    active_embedding_model,
     calibrate_relevance_floor,
     corpus_state,
-    embedding_backend,
     embedding_device_status,
     floor_calibration,
     get_knowledge_base,
@@ -73,7 +68,6 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     iter_project_files,
     open_knowledge_base,
     relevance_floor,
-    set_embedding_model,
     store_uploaded_document,
 )
 from langgraph_agent.web_research import research_online  # noqa: E402
@@ -547,6 +541,19 @@ def rpc_set_seat(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unknown agent: {agent!r}")
     if not provider or not model:
         raise ValueError("Provider and model are both required")
+    # The dropdowns are the whole list, so a tab still showing an older one
+    # cannot seat a model the console no longer offers. A seat's *own* current
+    # model is the one exception, and it is not a courtesy: the console renders
+    # it under "Current" precisely when it is not in the list -- a seat
+    # configured from `.env` on a provider the offer no longer carries -- so
+    # refusing it makes that option unselectable and the only way back to where
+    # the process started is editing `.env` and restarting.
+    allowed = {(o["provider"], o["model"]) for o in AGENT_LLM_OPTIONS}
+    seated = get_agent_status(agent)
+    allowed.add((seated["provider"], seated["model"]))
+    if (provider, model) not in allowed:
+        offered = ", ".join(o["model"] for o in AGENT_LLM_OPTIONS)
+        raise ValueError(f"{model!r} is not a seat model the console offers: {offered}")
 
     set_agent_llm(agent, provider, model)
     return {"ok": True, "role": agent, **get_agent_status(agent)}
@@ -571,86 +578,57 @@ def rpc_set_thinking(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def rpc_llm_options(_: dict[str, Any]) -> dict[str, Any]:
-    """Model choices for the seat dropdowns.
+    """Model choices for the seat dropdowns: `AGENT_LLM_OPTIONS`, and nothing else.
 
-    `ollama_tags` is what the daemon actually carries, so a seat can be pointed
-    at a tag that is pulled but not in the curated list.
+    Other tags the daemon carries are not offered, so pulling a model does not
+    put it in front of a seat.
     """
-    return {"options": AGENT_LLM_OPTIONS, "ollama_tags": list_ollama_models()}
+    return {"options": AGENT_LLM_OPTIONS}
 
 
-def _embedding_choice(model: str, group: str) -> dict[str, Any]:
-    """One entry of the embedding dropdown, with what choosing it would cost."""
-    state, _ = corpus_state(model=model)
-    floor = relevance_floor(model)
-    if model == EMBEDDING_MODEL_NAME:
-        floor_source = "measured"
-    elif floor_calibration(model) is None:
-        floor_source = "not_measured"
-    else:
-        floor_source = "calibrated" if floor is not None else "no_gap"
+def _embedding_choice() -> dict[str, Any]:
+    """The one embedding model entry -- qwen3-embedding, served by the daemon."""
+    state, _ = corpus_state()
+    record = floor_calibration()
+    floor = relevance_floor()
     return {
-        "model": model,
-        "label": model,
-        "group": group,
-        "backend": embedding_backend(model),
+        "model": EMBEDDING_MODEL_NAME,
         "corpus": state,
         "floor": floor,
-        "floor_source": floor_source,
+        # A corpus has no floor until a run measures one, and none for good
+        # when the measurement found no gap; the console words those apart.
+        "floor_source": "measured" if floor is not None else ("no_gap" if record else "not_measured"),
     }
 
 
 def rpc_embedding_options(_: dict[str, Any]) -> dict[str, Any]:
-    """The embedding models the console can switch between, and the active one.
+    """The embedding model -- a single one, served by the Ollama daemon.
 
-    MiniLM, which runs in this process, plus every tag the Ollama daemon says
-    can embed -- asked of the daemon's capabilities rather than guessed from a
-    name, the way the seat cards ask about thinking. Each entry carries the
-    state of that model's own corpus and where its relevance floor came from,
-    because those two are what switching costs: a model with no corpus is built
-    by the next run, and a model with no floor hands every search to the
-    Researcher's model.
+    `qwen3-embedding:latest` is the only embedding model. The entry carries the
+    state of the corpus and the relevance floor measured against it -- `None`
+    until the first run on a whole corpus has measured one. The card reports
+    rather than offers (`set_embedding_model` refuses by name), so there is no
+    `switchable`: nothing here can be switched.
     """
-    active = active_embedding_model()
-    choices = [_embedding_choice(EMBEDDING_MODEL_NAME, "In this process")]
-    installed = [
-        tag for tag in list_ollama_models()
-        if "embedding" in (ollama_model_capabilities(tag) or [])
-    ]
-    choices += [_embedding_choice(tag, "Ollama (installed)") for tag in installed]
-    if all(choice["model"] != active for choice in choices):
-        choices.insert(0, _embedding_choice(active, "Current"))
-    with _run_lock:
-        running = bool(_run_progress["running"])
     return {
-        "active": active,
-        "options": choices,
-        "switchable": not running,
+        "active": EMBEDDING_MODEL_NAME,
+        "options": [_embedding_choice()],
         "device": embedding_device_status(),
     }
 
 
 def rpc_set_embedding_model(params: dict[str, Any]) -> dict[str, Any]:
-    """Switch the embedding model for the lifetime of this process.
+    """Switch the embedding model -- not supported. There is only the one.
 
-    Refused mid-run, because switching models is switching corpora and the
-    corpus a run searches must not change underneath it. Refused for a model
-    the console does not offer, so a typo cannot point the corpus at a tag that
-    embeds nothing. Nothing is built here: the next run builds the new model's
-    corpus if it has none, the one act allowed to bring a corpus into being.
+    This endpoint is kept for compatibility but always refuses:
+    `qwen3-embedding:latest` is the only embedding model, served by the local
+    Ollama daemon, and a corpus is only ever built and searched by the model it
+    was built with.
     """
-    global kb
-    model = _str_param(params, "model").strip()
-    offered = {choice["model"] for choice in rpc_embedding_options({})["options"]}
-    if model not in offered:
-        raise ValueError(
-            f"{model!r} is not an embedding model this machine offers: "
-            f"{', '.join(sorted(offered))}"
-        )
-    _refuse_while_a_run_is_in_flight("switched to another embedding model")
-    set_embedding_model(model)
-    kb = None
-    return rpc_embedding_options({})
+    raise ValueError(
+        "Switching embedding models is not supported. qwen3-embedding:latest "
+        "is the only embedding model and is served by the local Ollama daemon."
+    )
 
 
 def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
@@ -964,123 +942,38 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
     return {"exiting": True, "running": False, "detail": "The server is exiting."}
 
 
-def _claim_the_embedder_before_the_run() -> dict[str, Any]:
-    """Put the embedder on its card before any local seat is fitted beside it.
-
-    The order is the whole point, and it cannot be left to whatever embeds
-    first. llama.cpp fits a model around what a card already carries and never
-    moves it afterwards, so a 3 GB card shared with a local seat takes both in
-    exactly one arrangement: the embedder holds its memory, and the seat loads
-    into the rest. Measured with the seat's KV cache at q8_0, that left the
-    seat 49 of 49 layers on the GPU at unchanged speed; the other way round,
-    the embedder found 11 MiB free and failed. A run's first search is inside
-    the Planner's node, after the previous run's seat may still be loaded --
-    so the placement is made here, before the corpus phase, which then embeds
-    on the card too.
-
-    When the card is full because a seated model is still loaded, that model
-    is unloaded first (`unload_local_seat_models`) and reloads around the
-    embedder on its next call. That happens once per server rather than once
-    per run: an embedder already on its card is left there.
-
-    Silent on `cpu`, and opens nothing there: a CPU embedder has no order to
-    get right, and the setting is the machine's, which the header reports.
-    Never raises; a failure leaves the embedder on the CPU and the run goes on.
-    """
-    where = embedding_device_status()
-    if where["configured"] in ("cpu", "ollama"):
-        # Nothing to order: a CPU embedder takes no card, and an Ollama one is
-        # placed by the daemon.
-        return {"source": where["configured"]}
-    if RUN_CONTROL.stopped():
-        return {"source": "stopped"}
-    kb_or_none = _open_kb()
-    if kb_or_none is None:
-        # Nothing indexed yet, so nothing searches before the corpus phase
-        # builds the store -- and that phase embeds, which loads the model onto
-        # the card by itself.
-        return {"source": "no_corpus"}
-    if where["active"] != where["configured"]:
-        # Said before the work, for the reason the corpus phase says its line
-        # first: a load plus an unload takes a while, and `running` with no
-        # node and no message is what a wedged run looks like.
-        with _run_lock:
-            _run_progress["messages"] = [
-                f"[Embedder] Placing the embedding model on {where['configured']} "
-                "before the run starts."
-            ]
-    try:
-        return kb_or_none.claim_embedding_device(make_room=unload_local_seat_models)
-    except Exception as exc:
-        return {"source": "error", "configured": where["configured"], "note": str(exc)}
-
-
-def _embedder_feed_line(report: dict[str, Any]) -> str | None:
-    """A line only when placing the embedder did something worth knowing.
-
-    Silence is right here most of the time, unlike the corpus line: where the
-    embedder runs is on the console header on every poll, and an embedder
-    already on its card did nothing this run. What the header cannot say is
-    that a seat was unloaded to make room -- which is why that seat's next call
-    is slow -- or why a card was refused.
-    """
-    source = report.get("source")
-    if source == "claimed":
-        unloaded = report.get("unloaded") or []
-        room = ""
-        if unloaded:
-            one = len(unloaded) == 1
-            room = (
-                f" {', '.join(unloaded)} {'was' if one else 'were'} unloaded to make "
-                f"room, and {'reloads' if one else 'reload'} around it on the next call."
-            )
-        return f"[Embedder] Loaded onto {report.get('device')} before the seats open.{room}"
-    if source == "unavailable":
-        return (
-            f"[Embedder] {report.get('configured')} could not take the embedding model, "
-            f"so it runs on the CPU: {report.get('note')}"
-        )
-    if source == "error":
-        return (
-            f"[Embedder] The embedding model could not be placed: {report.get('note')}. "
-            "It loads when first needed, on the CPU if the card still refuses."
-        )
-    return None
-
-
 def _calibrate_the_floor_before_the_run(corpus_report: dict[str, Any]) -> dict[str, Any]:
-    """Take the active model's relevance floor, the first time its corpus is whole.
+    """Measure the relevance floor the first time the corpus is whole.
 
-    MiniLM's floor was measured by hand and is never re-measured here. Any
-    other model has none until its corpus exists, and without one retrieval
-    cannot tell an answer from noise -- `_gather_research` hands every search
-    to the Researcher's model and the Planner gets no project map. So the run
-    that finishes a model's corpus measures its floor before any seat
-    searches, with the questions `calibrate_relevance_floor` keeps out of the
-    corpus, and the measurement is kept beside that corpus from then on.
+    A cosine similarity means nothing absolute and nothing across models, so
+    the floor is never a constant: the run that finishes building the corpus
+    asks `embedding_calibration.json`'s twelve questions the corpus answers and
+    twelve it cannot, and puts the floor in the middle of the gap. A model that
+    leaves no gap gets none, and then the Researcher's model answers every
+    search and the Planner gets no map, rather than a borrowed number misfiling
+    some question silently.
 
     Skipped when the corpus phase did not leave a whole corpus: a stopped or
     failed build would calibrate against a fraction of the project.
     """
-    model = active_embedding_model()
-    if model == EMBEDDING_MODEL_NAME or floor_calibration(model) is not None:
-        return {"source": "known", "model": model}
+    if floor_calibration() is not None:
+        return {"source": "known", "model": EMBEDDING_MODEL_NAME}
     if RUN_CONTROL.stopped() or corpus_report.get("stopped"):
-        return {"source": "stopped", "model": model}
+        return {"source": "stopped", "model": EMBEDDING_MODEL_NAME}
     if corpus_report.get("source") in ("error", "nothing_to_index"):
-        return {"source": "no_corpus", "model": model}
+        return {"source": "no_corpus", "model": EMBEDDING_MODEL_NAME}
     kb_or_none = _open_kb()
     if kb_or_none is None or corpus_state()[0] != "indexed":
-        return {"source": "no_corpus", "model": model}
+        return {"source": "no_corpus", "model": EMBEDDING_MODEL_NAME}
     with _run_lock:
         _run_progress["messages"] = [
-            f"[Embedder] Measuring a relevance floor for {model} on its corpus "
+            f"[Embedder] Measuring a relevance floor for {EMBEDDING_MODEL_NAME} on its corpus "
             "before the run starts."
         ]
     try:
         record = calibrate_relevance_floor(kb_or_none)
     except Exception as exc:
-        return {"source": "error", "model": model, "note": str(exc)}
+        return {"source": "error", "model": EMBEDDING_MODEL_NAME, "note": str(exc)}
     return {"source": "calibrated", **record}
 
 
@@ -1126,7 +1019,7 @@ def _index_the_project_before_the_run() -> dict[str, Any]:
     problem -- a corpus that was built once and has been drifting from the
     project ever since. Measured here on 2026-09-09: 8 documents in the store
     against a walk offering 103, every project query under
-    `RETRIEVAL_RELEVANCE_FLOOR`, and `rag_stats` reporting `indexed` with every
+    the relevance floor, and `rag_stats` reporting `indexed` with every
     counter non-zero and consistent.
 
     Both were left to a button. There is no button now: this runs on **every**
@@ -1196,29 +1089,19 @@ def _index_the_project_before_the_run() -> dict[str, Any]:
     # the console. This is the same reason `#run-live` names the last stage
     # instead of only counting seconds. A rebuild that changes nothing
     # overwrites this line in under a second and nobody ever reads it.
-    model = active_embedding_model()
     with _run_lock:
         _run_progress["messages"] = [
-            f"[Corpus] Checking {len(files)} project file(s) against the {model} "
+            f"[Corpus] Checking {len(files)} project file(s) against the {EMBEDDING_MODEL_NAME} "
             "corpus before the run starts."
         ]
 
     def progress(done: int, total: int) -> None:
-        # Rewritten in place as the phase goes, so a build that takes hours --
-        # any model but MiniLM -- reads as moving rather than wedged. A model the
-        # daemon split onto the CPU is named here as well: this is the line
-        # someone watches while the build is slow, and the split is why.
-        share = embedding_device_status()["cpu_share"]
-        split = (
-            f" Ollama holds {max(1, round(share * 100))}% of the model on the CPU, "
-            "which is why this is slow."
-            if share
-            else ""
-        )
+        # Rewritten in place as the phase goes, so a slow build reads as moving
+        # rather than wedged.
         with _run_lock:
             _run_progress["messages"] = [
-                f"[Corpus] Indexing with {model}: {done} of {total} project file(s) "
-                f"checked.{split}"
+                f"[Corpus] Indexing with {EMBEDDING_MODEL_NAME}: {done} of {total} project file(s) "
+                "checked."
             ]
 
     started = time.monotonic()
@@ -1240,7 +1123,7 @@ def _index_the_project_before_the_run() -> dict[str, Any]:
     report.update(
         source=source,
         corpus=state,
-        model=model,
+        model=EMBEDDING_MODEL_NAME,
         elapsed_s=round(time.monotonic() - started, 1),
     )
     return report
@@ -1348,7 +1231,7 @@ def _research_online_before_the_run(goal: str, requested: bool) -> dict[str, Any
     marketing page outscores every file in the checkout), skipping the phase
     when the corpus already answers the goal (backwards on the measurement --
     0.351 for a goal needing no web at all, 0.405 for one that did), and the
-    calibrated `RETRIEVAL_RELEVANCE_FLOOR` itself (3/13: every page cleared it).
+    calibrated relevance floor itself (3/13: every page cleared it).
     The lambda run shows why no fourth threshold will do better -- the *wrong*
     pages outscore the right ones on both instruments, 0.553-0.631 for AWS
     Lambda deployment guides against 0.459-0.550 for the Dolphin model pages
@@ -1502,15 +1385,6 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             stopping=False,
         )
 
-    # The embedder goes onto its card before anything else: the corpus phase
-    # embeds, and a local seat has to be fitted around the embedder rather than
-    # the embedder squeezed in beside the seat -- see
-    # `_claim_the_embedder_before_the_run`.
-    embedder_report = _claim_the_embedder_before_the_run()
-    embedder_line = _embedder_feed_line(embedder_report)
-    if embedder_line:
-        print(f"[run] embedder -> {embedder_line}")
-
     # The corpus first, then online research, then the Architect opens. Both
     # phases write to the corpus and both run outside `graph.stream`, because
     # `_refuse_while_a_run_is_in_flight` forbids every other writer from
@@ -1522,9 +1396,8 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     if corpus_line:
         print(f"[run] corpus -> {corpus_line}")
 
-    # A model other than MiniLM has no relevance floor until its corpus is
-    # whole, so it is measured here: after the corpus phase, before any seat
-    # searches.
+    # The embedder has no relevance floor until its corpus is whole, so it is
+    # measured here: after the corpus phase, before any seat searches.
     calibration_report = _calibrate_the_floor_before_the_run(corpus_report)
     calibration_line = _calibration_feed_line(calibration_report)
     if calibration_line:
@@ -1544,7 +1417,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     print(f"[run] research -> {research_line}")
     opening = [
         line
-        for line in (embedder_line, corpus_line, calibration_line, research_line)
+        for line in (corpus_line, calibration_line, research_line)
         if line
     ]
     with _run_lock:
@@ -1673,7 +1546,6 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             elapsed_s=elapsed,
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             web_research=research_report,
-            embedder=embedder_report,
         )
         _save_snapshot(payload)
         return payload
@@ -1690,7 +1562,6 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             error=str(exc),
             web_research=research_report,
-            embedder=embedder_report,
         )
         _save_snapshot(payload)
         raise
