@@ -1,5 +1,5 @@
 {
-  "_why": "The questions a new embedding model's relevance floor is measured with (calibrate_relevance_floor in graphrag_server.py): twelve this project's corpus answers, twelve it cannot. Kept in JSON because the walk does not index JSON -- anywhere the corpus reads, the unanswerable questions would be answered by their own text and leave no gap to put a floor in. Checked against all-MiniLM-L6-v2 on this corpus on 2026-09-12: answered 0.503-0.715, unanswerable 0.156-0.369, with RETRIEVAL_RELEVANCE_FLOOR inside the gap.",
+  "_why": "The questions the corpus's relevance floor is measured with (calibrate_relevance_floor in graphrag_server.py): twelve this project's corpus answers, twelve it cannot. Kept in JSON because the walk does not index JSON -- anywhere the corpus reads, the unanswerable questions would be answered by their own text and leave no gap to put a floor in. The floor goes in the middle of the gap between the two populations; a model that leaves no gap gets none, and then every search falls through to the Researcher's model.",
   "answered": [
     "How does the Builder prove that a file it wrote actually runs?",
     "What happens to the verdict when the Architect times out on the gate pass?",

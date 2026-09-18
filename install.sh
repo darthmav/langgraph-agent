@@ -7,26 +7,41 @@
 # "installed" that matters here.
 #
 # Everything it installs is free to use. System packages come from the Arch
-# repos, Python packages from PyPI, the embedding model from Hugging Face, the
-# SearxNG image from Docker Hub, and inference from Ollama Cloud tags through
-# the local daemon, which a free ollama.com account can run. No seat needs an
-# API key and nothing here asks for one: Anthropic and OpenAI stay optional,
-# and unconfigured.
+# repos, Python packages from PyPI, the embedding model from the local Ollama
+# daemon (its tokenizer from Hugging Face -- the chunker cuts passages with it
+# in-process), the SearxNG and PostgreSQL images from Docker Hub, and inference
+# from Ollama Cloud tags through that daemon, which a free ollama.com account
+# can run. No seat needs an API key and nothing here asks for one: Anthropic
+# and OpenAI stay optional, and unconfigured.
 #
-# The GPU side is the machine's own setup, not this script's: the driver,
-# torch's GPU build in .venv, and Ollama's GPU backend. None of it is installed
-# or configured here. What this script does is prove each one initialises, and
-# refuse to put a CPU or PyPI torch where a GPU build belongs.
+# The driver is the machine's own setup, not this script's -- Omarchy installs
+# it. Nothing in this project touches torch or a card itself: the daemon owns
+# the embedding model's placement, and OLLAMA_EMBED_OPTIONS in
+# graphrag_server.py loads it with every layer on the cards. The one GPU
+# decision made here is which Ollama build that daemon runs: a card too old for
+# Arch's CUDA 13 build gets Ollama's own CUDA 12 build instead, through
+# cuda-embed-ollama.sh (step 4). What this script then does is one real encode
+# through the class a run uses, and says what the daemon reported back.
 #
 # Usage:
 #   ./install.sh                everything below
 #   ./install.sh --minimal      skip the optional developer tools
 #   ./install.sh --no-system    skip pacman entirely (no sudo); Python side only
+#   ./install.sh --no-cuda12    keep Arch's Ollama build on NVIDIA cards its
+#                               CUDA 13 cannot drive (they embed on the CPU)
 #   ./install.sh --no-searxng   do not run a SearxNG for online research
+#   ./install.sh --no-postgres  do not run a PostgreSQL in Docker
+#   ./install.sh --no-docker-group
+#                               keep Docker behind sudo, Omarchy's default,
+#                               rather than adding you to the docker group
 #   ./install.sh --no-checks    skip ruff / mypy / pytest
 #   ./install.sh --no-probe     do not send each seat a one-word test prompt
 #   ./install.sh --no-desktop   do not add the console to the app launcher
 #   ./install.sh --yes          never prompt (pacman --noconfirm, no sign-ins)
+#
+#   SEARXNG_PORT=8899 ./install.sh
+#                               another loopback port for SearxNG when 8888 is
+#                               taken (it is Jupyter's default); .env works too
 
 set -euo pipefail
 
@@ -34,12 +49,15 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 VENV="$ROOT/.venv"
 
-MINIMAL=0 SYSTEM=1 SEARXNG=1 CHECKS=1 PROBE=1 DESKTOP=1 ASSUME_YES=0
+MINIMAL=0 SYSTEM=1 CUDA12=1 SEARXNG=1 POSTGRES=1 DOCKER_GROUP=1 CHECKS=1 PROBE=1 DESKTOP=1 ASSUME_YES=0
 for arg in "$@"; do
     case "$arg" in
         --minimal)    MINIMAL=1 ;;
         --no-system)  SYSTEM=0 ;;
+        --no-cuda12)  CUDA12=0 ;;
         --no-searxng) SEARXNG=0 ;;
+        --no-postgres) POSTGRES=0 ;;
+        --no-docker-group) DOCKER_GROUP=0 ;;
         --no-checks)  CHECKS=0 ;;
         --no-probe)   PROBE=0 ;;
         --no-desktop) DESKTOP=0 ;;
@@ -73,10 +91,6 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 
-# The port the SearxNG this script runs listens on, loopback only.
-SEARXNG_PORT=8888
-SEARXNG_LOCAL="http://127.0.0.1:$SEARXNG_PORT"
-
 # ---------------------------------------------------------------------------
 # 1. System packages
 # ---------------------------------------------------------------------------
@@ -97,6 +111,11 @@ REQUIRED=(
 # because podman accepts either OCI runtime and pacman would otherwise stop to
 # ask which.
 SEARXNG_PACKAGES=(podman crun)
+
+# PostgreSQL runs in Docker, as Omarchy's own development databases do.
+# postgresql-libs is the client on the host -- psql -- which is how the step
+# below proves the URL it writes into .env really logs in.
+POSTGRES_PACKAGES=(docker postgresql-libs)
 
 # Useful: nothing breaks without them, but working on this repo is worse.
 USEFUL=(
@@ -119,6 +138,7 @@ if [ "$SYSTEM" -eq 1 ]; then
 
     wanted=("${REQUIRED[@]}")
     [ "$SEARXNG" -eq 1 ] && wanted+=("${SEARXNG_PACKAGES[@]}")
+    [ "$POSTGRES" -eq 1 ] && wanted+=("${POSTGRES_PACKAGES[@]}")
     [ "$MINIMAL" -eq 0 ] && wanted+=("${USEFUL[@]}")
 
     # The console needs a browser, and Omarchy ships Chromium. Only a machine
@@ -155,13 +175,15 @@ fi
 # 2. Configuration
 # ---------------------------------------------------------------------------
 
-# Before the Python environment, because what goes into .venv depends on it:
-# EMBEDDING_DEVICE decides whether torch has to be a GPU build.
+# Before the Python environment, so .env can say which Python anything needs.
 step "Configuration (.env)"
 if [ -f .env ]; then
     ok ".env exists; left as it is"
 else
     cp .env.example .env
+    # Owner-only: an API key goes here if a seat is moved to a paid provider,
+    # and a copy inherits the template's world-readable mode.
+    chmod 600 .env
     ok "created .env from .env.example (no key needed for the default seats)"
 fi
 set -a
@@ -169,18 +191,13 @@ set -a
 . ./.env
 set +a
 
-# Whether this machine embeds on a card. It does when EMBEDDING_DEVICE names
-# one, and it is expected to when nvidia-smi lists one: a card the driver
-# answers for is a card this app should be able to use, and the GPU build that
-# uses it is set up with the machine, not here.
-EMBED_DEVICE="$(printf '%s' "${EMBEDDING_DEVICE:-cpu}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-EMBED_DEVICE="${EMBED_DEVICE:-cpu}"
-GPU_VISIBLE=0
-if command -v nvidia-smi >/dev/null && nvidia-smi -L 2>/dev/null | grep -q '^GPU '; then
-    GPU_VISIBLE=1
-fi
-GPU_EXPECTED="$GPU_VISIBLE"
-[ "$EMBED_DEVICE" != "cpu" ] && GPU_EXPECTED=1
+# The loopback port for the SearxNG this script runs. Read after .env, so either
+# the environment or .env can move it off 8888, which is also Jupyter's default.
+SEARXNG_PORT="${SEARXNG_PORT:-8888}"
+case "$SEARXNG_PORT" in
+    ''|*[!0-9]*) echo "SEARXNG_PORT must be a port number, not '$SEARXNG_PORT'" >&2; exit 2 ;;
+esac
+SEARXNG_LOCAL="http://127.0.0.1:$SEARXNG_PORT"
 
 # ---------------------------------------------------------------------------
 # 3. Python environment
@@ -225,39 +242,8 @@ fi
 PY="$VENV/bin/python"
 "$PY" -m pip install --quiet --upgrade pip
 
-# torch goes in before the project, for the reason CI gives: sentence-transformers
-# pulls torch, and left to pip it arrives from PyPI with whatever CUDA stack
-# that release was built against -- which may carry no kernels for the card
-# here. So pip is never left to choose:
-#   - a torch already in .venv is kept, and pinned for the install below, so
-#     the resolver cannot replace a GPU build with something it prefers;
-#   - no torch on a machine that embeds on a card stops here, because the GPU
-#     build belongs to the machine's setup and anything installed in its place
-#     would be the wrong one;
-#   - no torch and no card gets the CPU build, which is all such a machine uses.
-torch_version="$("$PY" -c 'import torch; print(torch.__version__)' 2>/dev/null || true)"
-pip_pin=()
-if [ -n "$torch_version" ]; then
-    ok "torch $torch_version present; kept as it is"
-    torch_pin="$(mktemp)"
-    trap 'rm -f "$torch_pin"' EXIT
-    printf 'torch==%s\n' "$torch_version" >"$torch_pin"
-    pip_pin=(--constraint "$torch_pin")
-elif [ "$GPU_EXPECTED" -eq 1 ]; then
-    if [ "$EMBED_DEVICE" != "cpu" ]; then reason="EMBEDDING_DEVICE=$EMBED_DEVICE"; else reason="nvidia-smi lists a card"; fi
-    echo "  .venv has no torch, and this machine embeds on a card ($reason)." >&2
-    echo "  The GPU build of torch is part of the machine's own setup, so it is" >&2
-    echo "  not installed here: put the build that carries kernels for this card" >&2
-    echo "  into $VENV, then re-run ./install.sh." >&2
-    exit 1
-else
-    echo "  installing CPU-only torch (no card here; the largest download, a few minutes)"
-    "$PY" -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
-    ok "torch $("$PY" -c 'import torch; print(torch.__version__)')"
-fi
-
 echo "  installing the project and its dev tools (pip install -e \".[dev]\")"
-"$PY" -m pip install --quiet -e ".[dev]" "${pip_pin[@]}"
+"$PY" -m pip install --quiet -e ".[dev]"
 ok "langgraph-agent installed in editable mode"
 
 # ---------------------------------------------------------------------------
@@ -274,9 +260,14 @@ if ! command -v ollama >/dev/null; then
     problem "ollama is not installed (drop --no-system, or: sudo pacman -S ollama)"
 else
     if ! daemon_up && [ -z "${OLLAMA_BASE_URL:-}" ] && systemctl cat ollama.service >/dev/null 2>&1; then
-        echo "  starting ollama.service (and enabling it at boot)"
-        sudo systemctl enable --now ollama.service || true
-        for _ in $(seq 1 20); do daemon_up && break; sleep 0.5; done
+        if [ "$SYSTEM" -eq 1 ]; then
+            echo "  starting ollama.service (and enabling it at boot)"
+            sudo systemctl enable --now ollama.service || true
+            for _ in $(seq 1 20); do daemon_up && break; sleep 0.5; done
+        else
+            # --no-system promises no sudo, so the command is named instead.
+            echo "  ollama.service is not running, and --no-system does not start it: sudo systemctl enable --now ollama.service"
+        fi
     fi
 
     if ! daemon_up; then
@@ -306,22 +297,30 @@ else
         # graphrag_server plus any .env override -- rather than a list kept
         # here. A seat whose tag is not on the daemon shows NOT PULLED and
         # fails its run; an embedding tag that is missing fails the corpus
-        # phase every run starts with.
-        mapfile -t seat_models < <("$PY" - <<'PY'
+        # phase every run starts with. The embedder is always the one Ollama
+        # tag graphrag_server names.
+        # Captured rather than streamed into mapfile: a process substitution
+        # hides its exit status, so a broken import would pull nothing and
+        # say so nowhere.
+        seat_models=()
+        if model_list="$("$PY" - <<'PY'
 from langgraph_agent.config import AGENTS, get_agent_model_info
-from langgraph_agent.graphrag_server import active_embedding_model, embedding_backend
+from langgraph_agent.graphrag_server import EMBEDDING_MODEL_NAME
 
 seen: list[str] = []
 for agent in AGENTS:
     info = get_agent_model_info(agent)
     if info["provider"] == "ollama" and info["model"] not in seen:
         seen.append(info["model"])
-embedder = active_embedding_model()
-if embedding_backend(embedder) == "ollama" and embedder not in seen:
-    seen.append(embedder)
+if EMBEDDING_MODEL_NAME not in seen:
+    seen.append(EMBEDDING_MODEL_NAME)
 print("\n".join(seen))
 PY
-        )
+        )"; then
+            mapfile -t seat_models <<<"$model_list"
+        else
+            problem "could not read the seat and embedding models from config.py, so nothing was pulled"
+        fi
         pulled="$(ollama list 2>/dev/null | awk 'NR > 1 {print $1}')"
         for model in "${seat_models[@]}"; do
             [ -z "$model" ] && continue
@@ -333,132 +332,75 @@ PY
                 problem "could not pull $model (signed in? tag spelled right?)"
             fi
         done
+
+        # Older NVIDIA cards need Ollama's CUDA 12 runner. Arch's ollama-cuda
+        # is built with CUDA 13, which dropped compute capability below 7.5 --
+        # Maxwell, Pascal and Volta, the cards Omarchy drives with its
+        # nvidia-580xx packages -- so on those the daemon embeds on the CPU:
+        # hours for a first corpus. cuda-embed-ollama.sh installs Ollama's own
+        # build of the same version, whose cuda_v12 runner drives them, points
+        # the packaged service at it, and proves the model lands wholly on the
+        # cards. Run here, after the pulls, because that proof embeds with the
+        # model; and with --no-cleanup, because removing packages is that
+        # script's to do when someone runs it, not an install's. A daemon
+        # elsewhere (OLLAMA_BASE_URL) is not this machine's to change.
+        old_cards="$(timeout 10 nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+            | awk -F. '/^[0-9]+\.[0-9]+$/ && $1 * 10 + $2 < 75' || true)"
+        if [ -n "$old_cards" ] && [ -z "${OLLAMA_BASE_URL:-}" ]; then
+            # --no-system promises no sudo, so there it can only look.
+            if [ "$SYSTEM" -eq 0 ]; then
+                gpu_fix=(./cuda-embed-ollama.sh --check)
+            else
+                gpu_fix=(./cuda-embed-ollama.sh --no-cleanup)
+                [ "$ASSUME_YES" -eq 1 ] && gpu_fix+=(--yes)
+            fi
+            if [ "$CUDA12" -eq 0 ]; then
+                echo "  keeping Arch's Ollama build (--no-cuda12), which cannot drive this machine's NVIDIA cards"
+            elif [ ! -x ./cuda-embed-ollama.sh ]; then
+                problem "cuda-embed-ollama.sh is missing, and these NVIDIA cards need the CUDA 12 build it installs"
+            else
+                echo "  NVIDIA cards below compute 7.5: ${gpu_fix[*]}"
+                if AMBIGUITY_ROOT="$ROOT" AMBIGUITY_VENV="$VENV" "${gpu_fix[@]}"; then
+                    ok "Ollama's CUDA 12 build holds the embedding model 100% on the GPU, 0% on the CPU"
+                elif [ "$SYSTEM" -eq 0 ]; then
+                    problem "these NVIDIA cards need Ollama's CUDA 12 build, and --no-system does not install it: ./cuda-embed-ollama.sh"
+                else
+                    problem "cuda-embed-ollama.sh could not put the embedding model on the cards; see above"
+                fi
+            fi
+        fi
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Embedding model and corpus
+# 5. Embedding tokenizer and corpus
 # ---------------------------------------------------------------------------
 
-step "Embedding model"
-# Fetched now so the first search is not also a download, and so a machine
-# that goes offline later still has it. The name comes from graphrag_server,
-# where the relevance floor calibrated against it lives too. MiniLM is fetched
-# even when the default embedder is an Ollama tag: every corpus is chunked with
-# its tokenizer, whichever model embeds the chunks.
+step "Embedding tokenizer"
+# The embedding model itself is pulled with the seats above -- the daemon runs
+# it. What this fetches is its tokenizer, the files the in-process chunker
+# cuts passages with, so the first search is not also a download and a machine
+# that goes offline later still has them. The name comes from graphrag_server,
+# where the corpus and the relevance floor live too.
 if "$PY" - 2>/tmp/ambiguity-embedder.log <<'PY'
-from langgraph_agent.graphrag_server import EMBEDDING_MODEL_NAME
-from sentence_transformers import SentenceTransformer
+from langgraph_agent.graphrag_server import EMBEDDING_TOKENIZER_NAME
+from transformers import AutoTokenizer
 
-SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
-print(f"  ✓ {EMBEDDING_MODEL_NAME} cached")
+AutoTokenizer.from_pretrained(EMBEDDING_TOKENIZER_NAME)
+print(f"  ✓ {EMBEDDING_TOKENIZER_NAME} tokenizer cached")
 PY
-then :; else problem "could not fetch the embedding model; see /tmp/ambiguity-embedder.log"; fi
+then :; else problem "could not fetch the embedding tokenizer; see /tmp/ambiguity-embedder.log"; fi
 
 # The corpus is not built here, and there is no step that builds one. Two
 # things index: a run, which rebuilds before the Architect opens, and embedding
 # a document into the corpus from the console. An install-time index was a
 # third, and a third is one too many -- it is the one that decides how fresh
 # the corpus is on a machine nobody has run anything on yet, which is a
-# question the first run answers correctly by itself. The model above is
-# fetched so that first run is an index and not also a download.
+# question the first run answers correctly by itself. The tokenizer above is
+# cached so that first run is an index and not also a download.
 
 # ---------------------------------------------------------------------------
-# 6. GPU: does the machine's GPU build initialise?
-# ---------------------------------------------------------------------------
-
-step "GPU (torch in .venv)"
-# Proven, never installed or configured. `torch.cuda.is_available()` is not the
-# proof: a build with no kernels for the card still reports True, and on
-# 2026-09-10 exactly that took search and indexing down. So every card is made
-# to compute, and a card named in EMBEDDING_DEVICE is then given the embedder
-# through `_embedder_on` -- the call a run makes, loading MiniLM onto the card
-# and encoding every shape an index will ask for. Run before the Embedder step
-# below loads an Ollama model, which would otherwise be holding the card.
-gpu_status=0
-# TQDM_DISABLE: the model load draws a weights progress bar over these lines.
-GPU_VISIBLE="$GPU_VISIBLE" TQDM_DISABLE=1 "$PY" - <<'PY' || gpu_status=$?
-import os
-import sys
-
-device = os.environ.get("EMBEDDING_DEVICE", "cpu").strip().lower() or "cpu"
-visible = os.environ.get("GPU_VISIBLE") == "1"
-
-if device != "cpu":
-    # First, on purpose: importing it pins CUDA's card numbering to the PCI
-    # bus the way a run does, so cuda:N here is the card a run will use.
-    from langgraph_agent.graphrag_server import EMBEDDING_MODEL_NAME, _embedder_on
-import torch
-
-hip = getattr(torch.version, "hip", None)
-build = f"CUDA {torch.version.cuda}" if torch.version.cuda else (f"ROCm {hip}" if hip else None)
-if build is None:
-    if device != "cpu" or visible:
-        why = f"EMBEDDING_DEVICE={device} names a card" if device != "cpu" else "nvidia-smi lists a card"
-        print(f"  ✗ torch {torch.__version__} is the CPU build, and {why}: the GPU build "
-              "is the machine's own setup, and it is not in .venv")
-        sys.exit(1)
-    print(f"  ✓ torch {torch.__version__}, CPU build (no card here, EMBEDDING_DEVICE=cpu)")
-    sys.exit(0)
-
-count = torch.cuda.device_count()
-if count == 0:
-    if device == "cpu" and not visible:
-        print(f"  ✓ torch {torch.__version__} ({build}); no card here, and EMBEDDING_DEVICE=cpu needs none")
-        sys.exit(0)
-    print(f"  ✗ torch {torch.__version__} ({build}) sees no card: is the driver loaded?")
-    sys.exit(1)
-print(f"  ✓ torch {torch.__version__} ({build}) sees {count} card(s)")
-
-if device == "cpu":
-    indexes = list(range(count))
-else:
-    kind, _, number = device.partition(":")
-    if kind != "cuda" or not number.isdigit():
-        print(f"  ✗ EMBEDDING_DEVICE={device} names neither cpu nor cuda:N")
-        sys.exit(1)
-    indexes = [int(number)]
-
-status = 0
-for index in indexes:
-    name = f"cuda:{index}"
-    try:
-        major, minor = torch.cuda.get_device_capability(index)
-        label = f"{torch.cuda.get_device_name(index)}, compute {major}.{minor}"
-        square = torch.ones(256, 256, device=name)
-        (square @ square).sum().item()
-    except Exception as exc:  # no such card, or a build with no kernels for it
-        text = str(exc).strip()
-        print(f"  ✗ {name} does not compute: {(text.splitlines() or [type(exc).__name__])[0][:200]}")
-        status = 1
-        continue
-    print(f"  ✓ {name} computes ({label})")
-
-if device == "cpu":
-    # Imported only now: on cpu it hides every card, and CUDA is initialised.
-    from langgraph_agent.graphrag_server import EMBEDDING_MODEL_NAME
-
-    print(f"  (EMBEDDING_DEVICE=cpu, so {EMBEDDING_MODEL_NAME} embeds on the CPU when it is the model)")
-elif status == 0:
-    model, why, busy = _embedder_on(device)
-    if model is not None:
-        print(f"  ✓ {EMBEDDING_MODEL_NAME} initialised on {device}, warmed to an index's working size")
-    elif busy:
-        print(f"  ! {why}: something else holds the card (ollama ps, nvidia-smi)")
-        status = 3
-    else:
-        print(f"  ✗ {why}")
-        status = 1
-sys.exit(status)
-PY
-case "$gpu_status" in
-    0) ;;
-    3) NOTES+=("the embedding card was busy, so the embedder could not be placed on it; see GPU above") ;;
-    *) problem "the GPU build does not initialise as configured; see GPU above" ;;
-esac
-
-# ---------------------------------------------------------------------------
-# 7. Git, for the Builder's git_dwell
+# 6. Git, for the Builder's git_dwell
 # ---------------------------------------------------------------------------
 
 step "Git (the Builder's git_dwell)"
@@ -508,7 +450,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. SearxNG, for online research
+# 7. SearxNG, for online research
 # ---------------------------------------------------------------------------
 
 if [ "$SEARXNG" -eq 1 ]; then
@@ -532,7 +474,12 @@ if [ "$SEARXNG" -eq 1 ]; then
     searxng_image="docker.io/searxng/searxng:latest"
     searxng_up() { [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$1/healthz" || true)" = "200" ]; }
 
-    if [ -n "${SEARXNG_URL:-}" ] && [ "${SEARXNG_URL%/}" != "$SEARXNG_LOCAL" ]; then
+    # localhost and 127.0.0.1 are one instance, and the .env template once said
+    # localhost: that line must not read as someone else's SearxNG.
+    searxng_named="${SEARXNG_URL:-}"
+    searxng_named="${searxng_named%/}"
+    searxng_named="${searxng_named/localhost:/127.0.0.1:}"
+    if [ -n "$searxng_named" ] && [ "$searxng_named" != "$SEARXNG_LOCAL" ]; then
         echo "  SEARXNG_URL names $SEARXNG_URL; using that instance instead of running one"
     elif ! command -v podman >/dev/null; then
         problem "podman is not installed, so SearxNG cannot run (drop --no-system, or: sudo pacman -S podman crun)"
@@ -569,7 +516,9 @@ search:
     - html
     - json
 EOF
-            chmod 644 "$searxng_conf/settings.yml"
+            # Owner-only, for the secret key. The image runs as root inside the
+            # container, which rootless podman maps to you, so it still reads it.
+            chmod 600 "$searxng_conf/settings.yml"
             changed=1
             ok "wrote $searxng_conf/settings.yml"
         elif ! grep -qE '^[[:space:]]*-[[:space:]]*json[[:space:]]*$' "$searxng_conf/settings.yml"; then
@@ -578,12 +527,12 @@ EOF
             ok "settings.yml present; left as it is"
         fi
 
+        # No network-online.target: a user unit cannot wait on a system target,
+        # and quadlet adds its own wait (podman-user-wait-network-online).
         unit_text="$(cat <<EOF
 # Written by install.sh for the Ambiguity console's online research.
 [Unit]
 Description=SearxNG for the Ambiguity console's online research
-Wants=network-online.target
-After=network-online.target
 
 [Container]
 Image=$searxng_image
@@ -638,6 +587,9 @@ EOF
                 export SEARXNG_URL="$SEARXNG_LOCAL"
                 ok "SEARXNG_URL=$SEARXNG_LOCAL added to .env"
             fi
+        elif ! systemctl --user is-active --quiet ambiguity-searxng.service \
+                && [ -n "$(ss -ltnH "sport = :$SEARXNG_PORT" 2>/dev/null)" ]; then
+            problem "port $SEARXNG_PORT is taken by another program, so SearxNG cannot bind it: set SEARXNG_PORT in .env to a free port and re-run"
         else
             problem "SearxNG did not answer at $SEARXNG_LOCAL; see: journalctl --user -u ambiguity-searxng"
         fi
@@ -676,6 +628,168 @@ PY
             3) NOTES+=("SearxNG answered a test search with no results; see SearxNG above") ;;
             *) problem "online research cannot use SEARXNG_URL; see SearxNG above" ;;
         esac
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 8. PostgreSQL, in Docker
+# ---------------------------------------------------------------------------
+
+if [ "$POSTGRES" -eq 1 ]; then
+    step "PostgreSQL (Docker)"
+    # The development database Omarchy's own installer runs
+    # (omarchy-install-docker-dbs PostgreSQL), with its flags exactly, so this
+    # and that menu entry make one container rather than two fighting over the
+    # port: postgres:18 as postgres18, published on loopback only, restarting
+    # with the daemon, and trust authentication -- a local connection logs in
+    # without a password, which is the development setting and the reason it is
+    # never published past 127.0.0.1.
+    #
+    # Nothing in the app reads DATABASE_URL; the corpus is Chroma. The console
+    # exports .env to everything it runs, so a script the Builder writes finds
+    # the database there.
+    postgres_container=postgres18
+    postgres_image=postgres:18
+    postgres_local="postgresql://postgres@127.0.0.1:5432/postgres"
+    me="$(id -un)"
+    # A URL's password, if it carries one, stays out of the terminal.
+    redacted() { sed -E 's#(://[^:/@]*):[^@/]*@#\1:***@#' <<<"$1"; }
+    # Answering is logging in and running a query through the URL itself, not
+    # an open port: a server that wants a password accepts connections too.
+    pg_answers() { PGCONNECT_TIMEOUT=3 psql "$1" -w -X -q -t -A -c 'select 1' >/dev/null 2>&1; }
+    pg_version() { PGCONNECT_TIMEOUT=3 psql "$1" -w -X -q -t -A -c 'show server_version' 2>/dev/null | cut -d' ' -f1; }
+
+    if ! command -v docker >/dev/null; then
+        problem "docker is not installed, so PostgreSQL cannot run (drop --no-system, or: sudo pacman -S docker postgresql-libs)"
+    elif ! command -v psql >/dev/null; then
+        problem "psql is not installed, so the database cannot be checked (drop --no-system, or: sudo pacman -S postgresql-libs)"
+    else
+        # The docker group. The daemon runs as root, so membership is
+        # passwordless root for anything running as you, which is why Omarchy
+        # leaves the account out and puts Docker behind sudo. This install opts
+        # in -- the toggle Omarchy offers as Setup > Security > Sudoless Docker --
+        # so the database can be looked after without a password (docker logs
+        # postgres18, docker exec -it postgres18 psql); --no-docker-group keeps
+        # Omarchy's default. Membership is read from the account, as
+        # omarchy-sudo-docker --configured reads it: a group granted now is
+        # real, but only a new login -- in practice a reboot -- carries it.
+        if [[ " $(id -nG "$me" 2>/dev/null) " == *" docker "* ]]; then
+            if [ -e /var/run/docker.sock ] && [ ! -w /var/run/docker.sock ]; then
+                ok "$me is in the docker group, from the next login (a reboot, on Omarchy)"
+            else
+                ok "$me is in the docker group"
+            fi
+        elif [ "$DOCKER_GROUP" -eq 0 ]; then
+            echo "  not adding $me to the docker group (--no-docker-group): docker stays behind sudo"
+        elif [ "$SYSTEM" -eq 0 ]; then
+            problem "$me is not in the docker group, and --no-system does not add you: sudo usermod -aG docker $me"
+        else
+            echo "  adding $me to the docker group: passwordless root for your account (--no-docker-group skips this)"
+            if sudo usermod -aG docker "$me"; then
+                # What Omarchy's own toggle records, so its update asks for the reboot.
+                if command -v omarchy-state >/dev/null; then omarchy-state set reboot-required || true; fi
+                ok "$me added to the docker group"
+                NOTES+=("you were added to the docker group, which applies after a reboot; until then docker still needs sudo")
+            else
+                problem "could not add $me to the docker group: sudo usermod -aG docker $me"
+            fi
+        fi
+
+        # Omarchy enables docker.socket and not the service, so the daemon
+        # starts when something first talks to it -- and --restart
+        # unless-stopped restarts a container when the daemon starts. After a
+        # reboot the database would be down until someone happened to run
+        # docker, so the service is enabled, as ollama.service is above.
+        if [ "$(systemctl is-enabled docker.service 2>/dev/null || true)" = "enabled" ]; then
+            ok "docker.service starts at boot, so the database comes back after a reboot"
+        elif [ "$SYSTEM" -eq 0 ]; then
+            echo "  docker.service does not start at boot, and --no-system does not enable it: sudo systemctl enable --now docker.service"
+            NOTES+=("PostgreSQL is down after a reboot until something runs docker: sudo systemctl enable docker.service")
+        else
+            echo "  enabling docker.service, so the database comes back after a reboot"
+            if sudo systemctl enable --now docker.service; then
+                ok "docker.service starts at boot"
+            else
+                problem "could not enable docker.service: sudo systemctl enable --now docker.service"
+            fi
+        fi
+
+        # Whichever server DATABASE_URL names is the one asked, so a URL
+        # pointing somewhere else is checked and left alone, as SEARXNG_URL is.
+        # postgres:// and localhost are spellings of this script's own URL.
+        database_url="${DATABASE_URL:-$postgres_local}"
+        case "$database_url" in
+            postgres://*) database_own="postgresql://${database_url#postgres://}" ;;
+            *)            database_own="$database_url" ;;
+        esac
+        database_own="${database_own/@localhost:/@127.0.0.1:}"
+        answered=0
+        if pg_answers "$database_url"; then
+            answered=1
+        elif [ "$database_own" != "$postgres_local" ]; then
+            problem "DATABASE_URL names $(redacted "$database_url"), which does not answer: fix it in .env, or remove it and re-run to have this script run PostgreSQL"
+        else
+            # Only now is the daemon needed: directly when the socket is
+            # writable, through sudo when it is not -- a group granted above
+            # does not reach this run.
+            docker_cmd=()
+            if [ -w /var/run/docker.sock ]; then
+                docker_cmd=(docker)
+            elif [ "$SYSTEM" -eq 1 ]; then
+                docker_cmd=(sudo docker)
+            fi
+            started=0
+            [ "${#docker_cmd[@]}" -gt 0 ] && echo "  nothing answers at 127.0.0.1:5432 yet; bringing up $postgres_container (${docker_cmd[*]})"
+            if [ "${#docker_cmd[@]}" -eq 0 ]; then
+                problem "PostgreSQL does not answer at 127.0.0.1:5432, and --no-system cannot reach Docker: sudo docker start $postgres_container, or re-run without --no-system"
+            elif state="$("${docker_cmd[@]}" container inspect -f '{{.State.Status}}' "$postgres_container" 2>/dev/null)"; then
+                # Started, never recreated: the data lives in this container's
+                # volume, and a new container would come up empty beside it.
+                if "${docker_cmd[@]}" start "$postgres_container" >/dev/null; then
+                    started=1
+                    ok "started the existing $postgres_container container (it was $state)"
+                else
+                    problem "could not start the $postgres_container container; see: docker logs $postgres_container"
+                fi
+            elif [ -n "$(ss -ltnH 'sport = :5432' 2>/dev/null)" ]; then
+                problem "port 5432 is taken, and the server there does not let $postgres_local log in: point DATABASE_URL in .env at it, or free the port, and re-run"
+            else
+                # Pulled on its own first, so a slow download reads as one
+                # rather than as a container that will not start.
+                if ! "${docker_cmd[@]}" image inspect "$postgres_image" >/dev/null 2>&1; then
+                    echo "  pulling $postgres_image"
+                    "${docker_cmd[@]}" pull --quiet "$postgres_image" >/dev/null || true
+                fi
+                if "${docker_cmd[@]}" run -d --restart unless-stopped -p "127.0.0.1:5432:5432" \
+                        --name="$postgres_container" -e POSTGRES_HOST_AUTH_METHOD=trust \
+                        "$postgres_image" >/dev/null; then
+                    started=1
+                    ok "created the $postgres_container container from $postgres_image"
+                else
+                    problem "could not run $postgres_image as $postgres_container; see the docker error above"
+                fi
+            fi
+            if [ "$started" -eq 1 ]; then
+                # A first start initialises its data directory before it
+                # listens, which takes some seconds.
+                for _ in $(seq 1 60); do pg_answers "$postgres_local" && { answered=1; break; }; sleep 1; done
+                if [ "$answered" -eq 0 ]; then
+                    problem "PostgreSQL did not answer at $postgres_local; see: docker logs $postgres_container"
+                fi
+            fi
+        fi
+
+        if [ "$answered" -eq 1 ]; then
+            ok "PostgreSQL $(pg_version "$database_url") answers at $(redacted "$database_url")"
+            # Written only once a query has gone through it, for SEARXNG_URL's
+            # reason: a URL to nothing is worse than no URL.
+            if [ -z "${DATABASE_URL:-}" ]; then
+                printf '\n# Added by install.sh: the PostgreSQL it runs in Docker.\nDATABASE_URL=%s\n' \
+                    "$postgres_local" >>.env
+                export DATABASE_URL="$postgres_local"
+                ok "DATABASE_URL=$postgres_local added to .env"
+            fi
+        fi
     fi
 fi
 
@@ -730,6 +844,40 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# 11. Console: does it start?
+# ---------------------------------------------------------------------------
+
+step "Console"
+# The promise at the top of this script is a console that runs, and nothing
+# above starts one. So serve.py is started on a free port, asked for
+# /api/status -- what launch_console.sh waits on -- and for the page itself,
+# then stopped. Starting the server opens no corpus and writes nothing, so the
+# machine is left as it was found. SIGTERM, not SIGINT: bash starts background
+# jobs with SIGINT ignored, and the server would never see it.
+console_log=/tmp/ambiguity-console-check.log
+console_port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+PORT="$console_port" "$PY" serve.py >"$console_log" 2>&1 &
+console_pid=$!
+console_up=0
+for _ in $(seq 1 60); do
+    if curl -sf -m 2 "http://127.0.0.1:$console_port/api/status" >/dev/null 2>&1; then
+        console_up=1
+        break
+    fi
+    kill -0 "$console_pid" 2>/dev/null || break
+    sleep 0.5
+done
+if [ "$console_up" -eq 1 ] && curl -sf -m 5 "http://127.0.0.1:$console_port/" | grep -qi '<html'; then
+    ok "serve.py starts, answers /api/status and serves the console page"
+elif [ "$console_up" -eq 1 ]; then
+    problem "serve.py answers /api/status but did not serve the console page; see $console_log"
+else
+    problem "serve.py did not start; see $console_log"
+fi
+kill "$console_pid" 2>/dev/null || true
+wait "$console_pid" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # Summary: can the embedder and each seat actually run?
 # ---------------------------------------------------------------------------
 
@@ -748,12 +896,9 @@ import subprocess
 import sys
 
 from langgraph_agent.config import ollama_cpu_share
-from langgraph_agent.graphrag_server import OllamaEmbedder, active_embedding_model, embedding_backend
+from langgraph_agent.graphrag_server import EMBEDDING_MODEL_NAME, OllamaEmbedder
 
-model = active_embedding_model()
-if embedding_backend(model) != "ollama":
-    print(f"  ✓ {model} runs in this process (placed under GPU above)")
-    sys.exit(0)
+model = EMBEDDING_MODEL_NAME
 
 loaded_before = ollama_cpu_share(model) is not None
 embedder = OllamaEmbedder(model)
@@ -770,13 +915,16 @@ if share is None:
     print(f"  (the daemon did not say where it placed {model})")
 elif share >= 0.99:
     print(f"  ✗ {model} is wholly on the CPU: the daemon initialised no GPU for it, so a first "
-          "corpus build takes hours. Ollama's GPU backend is the machine's own setup.")
+          "corpus build takes hours. journalctl -u ollama says why; 'skipping CUDA device' "
+          "is a card Arch's CUDA 13 build cannot drive, which cuda-embed-ollama.sh fixes.")
     status = 1
 elif share > 0:
-    print(f"  ! {embedder.placement_note}")
-    status = 3
+    # Every layer is forced onto the cards, so a split is not a slow machine
+    # but a daemon ignoring the options -- and the model is to be 0% on the CPU.
+    print(f"  ✗ {embedder.placement_note}")
+    status = 1
 else:
-    print(f"  ✓ {model} is wholly on the GPU")
+    print(f"  ✓ {model} is 100% on the GPU, 0% on the CPU")
 
 if not loaded_before:
     try:
@@ -787,8 +935,7 @@ sys.exit(status)
 PY
 case "$embed_status" in
     0) ;;
-    3) NOTES+=("the embedding model is not wholly on a GPU; see Embedder above") ;;
-    *) problem "the embedder cannot run as configured; see Embedder above" ;;
+    *) problem "the embedder is not running 100% on the GPU as configured; see Embedder above" ;;
 esac
 
 step "Seats"

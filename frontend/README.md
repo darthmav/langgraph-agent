@@ -99,8 +99,9 @@ that document rather than adding a second copy of it.
 
 ## Crew rail
 
-One card per seat: role-coloured dot and border, a dropdown of every curated
-model plus whatever tags the Ollama daemon reports, the provider with a
+One card per seat: role-coloured dot and border, a dropdown of the seat models
+the console offers (`kimi-k3:cloud`, `qwen3.5:397b-cloud`, `qwen3.8:latest`;
+other tags the daemon carries are left out, and `set_seat` refuses them), the provider with a
 *thinking* checkbox beside it, and chips for placement (`REMOTE` / `LOCAL`)
 and `NO KEY`.
 
@@ -153,7 +154,7 @@ request, so both come back 200.
 | `list_seats` | — | the four seats and whether each can run |
 | `set_seat` | `agent`, `provider`, `model` | the updated seat |
 | `set_thinking` | `agent`, `thinking` (a JSON boolean) | the updated seat; refused for a model with no switch |
-| `llm_options` | — | curated options plus installed Ollama tags |
+| `llm_options` | — | the seat models the console offers (`AGENT_LLM_OPTIONS`), nothing else |
 | `run_goal` | `goal` | the final `AgentState` |
 
 `/api/status`, `/api/llm-options`, `/api/run`, `/api/search` and `/api/set-llm`

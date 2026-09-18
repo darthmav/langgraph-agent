@@ -67,14 +67,11 @@ def quiet_logs() -> None:
 
     Two separate sources, one fix each. `httpx` logs every provider call at
     INFO, which is one line per seat per turn and buries the node timings this
-    script exists to show. sentence-transformers shows an encode progress bar
-    whenever the root logger is at INFO or below -- so raising the root level
-    silences the bar as a side effect, and `TQDM_DISABLE` covers the versions
-    where it does not.
+    script exists to show. `TQDM_DISABLE` covers anything that would draw a
+    progress bar over the report instead of logging one.
     """
     logging.getLogger().setLevel(logging.WARNING)
-    for noisy in ("httpx", "httpcore", "chromadb", "sentence_transformers",
-                  "urllib3"):
+    for noisy in ("httpx", "httpcore", "chromadb", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     os.environ.setdefault("TQDM_DISABLE", "1")
 
@@ -216,22 +213,28 @@ CONFIGS_BY_NAME: dict[str, TeamConfig] = {c.name: c for c in TEAM_CONFIGS}
 
 
 def _retrieval_floor() -> str:
-    """`RETRIEVAL_RELEVANCE_FLOOR`, read from the code rather than restated.
+    """The measured relevance floor, read from the corpus rather than restated.
 
-    Read at all because the restated one drifted: this help text said 0.40
-    while the constant was 0.37, and that number is not decoration -- it is
-    the gate deciding whether the Researcher's model is consulted at all, in
-    the one place an operator goes to find out which seat to trust.
+    Read at all because a restated one drifted: this help text said 0.40
+    while the value was 0.37, and that number is not decoration -- it is the
+    gate deciding whether the Researcher's model is consulted at all, in the
+    one place an operator goes to find out which seat to trust.
+
+    It is no longer a constant: the run that finishes a corpus measures one
+    against that corpus and stores it beside the store, so a machine with no
+    measured corpus answers "unmeasured" -- which is the truth a stale number
+    never told.
 
     Imported inside the function, not at module scope, because `--list` and
     `--help` must not pay for chromadb. If the package will not import, the
-    constant's *name* is the honest answer; a stale number is not.
+    function's *name* is the honest answer; a stale number is not.
     """
     try:
-        from langgraph_agent.graphrag_server import RETRIEVAL_RELEVANCE_FLOOR
+        from langgraph_agent.graphrag_server import relevance_floor
     except Exception:  # pragma: no cover - the script still has to print
-        return "RETRIEVAL_RELEVANCE_FLOOR"
-    return f"{RETRIEVAL_RELEVANCE_FLOOR:g}"
+        return "relevance_floor"
+    floor = relevance_floor()
+    return f"{floor:g}" if floor is not None else "unmeasured"
 
 
 @dataclass(frozen=True)
@@ -266,12 +269,11 @@ EXERCISES: dict[str, Exercise] = {
         expect_files=False,
         what_it_tests="Retrieval against the real corpus, and whether the "
                       "gate can end a run with no files to point at. Note it "
-                      "does NOT test the Researcher's model: a hit over "
-                      "RETRIEVAL_RELEVANCE_FLOOR is formatted straight into "
+                      "does NOT test the Researcher's model: a hit over the "
+                      "measured relevance floor is formatted straight into "
                       "the findings without the seat being called, so two "
-                      "Researchers score alike here (this query measures "
-                      "0.605 against a floor of {floor}). Use `offcorpus` for "
-                      "the model.",
+                      "Researchers score alike here (this corpus's floor: "
+                      "{floor}). Use `offcorpus` for the model.",
     ),
     "offcorpus": Exercise(
         "offcorpus",
@@ -282,13 +284,14 @@ EXERCISES: dict[str, Exercise] = {
         what_it_tests="The Researcher's *model*, which the `research` exercise "
                       "cannot reach. `_gather_research` formats retrieval "
                       "straight into the output whenever the top hit clears "
-                      "RETRIEVAL_RELEVANCE_FLOOR and only calls the seat "
+                      "the measured relevance floor and only calls the seat "
                       "below it, so a question this corpus cannot answer is "
                       "the only team exercise where the Researcher's model is "
-                      "the variable. This query measures 0.306 -- it cleared "
-                      "the old hard-coded 0.3 by six thousandths, which meant "
-                      "the exercise was silently testing retrieval, not the "
-                      "seat, for as long as that number stood.",
+                      "the variable. It exists because the old hard-coded "
+                      "floor of 0.3 once sat inside the off-corpus population "
+                      "of the embedding model then in use, which meant the "
+                      "exercise was silently testing retrieval, not the seat, "
+                      "for as long as that number stood.",
     ),
     "plan": Exercise(
         "plan",
@@ -1488,9 +1491,9 @@ def main(argv: list[str]) -> int:
             return int(kb.collection.count()) if kb is not None else 0
 
         try:
-            # Bounded for the same reason every node is. Loading the embedder
-            # makes an online metadata call to huggingface.co, which has no
-            # timeout of its own: one hung sweep sat here for ten minutes
+            # Bounded for the same reason every node is. Opening the store can
+            # mean the daemon loading the embedding model, which nothing here
+            # times on its own: one hung sweep sat here for ten minutes
             # having printed half a line, with nothing to say what it was
             # waiting for. A warm that never returns must not cost the whole
             # sweep. If it does time out the singleton may still be coming up

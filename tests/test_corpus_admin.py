@@ -1,7 +1,7 @@
 """Tests for clearing and exporting the corpus.
 
 Two layers, both without the embedding model. `GraphRAGKnowledgeBase.__init__`
-loads sentence-transformers and opens Chroma, which is the slow part of this
+opens Chroma, which is the slow part of this
 suite and has nothing to do with what is under test here: `clear` and
 `export_corpus` touch only `self.graph`, `self.collection` and
 `self.persist_dir`. So the knowledge base is built field by field around a fake
@@ -257,7 +257,7 @@ def test_export_omits_embeddings_and_says_so(kb):
     assert all("embeddings" not in node for node in export["graph"]["nodes"])
 
     assert "Embeddings are omitted" in export["note"]
-    assert export["embedding_model"] == "all-MiniLM-L6-v2"
+    assert export["embedding_model"] == "qwen3-embedding:latest"
 
 
 def test_export_is_json_serialisable(kb):

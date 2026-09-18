@@ -27,7 +27,7 @@ def main():
         "langgraph",
         "langchain_core",
         "chromadb",
-        "sentence_transformers",
+        "transformers",
         "networkx",
     ]
     missing = [m for m in required if not _can_import(m)]

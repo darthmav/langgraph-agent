@@ -9,17 +9,19 @@ This is **langgraph-agent**, a cloud-only 4-Agent AI system for software develop
 - **Researcher** — gathers context via the GraphRAG MCP tool (`search_knowledge_graph`).
 - **Builder** — implements plans using filesystem, git, terminal, and test MCP tools.
 
-Inference is cloud-only. The only thing that runs locally is embedding --
-`qwen3-embedding:latest` through the Ollama daemon by default, or
-`all-MiniLM-L6-v2` in this process -- which belongs to GraphRAG, not to a seat.
+Inference is cloud-only. The embedding runs locally through the Ollama daemon
+serving `qwen3-embedding:latest` -- the daemon owns the model's placement, so
+nothing in this project touches torch or a card itself. The embedding belongs
+to GraphRAG, not to a seat.
 
-Tech stack: Python 3.12+, LangGraph, Chroma + sentence-transformers + NetworkX, MCP (local stdio-compatible tool binding).
+Tech stack: Python 3.12+, LangGraph, Chroma + NetworkX, MCP (local stdio-compatible tool binding).
 
 ## Quick Reference
 
 ```bash
-# Install everything on Arch / Omarchy (packages, venv, Ollama models, SearxNG),
-# then prove the GPU build, the embedder, git/gh and every seat actually work
+# Install everything on Arch / Omarchy (packages, venv, Ollama models, SearxNG,
+# PostgreSQL in Docker), then prove the embedder, the database, git/gh and
+# every seat actually work
 ./install.sh
 
 # Install dependencies
@@ -65,11 +67,6 @@ python example_usage.py
 │   │   └── decorators.py      # retry_with_backoff, circuit_breaker, self_healing_wrapper
 │   └── _internal/
 │       └── exceptions.py      # LangGraphAgentError and its five subclasses
-├── src/quisce/                # QuICSE engine prototype. Ships in the
-│   ├── quisce_engine.py       #   distribution, imported by nothing here --
-│   ├── baseline.py            #   see the note below the tree
-│   ├── spectral_analysis.py
-│   └── test_harness.py
 ├── prompts/
 │   ├── architect.txt          # System prompt (loaded by nodes.py)
 │   ├── planner.txt
@@ -86,8 +83,7 @@ python example_usage.py
 │   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
 │   ├── test_chunking.py       # Document chunking, chunk ids, search collapse
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
-│   ├── test_embedding_device.py # Where the embedder runs, and a card that says no
-│   ├── test_embedding_models.py # Switching models: its own corpus, backend and floor
+│   ├── test_embedding_device.py # The one embedder, and the light that says when it is working
 │   ├── test_mcp_tools.py      # Builder tool belt
 │   ├── test_imports.py        # Pins the package's public surface
 │   ├── test_lexical.py        # BM25, rank fusion, the relevance floor
@@ -115,40 +111,13 @@ python example_usage.py
 ├── .github/workflows/
 │   └── ci.yml                 # ruff, mypy, pytest, root scripts, on every push
 ├── install.sh                 # Arch / Omarchy: everything, from nothing to a running console
+├── cuda-embed-ollama.sh       # NVIDIA cards below compute 7.5: Ollama's CUDA 12 build, model 100% on the GPU
 ├── serve.py                   # Python HTTP server + API backend
 ├── example_usage.py           # Demo script
 ├── test_cloud.py              # Cloud LLM end-to-end test
 ├── README.md                  # User-facing documentation
 └── .env.example               # Environment variables template
 ```
-
-### `src/quisce/` is a prototype, and nothing here depends on it
-
-Roughly 1,600 lines: `quisce_engine.py`, a `baseline.py` to measure it against,
-a `test_harness.py`, and `spectral_analysis.py`, which an agent run added on
-2026-09-12 to wrap the root-level `spectral_graph` package in a
-`SpectralAnalyzer`. Three facts about it are worth knowing before anyone edits
-or removes it, because none is visible from the code.
-
-It **ships**. `[tool.setuptools.packages.find]` says `where = ["src"]`, so
-`pip install` puts `quisce` on the path beside `langgraph_agent` -- unlike
-`spectral_graph/`, which lives at the root precisely so it does not. Importing
-it pulls in torch, which is why nothing imports it at module scope. The two
-facts now collide: `spectral_analysis.py` reaches `spectral_graph` by putting
-the checkout root on `sys.path` when it is imported -- which importing `quisce`
-does, since `__init__.py` re-exports it -- so it works from a checkout and
-nowhere else. Installed elsewhere, `SPECTRAL_GRAPH_AVAILABLE` is False and
-`analyze()` raises `RuntimeError`.
-
-Nothing in this project imports it at all, and no test covers it. The pytest
-suite does not touch it, and CI reaches it only through `ruff`, which lints
-`src/` whole. `mypy` names `src/langgraph_agent/` and `serve.py`, so this
-package is not type-checked by anything.
-
-Its specification is gone. `from quisce import QuICSEModule` was documented in
-the behavioural-system spec, deleted on 2026-09-09 with the other spectral
-write-ups, so the package's own `__init__.py` is now the only description of
-its entry point. That is the thing to fix first if it stays.
 
 ## Conventions
 
@@ -251,7 +220,7 @@ python -m pytest tests/ -v
 
 ### Change a seat's model
 - Update `DEFAULT_SEATS` (and `_DEFAULT_AGENT_MODELS`) in `src/langgraph_agent/config.py`, plus `.env.example`.
-- Add the model to `AGENT_LLM_OPTIONS` so it appears in the console dropdown.
+- Add the model to `AGENT_LLM_OPTIONS` so it appears in the console dropdown. That list is the whole offer -- `kimi-k3:cloud`, `qwen3.5:397b-cloud` and `qwen3.8:latest` -- so a tag the daemon carries is not offered until it is added there, and `set_seat` refuses any model not in it (and the test in `test_rpc_params.py` pins the list).
 - Nothing in `frontend/index.html` hard-codes a model; the seat cards render whatever `list_seats` reports.
 
 ### Add a fifth agent
@@ -341,7 +310,8 @@ Python floor matches `pyproject.toml`, no walked file exceeds
 Two are different and the difference is the interesting part. A figure quoted
 in prose is checked against its constant through a small registry, because the
 real fix for a figure is not to restate it -- `scripts/diagnose_seats.py` reads
-`RETRIEVAL_RELEVANCE_FLOOR` rather than quoting it, and markdown that cannot do
+the floor through `relevance_floor()` rather than quoting it, and markdown
+that cannot do
 that gets a registry entry instead. And the entity audit **cannot** be a rule:
 `Measured` sits at 4 position-free capitals against 34 forced, `Spectral` at 2
 against 24, and no threshold separates the sentence-opener from the domain
@@ -575,8 +545,10 @@ four the moment this file described the problem.
   the goal did not -- and `_gather_research` searches on `plan`, so a plan
   naming nothing retrieves nothing in particular. `_project_map` hands it the
   files the corpus ranks closest to the goal, a short excerpt each, only above
-  `RETRIEVAL_RELEVANCE_FLOOR`. It is context, like the state injection, so the
-  Planner still calls no tool. Measured on 2026-09-12 with a local 9B seat,
+  the relevance floor. It is context, like the state injection, so the
+  Planner still calls no tool. The floor itself is `relevance_floor()`, measured
+  on the built corpus rather than stated -- see the floor bullet below -- and
+  `None` until that measurement has run, in which case the map is skipped. Measured on 2026-09-12 with a local 9B seat,
   three goals each way: without the map no plan named a project file, and one
   listed the Planner's own instructions as its steps; with it, the
   seat-timeout goal was planned against `config.py`, `mcp_client.py` and
@@ -620,8 +592,9 @@ four the moment this file described the problem.
   falls through to the Researcher's own model, and a second slow seat is the
   last thing a run with a stalling one needs.
 - **The Researcher's model is only consulted when retrieval is thin.**
-  `_gather_research` calls GraphRAG first and, whenever the top hit clears
-  `RETRIEVAL_RELEVANCE_FLOOR`, formats those chunks straight into the findings
+  `_gather_research` calls GraphRAG first and, whenever the top hit clears the
+  corpus's measured floor (`relevance_floor()`), formats those chunks straight
+  into the findings
   and returns without invoking the seat at all. So on a question the corpus answers well,
   the Researcher's model is not a variable: two different models produce
   byte-identical `research`, in ~0.0s. This is worth knowing before blaming or
@@ -631,38 +604,34 @@ four the moment this file described the problem.
   run round the loop. `scripts/diagnose_seats.py` keeps the two apart: the
   `research` exercise measures retrieval, `offcorpus` is the one that reaches
   the model, and the phase 1 probes stub retrieval out entirely.
-- **`RETRIEVAL_RELEVANCE_FLOOR` is a property of the embedding model, and the
-  number it replaced was inside the wrong population.** The floor is what
-  `_gather_research` reads off `results[0]["score"]` to decide whether the
-  corpus answered at all. It was `0.3`, hard-coded beside the comparison in
-  `nodes.py`, and a cosine similarity has no absolute meaning -- so it now
-  lives beside `EMBEDDING_MODEL_NAME` in `graphrag_server.py`, where a model
-  swap cannot step over it. Measured on this corpus, twelve questions it
-  answers against twelve it cannot:
-
-  | population | min | median | max |
-  |---|---|---|---|
-  | on-corpus | **0.442** | 0.564 | 0.685 |
-  | off-corpus | 0.144 | 0.208 | **0.306** |
-
-  Those separate with an empty band from 0.306 to 0.442, and `0.3` sat at the
-  top of the wrong one. The single question that crossed it is this project's
-  own off-corpus probe -- the `offcorpus` exercise on PostgreSQL vacuum, which
-  scored **0.306** and was therefore served to the Builder as though the corpus
-  had answered it. That exercise exists because it is *"the only team exercise
-  where the Researcher's model is the variable"*, and the gate had been quietly
-  denying it that for as long as the number stood: it was measuring retrieval
-  and reporting on the seat. `0.37` is the midpoint of the empty band, chosen
-  the way `EIGENGAP_DECISIVENESS` was -- a value in open space rather than on
-  an observed boundary. The table above is measured through `search` **as it
-  now ships**, hybrid re-rank included, and that matters: the re-rank promotes
-  the chunk the lexical half also likes, which is often a better answer
-  carrying a slightly lower cosine, so the on-corpus minimum fell from 0.492 to
-  0.442 as retrieval got better. A floor left calibrated against dense-only
-  ordering would describe code that no longer runs. The test pins it against the two measured populations
-  rather than against the literal number, because sliding it back under 0.306
-  would show up nowhere else: the run completes and the findings look like
-  findings.
+- **The relevance floor is measured per corpus, never stated, and a corpus has
+  none until it is measured.** The floor is what `_gather_research` reads off
+  `results[0]["score"]` to decide whether the corpus answered at all, and a
+  cosine similarity has no absolute meaning -- it is a property of the
+  embedding model on this corpus's texts. It was `0.3` once, hard-coded beside
+  the comparison in `nodes.py`, and that number was measured to be wrong:
+  twelve questions this corpus answers against twelve it cannot separated with
+  an empty band, and `0.3` sat at the top of the *wrong* population -- the
+  project's own off-corpus probe (the `offcorpus` exercise on PostgreSQL
+  vacuum) crossed it, and was therefore served to the Builder as though the
+  corpus had answered. That exercise exists because it is *"the only team
+  exercise where the Researcher's model is the variable"*, and the gate had
+  been quietly denying it that: it was measuring retrieval and reporting on
+  the seat.
+  So there is no constant any more. `relevance_floor()` returns the floor from
+  the corpus's own `floor_calibration.json` -- and only when that record names
+  `EMBEDDING_MODEL_NAME`, since a floor measured under one embedding model
+  says nothing about another. Until a record exists it returns `None`, and the
+  run then takes the no-floor paths: `_gather_research` hands every search to
+  the Researcher's model and the Planner gets no map, rather than a number
+  that misfiles some question silently. The run that finishes a corpus
+  measures the floor there and then (`calibrate_relevance_floor`, driven from
+  `serve.py`): it asks the questions in `embedding_calibration.json` -- twelve
+  the corpus answers, twelve it cannot -- and puts the floor in the middle of
+  the gap between the two populations, the way `EIGENGAP_DECISIVENESS` was
+  chosen. A model that leaves no gap gets no floor. The questions live in a
+  JSON file because the walk does not index JSON: anywhere the corpus reads,
+  the unanswerable ones would be answered by their own text.
 - **Search is hybrid, and BM25 re-ranks the dense window rather than
   retrieving beside it.** A dense embedding is a poor instrument for "this
   passage contains this exact rare identifier", which is what a plan naming
@@ -715,14 +684,15 @@ four the moment this file described the problem.
   id found.
   The server log held 1,772 lines on 2026-09-12: 1,177 were a sweep's
   per-document `query_graph` calls (see *a sweep is one call*), 84 were HTTP
-  requests logged at INFO -- every call to Ollama and to huggingface.co -- and
-  33 were embedding progress bars. The MCP SDK's constructor runs
+  requests logged at INFO -- every call to Ollama and, then, to huggingface.co.
+  The MCP SDK's constructor runs
   `logging.basicConfig` at the level its server is built with, so importing
   `graphrag_server` switched every library's INFO on; the server is built at
-  WARNING now, and `encode` is told `show_progress_bar=False`. The embedding
-  model loads from the local cache first, so a warm start asks huggingface.co
-  nothing, and a machine without a network still embeds once the model is on
-  disk.
+  WARNING now. The chunker's tokenizer
+  (Qwen3's own, via `transformers`) loads from the local cache first, so a
+  warm start asks huggingface.co nothing, and a machine without a network
+  still chunks once the tokenizer is on disk. Embedding itself is a POST to
+  the Ollama daemon; nothing else is fetched at all.
 - **The Builder gets the whole retrieved passage, from every result.**
   `RESEARCH_RESULTS` feeds both the `top_k` the Researcher asks for and the
   slice it forwards, so the two cannot drift: the search used to request five
@@ -832,7 +802,7 @@ four the moment this file described the problem.
   `SEAT_MIN_LIT_MS` past the last reply that showed work, because an index is
   a string of encodes with a store write between each and a light that went
   out in every gap would flicker. Measured on 2026-09-13 through the same page,
-  MiniLM on the CPU and a fresh five-document corpus: ten spells of work, from
+  a fresh five-document corpus: ten spells of work, from
   a 4.68s corpus phase down to a 7ms query, every one lit and no light without
   work under it; the corpus phase read as one unbroken light across its six
   spells; each search lit within one poll for half a second; and the light went
@@ -1468,107 +1438,58 @@ four the moment this file described the problem.
   1.34s to 95 in 0.016s. It only ever proposes: which entities mean the same
   thing is a decision about meaning that the graph cannot make.
 - **The embedding model loads on first use, not on construction.**
-  `GraphRAGKnowledgeBase.embedder` is a lazy property and
-  `sentence_transformers` is imported inside it. Only `add_document` and
+  `GraphRAGKnowledgeBase.embedder` is a lazy property. Only `add_document` and
   `search` embed; counting the corpus, listing its documents, drawing its graph
   and exporting it do not, and those are what the console does on a timer.
-  Loading it in `__init__` meant every header poll paid for the model and
-  importing the module pulled in torch behind it. A machine that names a card
-  also loads it at the start of a run, on purpose; the next bullet is why.
-- **The embedder can run on a card, and beside a local seat on a small card
-  the load order decides the outcome.** `EMBEDDING_DEVICE` is `cpu` by
-  default, or a card numbered the way `nvidia-smi` numbers cards (`cuda:0`).
-  It is worth having where it fits: a full index of 2,446 passages measured
-  81.0s on a desktop CPU and 17.0s on a 3 GB card. The CPU pin it replaces
-  (commit `2e8230c`) gave two reasons, and measurement kept one. *A build with
-  no kernels for the card still reports CUDA available* -- the 2026-09-10
-  `+cu130` venv -- so a named card is proven with a real encode
-  (`_warm_to_peak`) and the CPU takes over when it refuses. *A small card is
-  wanted whole for a local seat* turned out to depend on how that seat is
-  served, which is the machine's configuration and not this project's:
-  measured on a 3 GB card, a 9B seat lost two layers to the embedder with an
-  f16 KV cache and none with a quantised one. The GPU build of torch, the
-  driver and Ollama's own settings are all the machine's setup; `install.sh`
-  proves they initialise and installs none of them.
-  Four decisions in it are not interchangeable with the obvious alternatives.
-  *The embedder is placed before the seat loads, at the start of every run*
-  (`_claim_the_embedder_before_the_run`), because llama.cpp fits a model
-  around what a card already holds and never moves it: loaded second, the
-  embedder found 11 MiB free and failed. A lazy load cannot promise that
-  order -- a run's first search is inside the Planner's node, and the previous
-  run's seat may still be loaded -- so a card full of a seated model has that
-  model unloaded first (`unload_local_seat_models`), and it reloads around the
-  embedder on its next call. That is once per server, not once per run.
-  *Batches are capped* (`EMBEDDING_BATCH_SIZE` is 8): the library's 32 was no
-  faster on either device, and its 406 MiB peak cost the seat a layer -- 48/49,
-  prompts at 98 tok/s. *The warm-up encodes mixed lengths*, so the pool the
-  seat is fitted around is the one an index uses: one full-window batch
-  reserved 148 MiB, the mix 154, and a real index then peaked at 166 either
-  way; padding the pool to 176 up front was tried and ended at 182. *And a
-  full card is asked again where a card without kernels is not* -- the first
-  clears when a seat lets go, the second never will, and asking it would
-  unload a seat on every run for nothing.
-  An out-of-memory in the middle of an index finishes that encode on the CPU
-  (`_encode`) rather than reaching `index_project_files` as a per-file error,
-  which would skip the document and call the rebuild a success. The
-  import-time `CUDA_VISIBLE_DEVICES=""`, there since 2026-08-31, stays for
-  `cpu` and is gone for a card, because it hid the named card as well. The
-  header's embedding line names the device once something has embedded, and
-  turns red, with the reason on hover, when the model fell back to the CPU.
-- **The embedding model is chosen in the console, and a model is more than a
-  name here.** The Crew panel's embedder card switches between MiniLM, which
-  runs in this process, and every tag the Ollama daemon says can embed
-  (`rpc_embedding_options` asks the daemon's capabilities, the way the seat
-  cards ask about thinking). The choice lasts until the server restarts, like a
-  seat's, and `EMBEDDING_MODEL` overrides the default, `DEFAULT_EMBEDDING_MODEL`,
-  which is `qwen3-embedding:latest` -- so a clean install's first run builds
-  that model's corpus, and `install.sh` pulls the tag beside the seats'.
-  Measured on two 3 GB cards for that model, 7.6B parameters and 4,096
-  dimensions. At the window and batch Ollama gives an
-  embedding model by default -- 4,096 and 2,048 tokens -- it asked for 7,463
-  MiB, 2,433 of them compute buffers sized for that batch, so the daemon ran 25
-  of its 37 layers on the cards and embedded 0.24 passages/s: about 2.9 hours
-  for this project's corpus, against MiniLM's 17s. **So every call sends
-  `OLLAMA_EMBED_OPTIONS`**, a 512-token window and batch, and the model takes
-  4,987 MiB with all 37 layers on the cards at 0.48 passages/s -- about 1.4
-  hours -- and vectors unchanged at cosine 1.000000. A longer query is cut at
-  511 tokens rather than refused. The options are identical on every call
-  because the daemon reloads a model whose options changed. A split model
-  embeds exactly as correctly as a whole one, only slower, which is why nobody
-  saw it: on 2026-09-13 a first build ran split for 24 minutes behind a
-  progress line that read as wedged. `OllamaEmbedder` now reads `/api/ps` after
-  each call's first batch, and the header and the corpus line both say how much
-  of the model the daemon left on the CPU. At either size it cannot share
-  two 3 GB cards with a local 9B seat.
-  Four decisions follow from what a model is. *Every model has its own
-  corpus* (`persist_dir_for`): vectors from two models share no space, and a
-  corpus built with one and searched with another answers with noise that
-  still scores. MiniLM keeps `knowledge/`; any other model gets a directory
-  under `knowledge/models/`, inside the directory the walk already excludes.
-  Switching builds nothing -- the next run does, the one act allowed to bring a
-  corpus into being -- and it is refused mid-run, because switching models is
-  switching corpora. *Every model chunks with MiniLM's tokenizer*
-  (`OllamaEmbedder`): the chunker needs a tokenizer in this process, MiniLM's
-  loads from the cache alone with offsets identical to the full model's, and
-  keeping every corpus's passages at the same 254 tokens -- far inside a
-  40,960-token window -- means passage size, and what was tuned against it,
-  does not move with the model. *A floor is measured per model and never
-  borrowed* (`relevance_floor`, `calibrate_relevance_floor`):
-  `RETRIEVAL_RELEVANCE_FLOOR` is MiniLM's, and a cosine means nothing across
-  models. The run that finishes a model's corpus asks twelve questions it
-  answers and twelve it cannot, and puts the floor in the middle of the gap;
-  checked against MiniLM first, those questions separated it at 0.503-0.715
-  against 0.156-0.369, with the hand-measured floor inside the gap. A model
-  that leaves no gap gets no floor, and then `_gather_research` hands every
-  search to the Researcher's model and the Planner gets no map, rather than a
-  number that misfiles some question silently. The questions live in
-  `embedding_calibration.json` because the walk does not index JSON: anywhere
-  the corpus reads, the unanswerable ones would be answered by their own text.
-  *And a long build says how far it has got and stops when asked*
-  (`index_project_files` takes `progress` and `should_stop`, the second asked
-  between files and between Ollama batches): hours behind one unchanging line
-  read as wedged. A stopped build is finished by the next run rather than
-  repeated, because what is already embedded keeps its vectors.
+  Loading it in `__init__` meant every header poll paid for the model. The first
+  embed of a session also pays the daemon's model load, which is the one cost a
+  header poll must not take.
+- **The daemon owns the model's placement, and this project only reads it
+  back.** Embedding is a POST to the local Ollama daemon (`OllamaEmbedder`),
+  so the question "which device does the embedder run on" is answered by the
+  daemon's configuration, not by anything here -- there is no in-process
+  embedder and nothing to put on a card. What this process does owe the
+  operator is the answer read back: after each call's first batch the
+  embedder asks `config.ollama_cpu_share` how much of the model the daemon
+  kept on the CPU, and the header and the corpus line both say so when it is
+  not zero, because the reply is identical either way and a split would show
+  nowhere else. The header's embedding line names `ollama` as the device once
+  something has embedded.
+  Two knobs are this project's, and both are measured. *Batches are capped*
+  (`EMBEDDING_BATCH_SIZE` is 8), the batch `OLLAMA_EMBED_OPTIONS` was measured
+  at. *And the load is pinned to the GPU* (`OLLAMA_EMBED_OPTIONS = {"num_ctx":
+  512, "num_batch": 512, "num_gpu": 999}`): the model's default window is far
+  larger than a chunk will ever need -- a chunk never exceeds 254 tokens -- so
+  a 512-token window is the whole working set, and `num_gpu` puts every layer
+  on the cards because the daemon's own estimate does not. Measured on
+  2026-09-16: it offloaded 24 of 37 layers with 1.1 GB unused on each card, a
+  batch of 8 in 23.4s, against 6.5s with all 37 forced. The price is chosen on
+  purpose: where the model does not fit, the load errors rather than splitting
+  onto the CPU. On NVIDIA cards below compute capability 7.5 the daemon also
+  has to be Ollama's own CUDA 12 build, because Arch's `ollama-cuda` is built
+  with CUDA 13 and finds no card at all there; `cuda-embed-ollama.sh` installs
+  it, and `install.sh` runs that script.
+- **There is exactly one embedding model, and a corpus belongs to it.**
+  `EMBEDDING_MODEL_NAME` is `qwen3-embedding:latest`, served by the local
+  Ollama daemon, and there is no switch: the console's embedder card reports
+  rather than offers, and `set_embedding_model` refuses by naming the one
+  model. A switch was refused mid-run and given its own corpus even when one
+  existed (`persist_dir_for` is deleted with them), because vectors from two
+  models share no space and a corpus built with one and searched with another
+  answers with noise that still scores -- the refusal is the same fact kept as
+  a property of the code rather than of the dropdown.
+  Three decisions follow from what the one model is. *The chunker cuts with
+  the model's own tokenizer* (`EMBEDDING_TOKENIZER_NAME`, Qwen3-Embedding-8B's,
+  loaded cache-first): passage size -- and the measurements tuned against it,
+  254-token chunks inside the 512-token load above -- is a property of the
+  model embedding them, and borrowing another model's tokenizer would cut
+  against boundaries the daemon does not share. *The floor is measured per
+  corpus and never borrowed*: see the floor bullet above. *And a long build
+  says how far it has got and stops when asked* (`index_project_files` takes
+  `progress` and `should_stop`, the second asked between files and between
+  batches): hours behind one unchanging line read as wedged. A stopped
+  build is finished by the next run rather than repeated, because what is
+  already embedded keeps its vectors.
 - **Online research costs nothing, and that is a constraint rather than a
   happy accident.** `web_research` reaches the internet through DuckDuckGo's
   keyless HTML endpoint, or a SearxNG instance the operator hosts
@@ -1600,7 +1521,7 @@ four the moment this file described the problem.
   one set of pages and meaningless on the next. Zero is the single absolute
   floor, because zero means no shared term at all. This gate is the answer to
   the problem the phase creates: a web document competes with the checkout's
-  own files at retrieval time, under a `RETRIEVAL_RELEVANCE_FLOOR` calibrated
+  own files at retrieval time, under a relevance floor calibrated
   on a corpus containing none of them.
   A fetched page is written under `research/web/` **before** it is embedded,
   the same ordering and for the same reason as `store_uploaded_document`, and
@@ -1633,7 +1554,7 @@ four the moment this file described the problem.
   keyword-dense marketing page outscores every file in the checkout), skipping
   the phase when the corpus already answers the goal (backwards on the
   measurement -- 0.351 for a goal that needed no web at all against 0.405 for
-  one that did), and `RETRIEVAL_RELEVANCE_FLOOR` itself (3/13; every page
+  one that did), and the relevance floor itself (3/13; every page
   cleared it). No fourth threshold helps, and the lambda run is why: the
   *wrong* pages outscore the right ones on both instruments, 0.553-0.631 for
   AWS Lambda deployment guides against 0.459-0.550 for the Dolphin model pages
@@ -1777,7 +1698,7 @@ four the moment this file described the problem.
   It exists because of a failure with no symptom at all: measured here on
   2026-09-09, the store held **8 documents, all of them uploads, against a walk
   offering 103**. Every project query therefore scored under
-  `RETRIEVAL_RELEVANCE_FLOOR` -- `BUILDER_DEADLINE_SECONDS` returned an
+  the relevance floor -- `BUILDER_DEADLINE_SECONDS` returned an
   unrelated upload at 0.284 -- so `_gather_research` discarded retrieval and
   fell through to the Researcher's seat on *every* run, which is the
   step-burning loop described above. Nothing reported it. `rag_stats` said
@@ -1971,12 +1892,13 @@ four the moment this file described the problem.
 
 ## Troubleshooting
 
-- **Tests are slow** — The first run loads `sentence-transformers` and Chroma. Subsequent runs use the cached singleton.
+- **Tests are slow** — The first run opens Chroma. Subsequent runs reuse the cached singleton.
 - **Mypy errors from upstream stubs** — Prefer `# type: ignore[...]` with a comment over disabling strict mode.
 - **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus` when none has been built. A run builds one before the Architect opens, from the directory the server was started in, so the usual causes are a server started somewhere with nothing to index or `INDEX_PROJECT_BEFORE_RUN=0`. Nothing else builds one: there is no script and no install step.
 - **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
-- **Embedding runs on the CPU although `EMBEDDING_DEVICE` names a card** — Hover the header's embedding line for the reason. *No kernel image* means the torch build in `.venv` has no kernels for the card — CUDA 13 builds dropped compute 6.x, which is what broke it on 2026-09-10 — and nothing changes until that build does, which is the machine's own setup. *Out of memory* means something held the card when the run placed the embedder; the next run unloads seated models and asks again, and a model loaded outside the seats is yours to unload. A local seat that got slower with the embedder on its card was fitted around the embedder: `ollama ps` shows how much of it the daemon left on the CPU.
-- **Online research finds nothing, or reports DuckDuckGo's bot check** — Check that `SEARXNG_URL` is in `.env`: `install.sh` runs a SearxNG and adds it only once the instance answers. `systemctl --user status ambiguity-searxng` and `journalctl --user -u ambiguity-searxng` show the container. An HTTP 403 means `json` is missing from the instance's `search.formats`.
-- **`install.sh` stops at "no torch" or reports a CPU build** — The GPU build of torch in `.venv`, the driver and Ollama's GPU backend are the machine's own setup, and the installer deliberately installs none of them: it only proves they initialise, and refuses to let pip put a PyPI or CPU torch where a GPU build belongs. Install the build that carries kernels for the card into `.venv`, then re-run it.
+- **The embedder is on the CPU, or embedding is slow** — Placement is the Ollama daemon's, and this project only reads it back: `ollama ps` shows how much of `qwen3-embedding:latest` the daemon left on the CPU. `journalctl -u ollama` reading `skipping CUDA device` means Arch's CUDA 13 build on a card it cannot drive: run `./cuda-embed-ollama.sh`, which installs Ollama's own CUDA 12 build and proves the model lands 100% on the GPU. Every layer is forced onto the cards (`OLLAMA_EMBED_OPTIONS`), so a load that does not fit errors instead of splitting: `nvidia-smi` shows what else holds the cards, and the next embed reloads the model once they are free.
+- **Online research finds nothing, or reports DuckDuckGo's bot check** — Check that `SEARXNG_URL` is in `.env`: `install.sh` runs a SearxNG and adds it only once the instance answers. `systemctl --user status ambiguity-searxng` and `journalctl --user -u ambiguity-searxng` show the container. An HTTP 403 means `json` is missing from the instance's `search.formats`. Port 8888 is also Jupyter's default: if something else holds it, set `SEARXNG_PORT` in `.env` and re-run the installer.
+- **`docker` says permission denied, or nothing answers on port 5432** — The database is the one Omarchy's own installer runs, the `postgres18` container, and nothing in the app reads its `DATABASE_URL`. `install.sh` adds you to the `docker` group, which applies only after a reboot; until then `docker` needs sudo (`sudo docker logs postgres18`). It also enables `docker.service`, because Omarchy enables only the socket, and without the service the container stays down after a reboot until something runs `docker`.
+- **`install.sh` cannot pull a model or the tokenizer** — Both come from the network once: the seat and embedding models from the Ollama registry, the embedding tokenizer from Hugging Face (a few MB, no weights). A machine meant to go offline afterwards needs that step to have run at least once; afterwards both are read from cache.
 - **Graph tab is empty** — Start a run; the corpus is rebuilt before the Architect opens. A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.

@@ -14,7 +14,7 @@ echo "  4-AGENT SYSTEM - QUICK TEST"
 echo "========================================"
 
 echo -e "\n► Checking dependencies..."
-python -c "import langgraph, langchain_core, chromadb, sentence_transformers, networkx; print('  ✓ Core deps OK')"
+python -c "import langgraph, langchain_core, chromadb, transformers, networkx; print('  ✓ Core deps OK')"
 
 echo -e "\n► Checking LLM configuration..."
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then

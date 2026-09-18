@@ -115,6 +115,32 @@ def test_seat_names_must_be_strings():
         serve.rpc_set_seat({"agent": "planner", "provider": 7, "model": "m"})
 
 
+@pytest.mark.parametrize("provider,model", [
+    ("ollama", "gemma4:cloud"),              # a model the console used to offer
+    ("ollama", "qwen3-embedding:latest"),    # pulled, but it cannot chat
+    ("anthropic", "claude-opus-5"),
+    ("anthropic", "kimi-k3:cloud"),          # an offered model under the wrong provider
+])
+def test_a_seat_takes_only_a_model_the_console_offers(provider, model):
+    """The dropdown is the whole list, so a stale tab cannot seat anything else."""
+    from langgraph_agent.config import get_agent_model_info
+
+    before = get_agent_model_info("planner")
+    with pytest.raises(ValueError, match="not a seat model the console offers"):
+        serve.rpc_set_seat({"agent": "planner", "provider": provider, "model": model})
+    assert get_agent_model_info("planner") == before
+
+
+def test_the_seat_dropdowns_offer_exactly_the_curated_models():
+    """Tags the daemon carries beyond the list are not offered."""
+    from langgraph_agent.config import AGENT_LLM_OPTIONS
+
+    assert serve.rpc_llm_options({}) == {"options": AGENT_LLM_OPTIONS}
+    assert [o["model"] for o in AGENT_LLM_OPTIONS] == [
+        "kimi-k3:cloud", "qwen3.5:397b-cloud", "qwen3.8:latest",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # the request body
 # ---------------------------------------------------------------------------

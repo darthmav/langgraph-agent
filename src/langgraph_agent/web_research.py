@@ -4,7 +4,7 @@ Nothing in this process could open a socket before this module. The corpus was
 a function of what sat on disk in the checkout, so a run could only ever be as
 informed as the checkout was: a goal naming a library this project has never
 vendored had no source of truth to retrieve, retrieval came back under
-`RETRIEVAL_RELEVANCE_FLOOR`, and the Researcher's seat answered from whatever
+the relevance floor, and the Researcher's seat answered from whatever
 the model happened to remember. That is the one path where the seat's model is
 the variable, and it is the path a goal about anything external always took.
 

@@ -70,16 +70,11 @@ three states apart: *absent* (nobody has indexed here),
 *empty* (a corpus that exists and holds nothing — what *Clear corpus* leaves),
 and the counts, once there is something to count. *Export* and *Clear* are
 disabled while it is absent; creating a store in order to empty it would leave
-behind the thing you were asking to be rid of. The local embedding model loads
-on the first index or search, not at startup. It runs on the CPU unless
-`EMBEDDING_DEVICE` names a card (`cuda:0`), which needs a GPU build of torch in
-`.venv` — part of the machine's own setup, which `install.sh` checks but never
-installs; the Important Notes in `CLAUDE.md` carry the measurements. The Crew
-panel's embedder card switches the
-embedding model itself — `qwen3-embedding:latest` by default, MiniLM, or any
-other Ollama model that can embed — and each
-model gets its own corpus, built by the next run, and its own relevance floor,
-measured on that corpus.
+behind the thing you were asking to be rid of. The embedding model —
+`qwen3-embedding:latest`, served by the local Ollama daemon — is loaded by the
+daemon on the first index or search, not at startup; the daemon owns which
+card it runs on, and the Crew panel's embedder card reports how much of it the
+daemon kept on the CPU.
 
 *Clear corpus* and an upload are both refused while a run is in flight, and
 the refusal says which run. (The rebuild is the exception that proves it: it
@@ -161,8 +156,10 @@ Later cycles route as the Planner asks.
 | **Researcher** | Gathers deep, relationship-aware knowledge | `kimi-k3:cloud` (ollama) | GraphRAG MCP only |
 | **Builder** | Implements the plan (writes code, edits files) | `qwen3.5:397b-cloud` (ollama) | Filesystem, Git, Terminal |
 
-Every seat is reassignable live from its dropdown in the console; selections last
-for the life of the process.
+Every seat is reassignable live from its dropdown in the console, which offers
+`kimi-k3:cloud`, `qwen3.5:397b-cloud` and `qwen3.8:latest` and nothing else;
+selections last for the life of the process. `qwen3-embedding:latest` is the
+embedder's, not a seat's: it cannot chat.
 
 ### The Three Technologies
 
@@ -174,14 +171,36 @@ for the life of the process.
 
 ## Installation
 
-On Arch / Omarchy, one command does all of it: system packages, a `.venv`
-with CPU-only torch, `.env`, the Ollama daemon and its sign-in, the seat
-models, the embedding model, the corpus, the checks, and an "Ambiguity
-Console" entry in the app launcher. It is safe to re-run, and it ends by
-reporting whether each seat can actually run.
+On Arch / Omarchy, one command does all of it: system packages, `.env`, a
+`.venv`, the Ollama daemon and its sign-in, the seat and embedding models (the
+embedding model included, by `ollama pull`), the embedding model's tokenizer, a
+SearxNG for online research, a PostgreSQL in Docker, the checks, and an
+"Ambiguity Console" entry in the app launcher. Then it proves the result rather
+than assuming it: the embedder embeds, the database answers a query, git and gh
+can finish the Builder's pipeline, the console starts, and every seat answers a
+test prompt. It is safe to re-run.
+
+It builds no corpus — the first run indexes the project before the Architect
+opens. The GPU driver is the machine's own setup (Omarchy installs it), but
+where the embedding model runs is not left to chance: the app loads it with
+every layer on the GPU, and on NVIDIA cards below compute capability 7.5 —
+the Maxwell, Pascal and Volta cards Omarchy drives with its `nvidia-580xx`
+driver, which CUDA 13 no longer supports — the installer runs
+`cuda-embed-ollama.sh`. That script replaces Arch's CUDA 13 Ollama build with
+Ollama's own CUDA 12 build of the same version and proves the model sits 100%
+on the GPU; run it with `--check` to see where it sits now.
+
+The database is the one Omarchy's own installer runs: `postgres:18` as the
+`postgres18` container, published on 127.0.0.1:5432 only, with no password. The
+installer enables `docker.service` so it survives a reboot, adds you to the
+`docker` group (root-equivalent, and applied after a reboot;
+`--no-docker-group` keeps Docker behind sudo), and writes `DATABASE_URL` into
+`.env`. Nothing in the app reads that URL — the corpus stays in Chroma — but
+the console exports `.env` to everything it runs, so a script the Builder
+writes can use it. `--no-postgres` skips the database entirely.
 
 ```bash
-./install.sh            # --help lists --minimal, --no-system, --no-index, ...
+./install.sh            # --help lists --minimal, --no-system, --no-searxng, ...
 ```
 
 Everything it installs is free to use. Elsewhere, or by hand:
@@ -223,8 +242,9 @@ ollama.com credentials for `:cloud` tags:
 ollama signin
 ollama pull qwen3.5:397b-cloud      # Architect and Builder
 ollama pull kimi-k3:cloud           # Planner and Researcher
-ollama pull qwen3-embedding:latest  # the default embedding model
 ```
+
+The embedding model (`qwen3-embedding:latest`) is served by the Ollama daemon like the seats' models and pulled the same way — `install.sh` does it, or `ollama pull qwen3-embedding:latest`. Only its tokenizer is fetched from Hugging Face, so the chunker can cut passages in-process; nothing here runs or needs torch.
 
 ### Optional OpenAI provider
 

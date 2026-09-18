@@ -796,10 +796,10 @@ def _project_map(goal: str) -> str:
     only name what retrieval can find.
 
     Read through the same tool the Researcher uses, and only hits over the
-    embedding model's relevance floor are shown (`relevance_floor`; MiniLM's is
-    RETRIEVAL_RELEVANCE_FLOOR) -- a map of files the corpus does not consider
-    related would be invented structure, which is also why a model with no
-    floor gets no map at all. The Planner still calls no
+    embedding model's relevance floor are shown (`relevance_floor`, measured
+    on the built corpus rather than hard-coded) -- a map of files the corpus
+    does not consider related would be invented structure, which is also why a
+    model with no floor yet gets no map at all. The Planner still calls no
     tool: this is context handed to it, like the state injection. Returns ""
     when there is nothing worth showing, and never raises.
     """
@@ -1104,10 +1104,10 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
         # `mcp_client` does the same: `graphrag_server` pulls in chromadb, and
         # the tool call above has already paid for that by the time we rule on
         # what it returned. The floor is a property of the embedding model, so
-        # it is read from where the model is named -- see
-        # RETRIEVAL_RELEVANCE_FLOOR for MiniLM's measurement and
-        # `relevance_floor` for any other model's. A model with no floor cannot
-        # tell an answer from noise, so nothing it retrieves counts as answered.
+        # it is read from where the model is named -- measured against the
+        # built corpus by `calibrate_relevance_floor`, and `None` until that
+        # has run. A model with no floor cannot tell an answer from noise, so
+        # nothing it retrieves counts as answered.
         from langgraph_agent.graphrag_server import relevance_floor
 
         floor = relevance_floor()

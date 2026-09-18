@@ -19,8 +19,9 @@ so they need no maintenance and catch drift nobody anticipated. A few compare
 prose against a constant, and those carry a registry that has to be extended
 when a new figure is written into the docs -- the honest architectural answer
 for a figure is not to restate it at all but to read it, the way
-`scripts/diagnose_seats.py` now reads `RETRIEVAL_RELEVANCE_FLOOR` rather than
-quoting it. Markdown cannot do that, so markdown gets a registry.
+`scripts/diagnose_seats.py` reads `relevance_floor()` from the corpus's stored
+record rather than quoting it. Markdown cannot do that, so markdown gets a
+registry.
 
 These tests read the real repository rather than a fixture. That is the point:
 a fixture would test the checker.
@@ -39,7 +40,6 @@ from langgraph_agent.graphrag_server import (
     EMBEDDING_BATCH_SIZE,
     ENTITY_STOPWORDS,
     MAX_INDEXABLE_BYTES,
-    RETRIEVAL_RELEVANCE_FLOOR,
     _mints_entities,
     iter_project_files,
 )
@@ -61,6 +61,7 @@ RUNTIME_PATHS = (
 # Artifacts named in prose that are written at runtime and never committed.
 RUNTIME_NAMES = frozenset({
     "knowledge_graph.json", "last_run.json", "report.md", "results.json",
+    "floor_calibration.json",
 })
 
 # Filenames the seat diagnostic *asks an agent to create*. They are goals, not
@@ -249,7 +250,6 @@ def test_the_documented_python_version_matches_pyproject():
 # down: name the constant and let the reader look it up, the way the seat
 # diagnostic now does.
 DOCUMENTED_FIGURES = (
-    (r"floor of (\d+\.\d+)", lambda: RETRIEVAL_RELEVANCE_FLOOR, "RETRIEVAL_RELEVANCE_FLOOR"),
     (r"`EMBEDDING_BATCH_SIZE` is (\d+)", lambda: EMBEDDING_BATCH_SIZE, "EMBEDDING_BATCH_SIZE"),
 )
 
@@ -506,16 +506,26 @@ def test_no_capital_forced_by_position_becomes_a_hub_entity():
 # statistic -- a record of what a human looked at and accepted. Redone on
 # 2026-09-12, when `NetworkX` displaced `Search`: the graph library this
 # project is built on, named throughout the docstrings of an agent-written
-# `src/quisce/spectral_analysis.py`. A real term, so it stays. Redone again on
+# spectral-analysis module in the quisce prototype. A real term, so it stays.
+# Redone again on
 # 2026-09-15, the other way: removing the machine-specific dolphin-model
 # modules before rollout took `NetworkX` from 13 documents to 12, and `Search`
 # came back at 13 with 7 position-free capitals -- the entity the 2026-09-09
-# audit had already cleared by that count.
+# audit had already cleared by that count. Redone on 2026-09-16: `NetworkX`
+# returned at 14 documents (26 free capitals) while `Search` dropped to 13 --
+# the graph library is a core term, so it stays and `Search` rotates out. And
+# again the same day, the other way: the qwen3-embedding change deleted
+# `RETRIEVAL_RELEVANCE_FLOOR` from the corpus's vocabulary entirely, which
+# rotated `Search` back in -- already cleared by the 2026-09-09 audit. Redone
+# again later on 2026-09-16, when the quisce prototype and the dolphin-model
+# experiments were moved out of the checkout entirely: `NetworkX` fell from 14
+# documents to 11 and out of the top twenty, and `Embedding` (11 documents, 5
+# position-free capitals -- a term this project is about) took the last slot.
 AUDITED_TOP_ENTITIES = frozenset({
     "Architect", "Builder", "Researcher", "Laplacian", "Planner", "System",
     "ValueError", "Fiedler", "AgentState", "Spectral", "Exception", "Graph",
     "GraphRAG", "Python", "Verdict", "Cheeger", "GraphRAGKnowledgeBase",
-    "LangGraph", "RETRIEVAL_RELEVANCE_FLOOR", "Search",
+    "LangGraph", "Search", "Embedding",
 })
 
 

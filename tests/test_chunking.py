@@ -8,8 +8,8 @@ vector for all 46,094 characters of CLAUDE.md identical to the vector for its
 first 1,000. Nothing raised, and the counters read the same either way -- which
 is why these are tests and not a note in the README.
 
-No test here loads sentence-transformers. The suite goes out of its way to keep
-the model out (`test_stats_does_not_load_the_embedder_for_the_health_check`
+No test here touches the daemon or the real tokenizer. The suite goes out of
+its way to keep the model out (`test_stats_does_not_load_the_embedder_for_the_health_check`
 asserts as much), so the packing, the trimming and the collapse back onto
 documents are all exercised against a stand-in tokenizer that reproduces the
 one behaviour that matters: a slice re-tokenizes to a different length than it
@@ -84,7 +84,9 @@ class _FakeTokenizer:
 
 
 class _FakeEmbedder:
-    """Enough of a SentenceTransformer for chunking: a tokenizer and a vector."""
+    """Enough of an OllamaEmbedder for chunking: a tokenizer and a vector."""
+
+    placement_note: str | None = None
 
     def __init__(self, piece: int = 4) -> None:
         self.tokenizer = _FakeTokenizer(piece)
@@ -709,24 +711,29 @@ class _RecordingEmbedder(_FakeEmbedder):
         return super().encode(text, **kwargs)
 
 
-def test_embedding_draws_no_progress_bar(tmp_path):
-    """sentence-transformers draws one per call when logging is at INFO."""
+def test_embedding_carries_the_runs_stop_check(tmp_path):
+    """A stopped run waits for at most one batch, not for the rest of a document.
+
+    Both call sites go through `_encode`, so neither a document nor a query
+    reaches the daemon without the run's stop check attached.
+    """
     kb = _make_kb(tmp_path)
     embedder = _RecordingEmbedder()
     kb._embedder = embedder  # type: ignore[assignment]
+    kb._should_stop = lambda: False
 
     kb.add_document("notes.md", "Some words to embed. " * 30, {"path": "notes.md", "type": "markdown"})
     kb.search("words", 1)
 
     assert len(embedder.calls) >= 2
-    assert all(call.get("show_progress_bar") is False for call in embedder.calls)
+    assert all(call.get("should_stop") is kb._should_stop for call in embedder.calls)
 
 
 def test_embedding_goes_in_batches_of_the_cap(tmp_path):
-    """sentence-transformers' default of 32 measured a seat layer on a shared card.
+    """8 passages per request is the batch OLLAMA_EMBED_OPTIONS was measured at.
 
     Both call sites go through `_encode`, so neither a document nor a query
-    reaches the model at the library's own batch size.
+    reaches the daemon at any other batch size.
     """
     kb = _make_kb(tmp_path)
     embedder = _RecordingEmbedder()
@@ -739,32 +746,32 @@ def test_embedding_goes_in_batches_of_the_cap(tmp_path):
     assert all(call.get("batch_size") == EMBEDDING_BATCH_SIZE for call in embedder.calls)
 
 
-def test_the_model_is_loaded_from_the_cache_before_the_network(tmp_path, monkeypatch):
-    """Loading by name asked huggingface.co on every server's first embed."""
+def test_the_tokenizer_is_loaded_from_the_cache_before_the_network(monkeypatch):
+    """Loading by name asked huggingface.co whenever the chunker first ran."""
     import sys
     import types
 
     calls: list[bool] = []
     cached = {"present": True}
 
-    class _Model:
-        def __init__(self, name, device=None, local_files_only=False):
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(name, local_files_only=False):
             calls.append(local_files_only)
             if local_files_only and not cached["present"]:
                 raise OSError("not in the local cache")
+            return _FakeTokenizer()
 
-    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=_Model))
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(AutoTokenizer=_AutoTokenizer))
 
-    kb = _make_kb(tmp_path)
-    kb._embedder = None
-    assert isinstance(kb.embedder, _Model)
+    from langgraph_agent.graphrag_server import EMBEDDING_TOKENIZER_NAME, OllamaEmbedder
+
+    assert isinstance(OllamaEmbedder(EMBEDDING_TOKENIZER_NAME).tokenizer, _FakeTokenizer)
     assert calls == [True]
 
     calls.clear()
     cached["present"] = False
-    kb = _make_kb(tmp_path)
-    kb._embedder = None
-    assert isinstance(kb.embedder, _Model)
+    assert isinstance(OllamaEmbedder(EMBEDDING_TOKENIZER_NAME).tokenizer, _FakeTokenizer)
     assert calls == [True, False]
 
 

@@ -4,7 +4,7 @@ This exists because of a failure that had no symptom. The corpus is a function
 of what is on disk, nothing rebuilds it automatically, and every counter the
 console shows stays non-zero and internally consistent while it drifts. On
 2026-09-09 this project's store held 8 documents against a walk offering 103:
-every project query scored under `RETRIEVAL_RELEVANCE_FLOOR`, retrieval was
+every project query scored under the relevance floor, retrieval was
 discarded, the Researcher's seat answered from memory on every run — and
 `rag_stats` said `indexed`, the full suite passed, and nothing logged anything.
 

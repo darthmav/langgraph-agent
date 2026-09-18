@@ -19,7 +19,7 @@ Three decisions in here are not interchangeable with the obvious alternatives.
 fusion -- two independent retrievals over the whole corpus, merged -- measured
 67.3% against re-ranking's 66.2% on the same 541 queries, a difference of six
 and well inside the noise. It costs much more than it sounds: a document that only the
-lexical side found has no dense score, and `RETRIEVAL_RELEVANCE_FLOOR` is read
+lexical side found has no dense score, and the relevance floor is read
 off `results[0]["score"]` to decide whether the corpus answered at all. Buying
 one percentage point by making the gate's input sometimes-absent is a bad
 trade, so every result still comes from the dense window and still carries the

@@ -44,7 +44,7 @@ def check_dependencies() -> bool:
         "langchain_core": "LangChain Core",
         "mcp": "MCP",
         "chromadb": "ChromaDB",
-        "sentence_transformers": "Sentence Transformers",
+        "transformers": "Transformers (the chunker's tokenizer)",
         "networkx": "NetworkX",
         "dotenv": "python-dotenv",
     }
