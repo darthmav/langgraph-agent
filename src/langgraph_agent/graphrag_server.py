@@ -209,10 +209,7 @@ class OllamaEmbedder:
         array = np.asarray(vectors, dtype=np.float32)
         return array[0] if single else array
 
-# The questions the corpus's relevance floor is measured with, in a JSON file
-# for one reason: the walk does not index JSON. Written anywhere the corpus
-# reads, the unanswerable questions would be answered by their own text, score
-# near 1.0, and leave no gap to put a floor in.
+
 # Where a corpus lives when nobody says otherwise. One constant because four
 # doors resolved it by spelling the same default inline, which makes the
 # project's own directory a magic string with no source of truth -- and a
@@ -226,6 +223,10 @@ def resolve_persist_dir(persist_dir: str | Path | None = None) -> Path:
     return Path(persist_dir or DEFAULT_PERSIST_DIR)
 
 
+# The questions the corpus's relevance floor is measured with, in a JSON file
+# for one reason: the walk does not index JSON. Written anywhere the corpus
+# reads, the unanswerable questions would be answered by their own text, score
+# near 1.0, and leave no gap to put a floor in.
 FLOOR_CALIBRATION_QUESTIONS = Path(__file__).with_name("embedding_calibration.json")
 FLOOR_CALIBRATION_FILE = "floor_calibration.json"
 
@@ -252,6 +253,19 @@ def floor_calibration(persist_dir: str | Path | None = None) -> dict[str, Any] |
     return record if isinstance(record, dict) and record.get("model") == EMBEDDING_MODEL_NAME else None
 
 
+def floor_from_calibration(record: dict[str, Any] | None) -> float | None:
+    """The floor a stored record carries, or None when it carries none.
+
+    Split out of `relevance_floor` so a caller already holding the record reads
+    the file once rather than twice: `_embedding_choice` needs both the record
+    and the floor, to tell "the measurement found no gap" from "nobody has
+    measured", and the console asks it on every five-second poll. One function
+    because the coercion spelled twice is two answers to one question.
+    """
+    floor = record.get("floor") if record else None
+    return float(floor) if isinstance(floor, (int, float)) else None
+
+
 def relevance_floor(persist_dir: str | Path | None = None) -> float | None:
     """The score over which a search counts as the corpus having answered.
 
@@ -262,9 +276,7 @@ def relevance_floor(persist_dir: str | Path | None = None) -> float | None:
     caller must treat every search as unanswered rather than borrow a number
     measured on a different model: a cosine has no meaning across models.
     """
-    record = floor_calibration(persist_dir)
-    floor = record.get("floor") if record else None
-    return float(floor) if isinstance(floor, (int, float)) else None
+    return floor_from_calibration(floor_calibration(persist_dir))
 
 
 def calibrate_relevance_floor(kb: "GraphRAGKnowledgeBase") -> dict[str, Any]:
@@ -1662,6 +1674,19 @@ PROJECT_INDEX_EXCLUDES = (
     # seating nobody runs any more. `reports/*.md` is written deliberately and
     # stays indexed; only the timestamped sweeps under it are excluded.
     "reports/diagnostics/",
+    # Where an agent run's own write-ups land -- a machine inspection, an
+    # integration sketch, a brainstorm nobody finished. Excluded for the reason
+    # the sweeps above are: the walk is a glob and not git, so an untracked file
+    # here is corpus material within seconds of being written, and these are
+    # per-run notes about one afternoon rather than knowledge of the project.
+    # Measured on 2026-09-18: one file here had minted 98 entities -- 43 of them
+    # mentioned by no other document, 4.7% of the graph -- from a template whose
+    # own body says the logic it analyses was never attached, and a heading in
+    # the other took a positional token to the four documents that fail the
+    # entity guard in `tests/test_claims.py`. A directory rather than an entry
+    # per file, because the class recurs: four artifacts of this shape were
+    # deleted on 2026-09-09 and the list grew no way to keep the fifth out.
+    "experimental/",
 )
 
 # Above this size a file is not a document at all -- a data dump, a minified
