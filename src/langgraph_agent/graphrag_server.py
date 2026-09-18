@@ -213,6 +213,19 @@ class OllamaEmbedder:
 # for one reason: the walk does not index JSON. Written anywhere the corpus
 # reads, the unanswerable questions would be answered by their own text, score
 # near 1.0, and leave no gap to put a floor in.
+# Where a corpus lives when nobody says otherwise. One constant because four
+# doors resolved it by spelling the same default inline, which makes the
+# project's own directory a magic string with no source of truth -- and a
+# fifth door added later copies the expression rather than noticing there was
+# a pattern to reuse.
+DEFAULT_PERSIST_DIR = "knowledge"
+
+
+def resolve_persist_dir(persist_dir: str | Path | None = None) -> Path:
+    """The corpus directory a caller means, defaulting to `DEFAULT_PERSIST_DIR`."""
+    return Path(persist_dir or DEFAULT_PERSIST_DIR)
+
+
 FLOOR_CALIBRATION_QUESTIONS = Path(__file__).with_name("embedding_calibration.json")
 FLOOR_CALIBRATION_FILE = "floor_calibration.json"
 
@@ -226,7 +239,7 @@ def _floor_calibration_path(persist_dir: str | Path | None = None) -> Path:
     corpus nobody has measured. The default matches every other door here
     (`corpus_exists`, `corpus_state`, `GraphRAGKnowledgeBase.__init__`).
     """
-    return Path(persist_dir or "knowledge") / FLOOR_CALIBRATION_FILE
+    return resolve_persist_dir(persist_dir) / FLOOR_CALIBRATION_FILE
 
 
 def floor_calibration(persist_dir: str | Path | None = None) -> dict[str, Any] | None:
@@ -601,7 +614,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     _should_stop: "Callable[[], bool] | None" = None
 
     def __init__(self, persist_dir: str | None = None):
-        self.persist_dir = Path(persist_dir or "knowledge")
+        self.persist_dir = resolve_persist_dir(persist_dir)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize Chroma vector store
@@ -2119,7 +2132,7 @@ def corpus_exists(persist_dir: str | None = None) -> bool:
     emptying it in place -- so this answers "has anyone indexed here", not "is
     there anything in it". `corpus_state()` tells those two apart.
     """
-    return (Path(persist_dir or "knowledge") / "chroma").is_dir()
+    return (resolve_persist_dir(persist_dir) / "chroma").is_dir()
 
 
 def open_knowledge_base(persist_dir: str | None = None) -> GraphRAGKnowledgeBase | None:
@@ -2155,7 +2168,7 @@ def corpus_state(persist_dir: str | None = None) -> tuple[str, str]:
     Returns:
         (state, embedding_model_name)
     """
-    chroma_dir = Path(persist_dir or "knowledge") / "chroma"
+    chroma_dir = resolve_persist_dir(persist_dir) / "chroma"
     if not chroma_dir.is_dir():
         return "absent", EMBEDDING_MODEL_NAME
 
