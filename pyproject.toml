@@ -49,6 +49,26 @@ dependencies = [
     # qwen3-embedding:latest runs under the local Ollama daemon.
     "transformers>=4.51.0",
     "networkx>=3.0",
+    # The scientific stack the spectral half runs on, undeclared until
+    # 2026-09-18 and arriving by luck: numpy comes in transitively under
+    # chromadb, and scipy came in under nothing at all -- so CI's clean install
+    # could not import `tests/test_spectral_graph.py` and three commits on
+    # master were red for it. This is the third instance of the failure httpx
+    # and ollama are declared against, and the worst-placed of them: the
+    # comment on `requires-python` above names "numpy 2.5.2 and scipy 1.18.1"
+    # as the stack this resolves against, so the file knew about both while
+    # declaring neither.
+    #
+    # Both are runtime dependencies of the installed distribution rather than
+    # dev extras. `corpus_spectral.py` imports numpy and is inside the package;
+    # `graphrag_server` imports `spectral_graph` from inside `connectivity()`,
+    # `topics()` and `bottleneck()`, so scipy is what the console's own header
+    # poll ends up needing. Floors are where the numpy-2 stack begins rather
+    # than a tested minimum, which is this list's convention -- and stated as
+    # such, because a floor nobody exercised is the same unfounded claim as the
+    # 3.10 that comment retired.
+    "numpy>=2.0",
+    "scipy>=1.14",
     # Self-healing (retry / circuit breaker)
     "tenacity>=8.2.0",
     "pybreaker>=1.2.0",
