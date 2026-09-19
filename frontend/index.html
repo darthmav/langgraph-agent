@@ -273,6 +273,15 @@ label.go:hover{filter:brightness(1.4)}
 .touched{display:block;margin-top:8px;padding:7px 10px;border-radius:6px;
   background:#3a161822;border:1px solid #f8717144;font:11px var(--mono);color:#ffb4b4}
 .muted{color:var(--ink-3);font:11px var(--mono);padding:6px 0}
+/* Where a run writes. A generated project is out of the corpus until the
+   operator embeds it, so the verdict carries that choice rather than a pane
+   somewhere else. Accent, not the red of .touched: it is a decision, not a
+   warning. */
+#eng-where{font:11px var(--mono);padding:4px 6px;max-width:210px}
+#eng-project{font:11px var(--mono);padding:4px 8px;width:150px}
+.project{display:block;margin-top:8px;padding:7px 10px;border-radius:6px;
+  background:#4ea3ff0d;border:1px solid #4ea3ff44;font:11px/1.6 var(--mono);color:var(--ink-2)}
+.project button{margin-left:6px}
 .splitlbl{display:flex;align-items:center;gap:5px;font:11px var(--mono);color:var(--ink-3);cursor:pointer}
 /* Bridge verdicts. The colour carries the same three-way distinction the
    backend does -- found / certified-absent / could-not-tell -- because the
@@ -337,6 +346,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
         <div class="scroll" id="director"><div class="muted">Give the Architect a goal. It sets the direction, the Planner breaks it down, and it rules on the result. Attach a document — or drop one here — to put it in the corpus the Researcher searches.</div></div>
         <div id="eng-input">
           <textarea id="eng-prompt" rows="1" placeholder="Tell the Architect what you want done&hellip;"></textarea>
+          <select id="eng-where" title="Where the files this run generates are stored. A project under projects/ stays out of the corpus until you embed it — from the verdict when the run ends, or from the Corpus tab — or you attach its files by hand. This checkout means the run edits the project itself, and its files are indexed like the rest of it."></select>
+          <input id="eng-project" placeholder="new project name" title="Letters, digits, '.', '_' or '-'. Left blank, it is named after the goal." hidden>
           <label class="optout" title="A file that does not run is still executed and still reported — it just stops blocking the Architect's approval. For goals whose product is a failing file.">
             <input type="checkbox" id="eng-expect-fail"> expect failures
           </label>
@@ -421,6 +432,8 @@ pre#state-dump{font:11px/1.7 var(--mono);color:var(--ink-2);white-space:pre-wrap
       <div id="bridges"></div>
       <div id="topics"></div>
       <div id="dupes"></div>
+      <h2>Projects</h2>
+      <div id="projects"><div class="muted">no generated projects yet</div></div>
       <h2>Documents</h2>
       <div id="docs"><div class="muted">nothing indexed</div></div>
     </div>
@@ -487,7 +500,7 @@ $$(".tab").forEach(t => t.onclick = () => {
   $$(".tab").forEach(x => x.removeAttribute("aria-selected"));
   t.setAttribute("aria-selected","true");
   $$(".panel").forEach(p => p.classList.toggle("on", p.dataset.p === t.dataset.p));
-  if(t.dataset.p === "corpus") loadDocs();
+  if(t.dataset.p === "corpus"){ loadDocs(); loadProjects(); }
   if(t.dataset.p === "graph" && !NODES.length) sweep().catch(()=>{});
 });
 
@@ -1251,6 +1264,71 @@ function setCorpusState(state){
     : "Empty the corpus. The files under knowledge/ stay, holding an empty store — the same shape a reindex leaves. Refused while a run is in flight.";
 }
 
+/* ---------- generated projects ---------- */
+// The dropdown's value: a project name, "" for this checkout, or NEW_PROJECT --
+// which no project name can equal, since a name starts with a letter or digit.
+const NEW_PROJECT = "+new";
+let PROJECTS = [];
+
+function remembered(){ try{ return localStorage.getItem("eng-where"); }catch(e){ return null; } }
+function remember(v){ try{ localStorage.setItem("eng-where", v); }catch(e){} }
+
+function paintWhere(){
+  const sel = $("#eng-where");
+  const want = sel.options.length ? sel.value : (remembered() ?? NEW_PROJECT);
+  sel.innerHTML =
+    `<option value="${esc(NEW_PROJECT)}">New project\u2026</option>`
+    + PROJECTS.map(p => `<option value="${esc(p.name)}">projects/${esc(p.name)}${p.embedded ? " (embedded)" : ""}</option>`).join("")
+    + `<option value="">This checkout (indexed)</option>`;
+  sel.value = [...sel.options].some(o => o.value === want) ? want : NEW_PROJECT;
+  $("#eng-project").hidden = sel.value !== NEW_PROJECT;
+}
+$("#eng-where").onchange = () => { remember($("#eng-where").value); paintWhere(); };
+
+async function loadProjects(){
+  try{ PROJECTS = (await rpc("list_projects", {}, true)).projects || []; }catch(e){ return; }
+  paintWhere();
+  $("#projects").innerHTML = PROJECTS.length
+    ? PROJECTS.map(p => `<div class="doc"><span>projects/${esc(p.name)} \u00b7 ${p.files} file(s)</span><span>`
+        + (p.embedded ? `in the corpus ` : `not in the corpus `)
+        + `<button class="go mini ${p.embedded ? "ghost" : ""}" data-embed="${esc(p.name)}" data-on="${p.embedded ? 0 : 1}">`
+        + (p.embedded ? "Remove from corpus" : "Embed") + `</button></span></div>`).join("")
+    : `<div class="muted">no generated projects yet</div>`;
+}
+
+// A slug from the goal, for a new project left unnamed.
+function projectFromGoal(goal){
+  const slug = goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    .split("-").slice(0, 5).join("-").slice(0, 48).replace(/-+$/, "");
+  return slug || "project";
+}
+
+// Every Embed / Remove button -- on a verdict or in the Corpus tab -- is one
+// handler, so the two cannot come to mean different things.
+async function toggleEmbed(btn){
+  const name = btn.dataset.embed, embed = btn.dataset.on === "1";
+  const where = btn.closest(".project") || btn.parentElement;
+  btn.disabled = true;
+  try{
+    const r = await rpc("embed_project", {name, embed});
+    const said = embed
+      ? (r.rebuilding ? `projects/${name} is being embedded \u2014 the header shows the rebuild.` : r.note)
+      : (r.rebuilding ? `projects/${name} is being taken out of the corpus.` : r.note);
+    if(where.classList.contains("project")) where.textContent = said;
+    else $("#restat").textContent = said;
+    await loadProjects();
+    poll(true);
+  }catch(e){
+    btn.disabled = false;
+    if(where.classList.contains("project")) where.append(` \u2014 ${e.message}`);
+    else $("#restat").textContent = e.message;
+  }
+}
+document.addEventListener("click", e => {
+  const btn = e.target.closest("button[data-embed]");
+  if(btn) toggleEmbed(btn);
+});
+
 async function loadDocs(){
   const r = await rpc("list_documents", {}, true);
   const docs = r.documents || [];
@@ -1266,7 +1344,7 @@ async function loadDocs(){
     trace().catch(()=>{});
   });
 }
-$("#rfbtn").onclick = () => loadDocs().catch(()=>{});
+$("#rfbtn").onclick = () => { loadDocs().catch(()=>{}); loadProjects(); };
 $("#exbtn").onclick = async () => {
   const b = $("#exbtn"); b.disabled = true; b.textContent = "Exporting…";
   $("#restat").textContent = "";
@@ -1737,12 +1815,17 @@ async function run(){
   const expectFail = $("#eng-expect-fail").checked;
   const researchWeb = $("#eng-research-web").checked;
   const discussOnly = $("#eng-discuss-only").checked;
+  const where = $("#eng-where").value;
+  const project = where === NEW_PROJECT
+    ? ($("#eng-project").value.trim() || projectFromGoal(goal))
+    : where;
   CURRENT.inflight = true; CURRENT.stopping = false; CURRENT.runId = "";
   setRunButtons();
   $("#director").innerHTML += `<div class="msg user">${esc(goal)}`
     + (expectFail ? ` <span class="badge">expect failures</span>` : "")
     + (researchWeb && !discussOnly ? ` <span class="badge">research online</span>` : "")
     + (discussOnly ? ` <span class="badge">discussion only</span>` : "")
+    + (project && !discussOnly ? ` <span class="badge">\u2192 projects/${esc(project)}</span>` : "")
     + `</div>`
     + `<div class="msg sys" id="run-live"><b>Running</b></div>`;
   $("#eng-prompt").value = "";
@@ -1808,7 +1891,7 @@ async function run(){
   }, SEAT_POLL_MS);
 
   try{
-    const r = await rpc("run_goal", {goal, expect_failures: expectFail, research_web: researchWeb, discuss_only: discussOnly});
+    const r = await rpc("run_goal", {goal, expect_failures: expectFail, research_web: researchWeb, discuss_only: discussOnly, project});
     renderRun(r);
   }catch(e){
     const live = $("#run-live");
@@ -1835,6 +1918,9 @@ async function run(){
     releaseSeatLights();
     releaseEmbedderLight();
     setRunButtons();
+    // A new project now exists; the dropdown should offer it by name.
+    if(where === NEW_PROJECT && project){ $("#eng-project").value = ""; remember(project); }
+    loadProjects();
   }
 }
 
@@ -2063,6 +2149,15 @@ function renderRun(r, note){
     ? `<span class="touched">Changed this machine \u2014 ${files.length} file(s): ${esc(files.join(", "))}</span>`
     : "";
 
+  // A run that built a separate project leaves it out of the corpus, and asks.
+  const name = (r.output_dir || "").replace(/^projects\//, "");
+  const project = !r.output_dir ? ""
+    : r.project_embedded
+      ? `<span class="project">Stored in ${esc(r.output_dir)}/ \u2014 this project is embedded, so the next rebuild indexes what the run wrote.</span>`
+      : `<span class="project">Stored in ${esc(r.output_dir)}/ \u2014 not in the corpus.`
+        + `<button class="go mini" data-embed="${esc(name)}" data-on="1">Embed into corpus</button>`
+        + `\nOr leave it out and Attach the files you want by hand.</span>`;
+
   const tag = note ? ` <span class="badge">${esc(note)}</span>` : "";
   if(r.stopped){
     // A stopped run has no verdict to report -- nobody ruled -- so it is
@@ -2072,7 +2167,7 @@ function renderRun(r, note){
       (r.stop_reason ? ` ${esc(r.stop_reason)}` : "")+
       `\n\n${esc(recoveryBlock(r))}`+
       (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
-      touched+
+      touched+project+
       `</div>`;
   }else{
     const verdict = r.verdict || "(none)";
@@ -2081,7 +2176,7 @@ function renderRun(r, note){
       `<div class="msg sys"><b>Architect verdict:</b> <span class="badge ${cls}">${esc(verdict)}</span>${tag}`+
       (r.architecture ? `\n\n${esc(r.architecture)}` : "")+
       (r.builder_report ? `\n\nBuilder: ${esc(r.builder_report)}` : "")+
-      touched+
+      touched+project+
       `</div>`;
   }
   $("#director").scrollTop = $("#director").scrollHeight;
@@ -2363,6 +2458,8 @@ async function poll(quiet){
 (async () => {
   await poll(true);
   setClearButton();
+  paintWhere();
+  loadProjects();
   await reattach();
   await sweep().catch(()=>{});
   setInterval(() => poll(true), 5000);

@@ -44,6 +44,7 @@ from langgraph_agent.graphrag_server import (
     _mints_entities,
     iter_project_files,
 )
+from langgraph_agent.projects import PROJECTS_DIR
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,6 +58,7 @@ PROSE_FILES = ("CLAUDE.md", "README.md")
 # that rule has its own tests in test_corpus_absent.py.
 RUNTIME_PATHS = (
     "knowledge/", "runs/", "uploads/", "research/web/", "reports/diagnostics/",
+    "projects/",
 )
 
 # Artifacts named in prose that are written at runtime and never committed.
@@ -441,6 +443,16 @@ def _is_upload(path: str) -> bool:
     return UPLOADS_DIR in parts[:-1]
 
 
+def _is_generated_project(path: str, root: Path) -> bool:
+    """True for a file of a run's generated project under `projects/`.
+
+    The walk takes one only once the operator embeds it, which makes it the
+    same per-machine corner as `uploads/`, for the same reason.
+    """
+    parts = Path(path).relative_to(root).parts if Path(path).is_absolute() else Path(path).parts
+    return bool(parts) and parts[0] == PROJECTS_DIR
+
+
 def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
     """Per minted token: documents, and capitals position does not explain.
 
@@ -471,7 +483,8 @@ def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
     """
     census: dict[str, dict] = {}
     for path in iter_project_files(str(root)):
-        if not _mints_entities(str(path)) or _is_upload(str(path)):
+        if (not _mints_entities(str(path)) or _is_upload(str(path))
+                or _is_generated_project(str(path), root)):
             continue
         try:
             text = (root / path).read_text(encoding="utf-8")

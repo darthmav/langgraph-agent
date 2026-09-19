@@ -53,6 +53,10 @@ class AgentState(TypedDict):
             read, no write, no terminal, no tests -- so a run cannot change the
             project. The online research phase is off for the same reason: it
             writes pages to disk and embeds them.
+        output_dir: Set by the caller, never by an agent. Empty for a run
+            working on this checkout; otherwise `projects/<name>`, the one
+            directory the Builder's `filesystem_write` may write into. A
+            project there stays out of the corpus until the operator embeds it.
         files_changed: List of file paths modified by Builder
         failed_verification: Files the Builder wrote that did not pass
             verification -- they ran and failed, or nobody executed them. Set
@@ -93,5 +97,6 @@ class AgentState(TypedDict):
     builder_cut_off: str  # "" | "turn_cap" | "deadline"
     lint_failed: list[str]
     discuss_only: bool
+    output_dir: str  # "" | "projects/<name>"
     expect_failures: bool
     step_count: int

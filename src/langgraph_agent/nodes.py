@@ -353,6 +353,14 @@ def _get_state_injection(state: AgentState) -> str:
         if state.get("discuss_only")
         else ""
     )
+    # Told to every seat rather than the Builder alone, so the Planner names
+    # paths the Builder is allowed to write.
+    output_dir = str(state.get("output_dir") or "")
+    if output_dir and not state.get("discuss_only"):
+        mode += (
+            f"\nOutput directory: {output_dir}/ -- every file this run writes "
+            "goes under it. It is a separate project, not part of this checkout."
+        )
 
     return f"""## Current state{mode}
 Goal: {_fmt("goal")}
@@ -1529,6 +1537,38 @@ DISCUSSION_NOTE = (
     "proposal is not blocked by needing review or approval."
 )
 
+# Appended to the Builder's prompt when the operator pointed the run at a
+# generated project, for the reason `DISCUSSION_NOTE` exists: a seat that learns
+# the boundary from refusals spends its turns doing it.
+OUTPUT_DIR_NOTE = (
+    "\n\nThis run builds a separate project in {output_dir}/. Write every "
+    "file under that directory, spelling the full path from the project root "
+    "(for example {output_dir}/main.py) -- filesystem_write refuses any other "
+    "path. Pass cwd={output_dir} to terminal_execute and run_tests when you "
+    "run what you wrote."
+)
+
+
+def _outside_output_dir(path: str, output_dir: str) -> str | None:
+    """Why `filesystem_write` may not write `path` on this run, or None.
+
+    Resolved rather than matched as text, the way `_resolve_write_path` is, so
+    `projects/x/../../nodes.py` is caught and a symlink cannot lead out. Checked
+    here rather than in the MCP client because the scope is a property of the
+    run, and the client is shared by every run the process serves.
+    """
+    root = Path.cwd().resolve()
+    scope = (root / output_dir).resolve()
+    try:
+        (root / path).resolve().relative_to(scope)
+    except ValueError:
+        return (
+            f"Refusing to write {path!r}: this run writes only under "
+            f"{output_dir}/. Spell the path from the project root, e.g. "
+            f"{output_dir}/{Path(path).name or 'main.py'}."
+        )
+    return None
+
 # How many times the Builder may think-and-call before the node gives up. Each
 # turn is a cloud round trip. The default leans on the Architect gate getting
 # another cycle anyway -- which holds only when a pass finishes a unit of work.
@@ -1598,6 +1638,7 @@ def _run_builder_tools(
     tool_log: list[str],
     deadline: _Deadline,
     allowed: frozenset[str] | set[str] = BUILDER_TOOL_NAMES,
+    output_dir: str = "",
 ) -> tuple[str, bool, bool, bool]:
     """Let the Builder call tools until it stops asking for them.
 
@@ -1661,6 +1702,12 @@ def _run_builder_tools(
                     else "is not a Builder tool"
                 )
                 result: Any = {"success": False, "error": f"{name} {why}"}
+            elif (
+                name == "filesystem_write"
+                and output_dir
+                and (outside := _outside_output_dir(str(args.get("path", "")), output_dir))
+            ):
+                result = {"success": False, "error": outside}
             else:
                 try:
                     result = _call_mcp_tool_sync(name, args)
@@ -2128,11 +2175,16 @@ def builder_node(state: AgentState) -> AgentState:
     # cannot vote itself the right to act.
     discuss_only = bool(state.get("discuss_only"))
     allowed = DISCUSSION_TOOL_NAMES if discuss_only else BUILDER_TOOL_NAMES
+    # Also the caller's: where this run may write. Empty means this checkout.
+    output_dir = "" if discuss_only else str(state.get("output_dir") or "")
+    note = (
+        DISCUSSION_NOTE
+        if discuss_only
+        else OUTPUT_DIR_NOTE.format(output_dir=output_dir) if output_dir else ""
+    )
 
     messages: list[Any] = [
-        SystemMessage(
-            content=BUILDER_PROMPT + (DISCUSSION_NOTE if discuss_only else "")
-        ),
+        SystemMessage(content=BUILDER_PROMPT + note),
         HumanMessage(
             content=f"{state_injection}\n\nPlan to implement:\n{plan}\n\n"
             f"Research findings:\n{research}"
@@ -2168,7 +2220,8 @@ def builder_node(state: AgentState) -> AgentState:
         content = reply or ""
     else:
         content, exhausted, out_of_time, stopped = _run_builder_tools(
-            tool_llm, messages, files_changed, tool_log, loop_deadline, allowed
+            tool_llm, messages, files_changed, tool_log, loop_deadline, allowed,
+            output_dir,
         )
 
     # Every runnable file the Builder wrote is executed before it gets to claim
