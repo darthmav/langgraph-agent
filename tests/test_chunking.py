@@ -394,6 +394,26 @@ def test_a_shrunken_document_leaves_no_leftover_chunks(kb):
     assert list(kb.collection.rows) == [f"shrinking.md{CHUNK_ID_SEPARATOR}0000"]
 
 
+def test_a_failed_embed_leaves_the_stored_document_in_place(kb):
+    """Embed first, delete second: a failure must not turn stale into missing.
+
+    On 2026-09-18 a model load that ran out of GPU memory made three documents
+    vanish from the corpus, because their old rows were swept before the embed
+    that was meant to replace them was attempted.
+    """
+    kb.add_document("kept.md", "the version the store already holds")
+    before = dict(kb.collection.rows)
+
+    def fail(texts: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("Ollama could not embed: out of memory")
+
+    kb._embedder.encode = fail  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="out of memory"):
+        kb.add_document("kept.md", "a newer version that could not be embedded")
+
+    assert kb.collection.rows == before
+
+
 def test_search_collapses_chunks_onto_their_documents(kb):
     """`top_k` counts documents, as every caller already assumed.
 

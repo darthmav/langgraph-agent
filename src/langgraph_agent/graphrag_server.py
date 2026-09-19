@@ -67,6 +67,19 @@ EMBEDDING_BATCH_SIZE = 8
 # (`OLLAMA_EMBED_OPTIONS`) -- and the first batch of a run waits for the load too.
 OLLAMA_EMBED_TIMEOUT_SECONDS = 600.0
 
+# How often, and how far apart, a batch the daemon answered with a 5xx is sent
+# again. A 5xx here is nearly always the model *load* failing, and a load that
+# fails is not a fact about the passages: `num_gpu` forces every layer onto the
+# cards, so a load that meets a card still held by something else errors rather
+# than splitting. Measured at console startup on 2026-09-18: the first three
+# embeds came back 500 (`cudaMalloc failed: out of memory` on card 1, card 0
+# with ~1 GB held by whatever else had just started) and the fourth, 12s later,
+# loaded and every batch after it went through. Each of those three was a whole
+# document lost to the rebuild. A 4xx is the daemon refusing the request --
+# a missing tag -- and is never retried.
+OLLAMA_EMBED_LOAD_RETRIES = 4
+OLLAMA_EMBED_RETRY_SECONDS = 5.0
+
 # The window and batch the embedding model is loaded with, sent on every call.
 # Ollama loads one at a 4,096-token window with a 2,048-token batch by default,
 # and on two 3 GB cards qwen3-embedding then asked for 7,463 MiB
@@ -160,6 +173,7 @@ class OllamaEmbedder:
         `should_stop` is asked before each batch, so a stopped run waits for at
         most one batch rather than for the rest of a document.
         """
+        import time
         import urllib.error
         import urllib.request
 
@@ -182,18 +196,36 @@ class OllamaEmbedder:
                 ).encode(),
                 headers={"Content-Type": "application/json"},
             )
-            try:
-                with urllib.request.urlopen(
-                    request, timeout=OLLAMA_EMBED_TIMEOUT_SECONDS
-                ) as response:
-                    payload = json.loads(response.read())
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", "replace").strip()
-                raise RuntimeError(
-                    f"Ollama could not embed with {self.model}: {detail or exc}"
-                ) from exc
-            except OSError as exc:
-                raise RuntimeError(f"Ollama could not embed with {self.model}: {exc}") from exc
+            attempt = 0
+            while True:
+                try:
+                    with urllib.request.urlopen(
+                        request, timeout=OLLAMA_EMBED_TIMEOUT_SECONDS
+                    ) as response:
+                        payload = json.loads(response.read())
+                    break
+                except urllib.error.HTTPError as exc:
+                    detail = exc.read().decode("utf-8", "replace").strip()
+                    if exc.code >= 500 and attempt < OLLAMA_EMBED_LOAD_RETRIES:
+                        attempt += 1
+                        # Waited in slices, so a stop reaches a retrying
+                        # build as quickly as it reaches a working one.
+                        deadline = time.monotonic() + OLLAMA_EMBED_RETRY_SECONDS * attempt
+                        while time.monotonic() < deadline:
+                            if should_stop is not None and should_stop():
+                                raise EmbeddingStopped(
+                                    f"stopped after {start} of {len(items)} passages"
+                                ) from exc
+                            time.sleep(0.25)
+                        continue
+                    tried = f" (after {attempt + 1} attempts)" if attempt else ""
+                    raise RuntimeError(
+                        f"Ollama could not embed with {self.model}{tried}: {detail or exc}"
+                    ) from exc
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Ollama could not embed with {self.model}: {exc}"
+                    ) from exc
             embeddings = payload.get("embeddings") or []
             if len(embeddings) != len(batch):
                 raise RuntimeError(
@@ -823,6 +855,20 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         """
         chunks = self.chunk_text(content)
 
+        # Embedded before anything is deleted. A failed or stopped embed then
+        # leaves the document exactly as the store held it, rather than
+        # deleting it and failing to put it back: on 2026-09-18 a load that
+        # ran out of GPU memory at console startup removed CLAUDE.md,
+        # frontend/index.html and pyproject.toml from the corpus outright, and
+        # the header read `stale: 3 not indexed` until the next rebuild. Old
+        # vectors still carry the old `sha`, so the next rebuild re-embeds it.
+        #
+        # Chunks are embedded in one batched call rather than one per chunk:
+        # the model is the expensive thing on this machine and batching is
+        # most of what makes a reindex of ~1,100 chunks finish in the time a
+        # reindex of 77 documents used to take.
+        embeddings = self._encode(chunks).tolist() if chunks else []
+
         # A document's previous chunks are deleted before the new ones land,
         # rather than left to be overwritten by `upsert`. A file that shrank
         # between reindexes -- 10 chunks down to 3 -- overwrites 0..2 and
@@ -852,11 +898,6 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
             # caller knows about the file, and one caller forgetting it would
             # silently cost that document its reuse.
             base["sha"] = _content_sha(content)
-            # Chunks are embedded in one batched call rather than one per
-            # chunk: the model is the expensive thing on this machine and
-            # batching is most of what makes a reindex of ~1,100 chunks
-            # finish in the time a reindex of 77 documents used to take.
-            embeddings = self._encode(chunks).tolist()
             self.collection.upsert(
                 ids=[
                     f"{doc_id}{CHUNK_ID_SEPARATOR}{i:04d}" for i in range(len(chunks))
