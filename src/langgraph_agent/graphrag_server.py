@@ -399,6 +399,13 @@ NO_CORPUS_NOTE = (
 # checkout) took `Perform` and `Useful` across
 # the floor, both docstring openers at zero position-free capitals, and `Prose`
 # crossed it the same day as the first word of a comment's sentence.
+#
+# `Observed` crossed on 2026-09-18, and it is the plainest case of the pattern
+# yet: this project records what it measured, so it opens sentences with the
+# word for having seen something. Four documents, zero position-free capitals --
+# two line starts, two after a full stop -- and it reached the floor within the
+# one change that added a fourth, which is the guard doing exactly what it is
+# for. Nothing here is *about* observation.
 ENTITY_STOPWORDS = frozenset(
     word.lower()
     for word in """
@@ -424,7 +431,7 @@ ENTITY_STOPWORDS = frozenset(
     Refused Whether Split Asserted Degree Shared Based Demonstrates References
     Generate Extract Point Seconds Deliberately Named Built Asking Pinned
     Insert Tests Write Reported Computed Cached Complete Convert Dimension
-    Naming Perform Useful Prose Measure
+    Naming Perform Useful Prose Measure Observed
     """.split()
 )
 
