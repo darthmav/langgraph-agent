@@ -94,6 +94,7 @@ python example_usage.py
 │   ├── test_web_entities.py   # Fetched pages stay out of the entity graph
 │   ├── test_run_research_phase.py # Where the research phase sits in a run
 │   ├── test_corpus_staleness.py   # Corpus vs disk, and not crying wolf
+│   ├── test_startup_index.py  # The corpus is rebuilt when the console comes up
 │   ├── test_graph_queries.py  # Undirected traversal of the knowledge graph
 │   ├── test_research_length.py # How much retrieved evidence reaches the Builder
 │   ├── test_rpc_params.py     # RPC parameters: typed, bounded, refused by name
@@ -1225,6 +1226,69 @@ four the moment this file described the problem.
   Reindex button and no `rpc_reindex` any more. A run is a request to search a
   corpus, which is what makes this an act of indexing rather than a read that
   creates.
+  **And `main()` does the same when the console comes up**
+  (`_index_the_project_at_startup`), because a run is something the operator
+  asks for and that left the state between runs unattended: the header reported
+  drift it had no way to fix, and restarting the server did not clear it, since
+  starting up only *opens* the store. Seen on 2026-09-18 -- a commit added
+  `ollama_client.py` and excluded `experimental/`, the store was two days older
+  than both, and `stale: 1 not indexed, 1 not in the walk` survived every
+  restart with nothing to press. A standing verdict the operator cannot act on
+  is the credibility problem `corpus_health` measures every file's size twice to
+  avoid, one level up. Both phases share `_rebuild_the_corpus`, which counts the
+  walk before opening the creating door and classifies what the rebuild did, so
+  the five outcomes are worded in one place; `_corpus_feed_line` takes a `when`,
+  since "indexed before the run" is a lie from startup and reads as the phase
+  not existing. Four things it must not break, each pinned in
+  `tests/test_startup_index.py` and each watched to fail with the guard removed.
+  *It is started from `main()` and never at import* -- the old preload thread
+  built a store merely by being imported, and the suite imports this module.
+  *It does not block `/api/status`*, which `launch_console.sh` waits on, so it
+  runs on its own daemon thread while the header reports it. *A run wins* --
+  `should_stop` is "a run has claimed the flag, or the console is exiting", so a
+  run started into a build takes over within one embedding batch and finishes
+  the job through its own phase, where making the run wait would hold `running`
+  True with no node on the stack for as long as a whole build, which is exactly
+  what a wedged run looks like. *And `_index_lock` serializes the two*, because
+  `index_project_files` prunes and clears before it re-adds, so two rebuilds
+  interleaved give neither caller's result and both report success -- the
+  half-rebuilt corpus `_refuse_while_a_run_is_in_flight` exists to stop an
+  operator manufacturing by hand, reachable without one. The lock order is
+  `_index_lock` first and `_run_lock` briefly inside it: the build holds the
+  first for its whole length and reaches for the second from its `progress` and
+  `should_stop`, while a run takes `_run_lock`, releases it, and only then asks
+  for `_index_lock`.
+  **Two consoles in one checkout are the same collision across processes, and
+  `_claim_the_rebuild` is what stops it.** They share the store on disk and not
+  the lock in memory. The port stops the common case -- the server binds before
+  the index thread starts, so a second console on the same port never reaches it
+  -- and stops nothing on `PORT=8081`. That shape was rare while a run was the
+  only thing that rebuilt, needing two servers *and* a goal started in each; a
+  phase that rebuilds the moment a console comes up makes it ordinary. So the
+  claim is an `flock` on `knowledge.lock`, beside the store and named after it,
+  and a caller that cannot take it reports `busy_elsewhere` -- neither a failure
+  nor a no-op, because the work is being done by somebody else. Three properties
+  decided the mechanism over a pid file: the kernel owns the claim, so it is
+  released by a process *dying* as surely as by one finishing and there is no
+  stale claim to clear up (measured -- `SIGKILL` the holder and the next rebuild
+  reads `built`); the file's contents and existence mean nothing, so a leftover
+  empty file claims naught; and it is taken non-blockingly, so "somebody else is
+  rebuilding" is an answer rather than an unbounded wait. It sits beside
+  `knowledge/` rather than inside it because creating that directory is reserved
+  for indexing, and it is taken *after* the walk for the same reason the creating
+  door is: no work, no file, so a machine with nothing to index is left as it
+  was. The **startup index does not wait** (whoever holds the claim is rebuilding
+  the same corpus from the same walk) while the **run waits**
+  `CORPUS_LOCK_WAIT_SECONDS`, polled rather than blocking so the emergency stop
+  can reach a run parked there, because that phase is what makes the corpus whole
+  before any seat searches it and a fraction of a corpus reads to the Researcher
+  as a corpus with nothing to say. A machine with no `fcntl`, or a directory that
+  cannot be written, rebuilds on `_index_lock` alone: the claim guards a rare
+  collision, and refusing to index because it could not be taken would turn that
+  into a corpus nobody rebuilds, which is the failure the whole phase exists to
+  end. The relevance floor is still measured by the first run,
+  since `_calibrate_the_floor_before_the_run` writes into the run feed; a corpus
+  this phase has just finished makes that a matter of seconds.
   Five decisions in it are not interchangeable with the obvious alternatives.
   *It rebuilds every time rather than only when the corpus is missing*, which
   is affordable because `index_project_files` keeps the vectors of every
@@ -1669,9 +1733,13 @@ four the moment this file described the problem.
   `Dimming`). `connectivity()` leaves them out of its isolate count as it does
   fetched pages, reporting them as `entity_free_sources`, and the claims census
   skips them for the reason it skips web pages.
-- **The staleness verdict is withheld while a run is in flight.** The research
+- **The staleness verdict is withheld while a run or a rebuild is in flight.**
+  The research
   phase writes each page to disk and embeds it as a separate step, so between
-  those two there is a file the walk can see and the store cannot. Observed
+  those two there is a file the walk can see and the store cannot. A startup
+  index is the same instant seen from the other phase -- it prunes the store's
+  stale rows before re-adding anything, so a poll landing inside one sees a
+  corpus mid-repair of exactly what the verdict would accuse it of. Observed
   live: the header read `stale: 1 not indexed` mid-phase and cleared itself
   moments later. The counts stay -- they are the truth about that instant --
   and only the accusation is withheld, under `settling`. A verdict that
@@ -1867,9 +1935,16 @@ four the moment this file described the problem.
   `add_document` returns its chunk count so the console can say what a document
   became; that number is the only thing distinguishing a file that landed whole
   from one the embedder read the header of.
-- **Changing the corpus is refused while a run is in flight.** Both remaining
+- **Changing the corpus is refused while a run, or a rebuild, is in flight.**
+  Both remaining
   writers — `clear_corpus` and `upload_document` — go through
-  `_refuse_while_a_run_is_in_flight()`. (`reindex` was the third and is gone;
+  `_refuse_while_a_run_is_in_flight()`, which refuses for a startup index too:
+  that is the same hazard without the run, since the phase holds the corpus
+  mid-rebuild for tens of seconds with nothing running. The two are worded
+  apart because what the operator does about them differs -- a run is theirs to
+  stop, a rebuild is theirs to wait out -- and a refusal offering to stop a run
+  that does not exist is the wrong instruction rather than a vague one; a run
+  started into a rebuild sets both flags, and the run's wording wins. (`reindex` was the third and is gone;
   the rebuild now happens *before* the stream starts, which is the only
   ordering that obeys this rule rather than needing an exemption from it.) Not for consistency: because the
   failure would be silent. An emptied corpus does not break the Researcher's
@@ -1910,11 +1985,11 @@ four the moment this file described the problem.
 
 - **Tests are slow** — The first run opens Chroma. Subsequent runs reuse the cached singleton.
 - **Mypy errors from upstream stubs** — Prefer `# type: ignore[...]` with a comment over disabling strict mode.
-- **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus` when none has been built. A run builds one before the Architect opens, from the directory the server was started in, so the usual causes are a server started somewhere with nothing to index or `INDEX_PROJECT_BEFORE_RUN=0`. Nothing else builds one: there is no script and no install step.
+- **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus` when none has been built. One is built when the console starts and again before the Architect opens, from the directory the server was started in, so the usual causes are a server started somewhere with nothing to index or `INDEX_PROJECT_BEFORE_RUN=0`, which switches off both phases (`status.indexes_on_run` reports it). Nothing else builds one: there is no button, no script and no install step.
 - **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
 - **The embedder is on the CPU, or embedding is slow** — Placement is the Ollama daemon's, and this project only reads it back: `ollama ps` shows how much of `qwen3-embedding:latest` the daemon left on the CPU. `journalctl -u ollama` reading `skipping CUDA device` means Arch's CUDA 13 build on a card it cannot drive: run `./cuda-embed-ollama.sh`, which installs Ollama's own CUDA 12 build and proves the model lands 100% on the GPU. Every layer is forced onto the cards (`OLLAMA_EMBED_OPTIONS`), so a load that does not fit errors instead of splitting: `nvidia-smi` shows what else holds the cards, and the next embed reloads the model once they are free.
 - **Online research finds nothing, or reports DuckDuckGo's bot check** — Check that `SEARXNG_URL` is in `.env`: `install.sh` runs a SearxNG and adds it only once the instance answers. `systemctl --user status ambiguity-searxng` and `journalctl --user -u ambiguity-searxng` show the container. An HTTP 403 means `json` is missing from the instance's `search.formats`. Port 8888 is also Jupyter's default: if something else holds it, set `SEARXNG_PORT` in `.env` and re-run the installer.
 - **`docker` says permission denied, or nothing answers on port 5432** — The database is the one Omarchy's own installer runs, the `postgres18` container, and nothing in the app reads its `DATABASE_URL`. `install.sh` adds you to the `docker` group, which applies only after a reboot; until then `docker` needs sudo (`sudo docker logs postgres18`). It also enables `docker.service`, because Omarchy enables only the socket, and without the service the container stays down after a reboot until something runs `docker`.
 - **`install.sh` cannot pull a model or the tokenizer** — Both come from the network once: the seat and embedding models from the Ollama registry, the embedding tokenizer from Hugging Face (a few MB, no weights). A machine meant to go offline afterwards needs that step to have run at least once; afterwards both are read from cache.
-- **Graph tab is empty** — Start a run; the corpus is rebuilt before the Architect opens. A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.
+- **Graph tab is empty** — The corpus is rebuilt when the console starts and again before the Architect opens; the header says so while it is happening, and the server log says what it did. A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.

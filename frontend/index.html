@@ -1033,8 +1033,8 @@ async function loadDocs(){
   $("#docs").innerHTML = docs.length ? docs.map(d =>
     `<div class="doc" data-id="${esc(d.id)}"><span>${esc(d.title)}</span><span>${esc(d.id)}</span></div>`).join("")
     : (CORPUS === "absent"
-        ? `<div class="muted">no corpus — ${BUILDS_ON_RUN ? "the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will build one"}</div>`
-        : `<div class="muted">corpus is empty — ${BUILDS_ON_RUN ? "the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will rebuild it"}</div>`);
+        ? `<div class="muted">no corpus — ${BUILDS_ON_RUN ? "a restart or the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will build one"}</div>`
+        : `<div class="muted">corpus is empty — ${BUILDS_ON_RUN ? "a restart or the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will rebuild it"}</div>`);
   $$("#docs .doc").forEach(el => el.onclick = () => {
     $("#gnode").value = el.dataset.id;
     $$(".tab").find(t => t.dataset.p === "graph").click();
@@ -1994,10 +1994,19 @@ function staleChip(stats){
   if(!s.stale) return big;
   const parts = [];
   if(s.missing_count) parts.push(`${s.missing_count} not indexed`);
-  if(s.extra_count) parts.push(`${s.extra_count} no longer on disk`);
+  // "not in the walk", not "no longer on disk": `extra` is a document the walk
+  // would not offer, and a file the walk stops offering has three causes --
+  // deleted, renamed, or newly excluded. Only the first two are gone from disk,
+  // and the third is the one that reads as a bug: a file sitting in the project
+  // reported as missing from it sends the operator looking for something that is
+  // exactly where they left it, which is the standing false accusation
+  // `corpus_health` measures its size twice to avoid.
+  if(s.extra_count) parts.push(`${s.extra_count} not in the walk`);
   const sample = [].concat(s.missing || [], s.extra || []).slice(0, 8).join("\n");
   const title = `The corpus does not match the project: ${s.indexed} documents indexed, `
-    + `${s.expected} in the walk. The next run brings it up to date before the Architect opens.`
+    + `${s.expected} in the walk. A document can leave the walk by being deleted, `
+    + `renamed or newly excluded. Restarting the console brings the corpus up to `
+    + `date, and so does the next run, before the Architect opens.`
     + (sample ? `\n\n${sample}` : "");
   return `<span class="stale" title="${title.replace(/"/g,"&quot;")}">stale: ${parts.join(", ")}</span>`+big;
 }
@@ -2073,6 +2082,23 @@ function embeddingChips(o){
   return chips.join(" ");
 }
 
+// The corpus is rebuilt when the console comes up as well as before a run, and
+// a first build is tens of seconds long. Without a line here the header spends
+// all of them reading "no corpus", or reading a stale verdict that is already
+// being repaired -- the server withholds the accusation while a rebuild is in
+// flight, exactly as it does mid-run, so the only thing left to say is that
+// something is happening. A server that is working and a server that has
+// decided to do nothing must not look identical, which is the same rule
+// `#run-live` follows by naming the last stage rather than only the seconds.
+function indexingChip(st){
+  const ix = st && st.indexing;
+  if(!ix || !ix.running) return "";
+  const what = ix.message || "checking the project against the corpus";
+  const why = "Started with the console, on its own thread. The stale verdict is "
+    + "withheld until it finishes, and a run started now takes over from it.";
+  return `<span class="stale" title="${esc(why)}">${esc(what)}</span>`;
+}
+
 async function poll(quiet){
   if(EXITING) return;
   try{
@@ -2087,14 +2113,16 @@ async function poll(quiet){
     // Four zeros read as a knowledge base that happens to be empty. When none
     // has been built there is nothing to count, and saying so is the honest
     // reading -- it is also the only one that tells the operator what to do.
+    const indexing = indexingChip(st);
     $("#stats").innerHTML = CORPUS === "absent"
-      ? `<span class="nocorpus">no corpus &mdash; ${BUILDS_ON_RUN ? "the next run indexes the project" : "nothing indexed"}</span>`
+      ? `<span class="nocorpus">no corpus &mdash; ${BUILDS_ON_RUN ? "a restart or the next run indexes the project" : "nothing indexed"}</span>`+indexing
       : `<span>docs <b>${stats.total_documents}</b></span>`+
         `<span>chunks <b>${stats.total_chunks}</b></span>`+
         `<span>nodes <b>${stats.total_nodes}</b></span>`+
         `<span>edges <b>${stats.total_edges}</b></span>`+
         staleChip(stats)+
-        healthChip(stats);
+        healthChip(stats)+
+        indexing;
     await loadCrew(true);
     await loadEmbedding(true);
   }catch(e){ /* goOffline already reported it */ }
