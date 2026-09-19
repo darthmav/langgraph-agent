@@ -37,6 +37,7 @@ from langgraph_agent.lexical import (
     lexical_order,
     reciprocal_rank_fusion,
 )
+from langgraph_agent.projects import embedded_projects, held_out_of_corpus
 
 # The embedding model that builds and searches the corpus: an Ollama tag the
 # local daemon runs. Named once because three places have to agree on it: the
@@ -1998,14 +1999,21 @@ def store_uploaded_document(
 def iter_project_files(
     root: str = ".", exclude_dirs: tuple[str, ...] | list[str] | None = None
 ) -> list[Path]:
-    """Collect the project files worth indexing."""
+    """Collect the project files worth indexing.
+
+    A run's generated project under `projects/` is walked only once the
+    operator has opted it in -- see `langgraph_agent.projects`.
+    """
     excludes = tuple(exclude_dirs) if exclude_dirs is not None else PROJECT_INDEX_EXCLUDES
     root_path = Path(root)
+    embedded = embedded_projects(root_path)
 
     files: list[Path] = []
     for pattern in PROJECT_INDEX_PATTERNS:
         for file_path in root_path.glob(pattern):
             if any(excluded in str(file_path) for excluded in excludes):
+                continue
+            if held_out_of_corpus(file_path.relative_to(root_path), embedded):
                 continue
             files.append(file_path)
     return sorted(set(files))

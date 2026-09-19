@@ -73,6 +73,13 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     resolve_persist_dir,
     store_uploaded_document,
 )
+from langgraph_agent.projects import (  # noqa: E402
+    embedded_projects,
+    list_projects,
+    project_dir,
+    project_name_error,
+    set_project_embedded,
+)
 from langgraph_agent.web_research import research_online  # noqa: E402
 
 # Initialize graph. The knowledge base is deliberately *not* initialized here.
@@ -418,6 +425,52 @@ def _refuse_while_a_run_is_in_flight(action: str) -> None:
             f"{action} right now. The header says how far it has got; try again "
             f"when it stops."
         )
+
+
+def rpc_list_projects(_: dict[str, Any]) -> dict[str, Any]:
+    """The generated projects under `projects/`, for the console's dropdown and list."""
+    return {"projects": list_projects()}
+
+
+def rpc_embed_project(params: dict[str, Any]) -> dict[str, Any]:
+    """Opt a generated project into the corpus, or take it back out.
+
+    Records the choice on disk and starts the same background rebuild the
+    console runs at startup, so the project's files are embedded -- or pruned
+    -- by the one path that already reports progress and yields to a run. The
+    rebuild re-embeds only what changed, so opting one project in costs that
+    project's files and nothing else.
+
+    Refused mid-run and mid-rebuild for the reason the other corpus writers
+    are: see `_refuse_while_a_run_is_in_flight`.
+    """
+    name = _str_param(params, "name")
+    embed = _bool_param(params, "embed", default=True)
+    error = project_name_error(name)
+    if error:
+        raise ValueError(error)
+    if not Path(project_dir(name)).is_dir():
+        raise ValueError(f"There is no project {name!r} under projects/.")
+    _refuse_while_a_run_is_in_flight("changed")
+    set_project_embedded(name, embed)
+    forget_expected_documents()
+    rebuilding = INDEX_PROJECT_BEFORE_RUN
+    if rebuilding:
+        threading.Thread(
+            target=_index_the_project_at_startup,
+            args=(f"after {'embedding' if embed else 'removing'} {project_dir(name)}",),
+            name="embed-project",
+            daemon=True,
+        ).start()
+    return {
+        "name": name,
+        "embedded": embed,
+        "rebuilding": rebuilding,
+        "note": "" if rebuilding else (
+            "INDEX_PROJECT_BEFORE_RUN is off, so nothing will rebuild the "
+            "corpus; the choice is recorded for when it is back on."
+        ),
+    }
 
 
 # There is no `rpc_reindex`, and that is the design rather than an omission.
@@ -1269,8 +1322,12 @@ def _rebuild_the_corpus(
     return report
 
 
-def _index_the_project_at_startup() -> None:
+def _index_the_project_at_startup(when: str = "at startup") -> None:
     """Bring the corpus up to date when the console comes up.
+
+    Also what `rpc_embed_project` starts, with its own `when`: opting a
+    project in or out changes the walk, and this is the rebuild that already
+    reports itself in the header and yields to a run.
 
     Rebuilding the corpus was a run's job alone, and a run is something the
     operator asks for -- so between runs the header reported drift it had no
@@ -1396,7 +1453,7 @@ def _index_the_project_at_startup() -> None:
     with _run_lock:
         _startup_index["report"] = report
 
-    line = _corpus_feed_line(report, when="at startup")
+    line = _corpus_feed_line(report, when=when)
     if line is not None:
         print(line)
 
@@ -1791,6 +1848,12 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     discuss_only = _bool_param(params, "discuss_only")
     research_web = _bool_param(params, "research_web")
     expect_failures = _bool_param(params, "expect_failures")
+    # Where the Builder writes: a project under projects/, or this checkout
+    # when blank. The caller's choice, never an agent's.
+    project = _str_param(params, "project").strip()
+    if project and (error := project_name_error(project)):
+        raise ValueError(error)
+    output_dir = project_dir(project) if project and not discuss_only else ""
 
     # One run at a time, said out loud. The server already assumed it --
     # `_run_progress` is a single global -- and the console could break the
@@ -1885,6 +1948,9 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         # Reasoning without acting: the Builder is offered no tools at all.
         # Set by the caller, never by an agent.
         "discuss_only": discuss_only,
+        # Held out of the corpus until the operator embeds it; see
+        # `langgraph_agent.projects`.
+        "output_dir": output_dir,
         "step_count": 0,
     }
     # Streamed rather than invoked so the last state survives the ceiling.
@@ -1903,6 +1969,8 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
     # is the whole recovery story, would only ever be written by runs that did
     # not need recovering.
     try:
+        if output_dir:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
         try:
             for event in graph.stream(state, {"recursion_limit": RECURSION_LIMIT}):
                 for node, node_state in event.items():
@@ -1980,6 +2048,7 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
             elapsed_s=elapsed,
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             web_research=research_report,
+            project_embedded=bool(project) and project in embedded_projects(),
         )
         _save_snapshot(payload)
         return payload
@@ -2013,6 +2082,8 @@ RPC_METHODS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "graph_overview": rpc_graph_overview,
     "search_documents": rpc_search_documents,
     "upload_document": rpc_upload_document,
+    "list_projects": rpc_list_projects,
+    "embed_project": rpc_embed_project,
     "export_corpus": rpc_export_corpus,
     "clear_corpus": rpc_clear_corpus,
     "list_seats": rpc_list_seats,

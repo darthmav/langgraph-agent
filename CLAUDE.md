@@ -61,6 +61,7 @@ python example_usage.py
 │   ├── html_text.py           # HTML → text by link density. No library, no dependency
 │   ├── corpus_health.py       # Is the corpus still the project? missing / extra / oversized
 │   ├── corpus_spectral.py     # connectivity / topics / bottleneck / duplicate_entities (mixin)
+│   ├── projects.py            # Generated projects: where a run writes, and opting one into the corpus
 │   ├── exceptions.py          # Public error surface (re-exports _internal/)
 │   ├── self_healing/          # Opt-in retry / circuit-breaker decorators (see note below)
 │   │   ├── logger.py          # SelfHealingLogger: structured, severity-leveled healing log
@@ -98,6 +99,7 @@ python example_usage.py
 │   ├── test_graph_queries.py  # Undirected traversal of the knowledge graph
 │   ├── test_research_length.py # How much retrieved evidence reaches the Builder
 │   ├── test_rpc_params.py     # RPC parameters: typed, bounded, refused by name
+│   ├── test_projects.py       # Generated projects: the held-out walk, the write scope, embedding
 │   └── test_spectral_graph.py # The spectral_graph package
 ├── scripts/
 │   ├── verify_and_test.py     # Manual verification runner
@@ -201,6 +203,7 @@ Every node reads/writes `AgentState`:
     "lint_failed": list[str],
     "expect_failures": bool,
     "discuss_only": bool,
+    "output_dir": str,
     "step_count": int,
 }
 ```
@@ -447,6 +450,22 @@ four the moment this file described the problem.
   line, and a pass that could not act must not read as one that acted. The
   prompt carries `DISCUSSION_NOTE` so the seat is told it has no tools and
   works from the plan and research it was handed.
+- **A generated project is stored apart and embedded only on request.** The
+  console's *where* dropdown sends `run_goal({goal, project})`: blank means
+  this checkout, as before; a name means `output_dir = projects/<name>`, told
+  to every seat through the state injection and to the Builder through
+  `OUTPUT_DIR_NOTE`, and `_outside_output_dir` refuses any `filesystem_write`
+  outside it -- in `_run_builder_tools`, not the MCP client, because the scope
+  belongs to the run. `iter_project_files` holds every `projects/` directory
+  out of the walk until the operator opts it in (`embed_project`, from the
+  verdict or the Corpus tab), because on 2026-09-18 a snake game a run wrote
+  was embedded by the next rebuild and failed the entity guard. The opt-in is
+  `projects/embedded.json` on disk rather than a write into the store, for the
+  reason an upload is a file first: a rebuild prunes whatever the walk does not
+  find. The choice is the caller's, never an agent's, and the file sits outside
+  every project directory so a confined Builder cannot write itself into the
+  corpus. The entity census skips `projects/` as it skips `uploads/`: an
+  embedded project is per-machine.
 - **`git_dwell` is the whole git flow as one call, and it stops before the
   irreversible part.** The stages are `survey`, `branch`, `stage`, `commit`,
   `push`, `pr`, `merge`, and they always run in that order however the caller
