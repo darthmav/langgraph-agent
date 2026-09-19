@@ -647,7 +647,7 @@ const clampInt = (raw, low, high, fallback) => {
 };
 
 /* ---------- graph ---------- */
-let NODES = [], EDGES = [], raf = null;
+let NODES = [], EDGES = [];
 
 // A document mints an entity for every capitalised word, so most entities
 // touch exactly one document and say nothing about how the corpus connects.
@@ -794,9 +794,57 @@ async function trace(){
   draw(ns, dedupe(g.edges || []));
 }
 
+// The graph is not drawn while the embedder may be working. The model is
+// pinned wholly to two 3 GB cards (`OLLAMA_EMBED_OPTIONS`), so a load that
+// meets a card holding something else fails instead of splitting -- and a
+// browser rasterising a two-thousand-node SVG, animated for hundreds of frames,
+// is exactly that something else. On 2026-09-18 the page drew the whole graph
+// on load while the startup rebuild was loading the model, the load ran out of
+// GPU memory three times, and three documents fell out of the corpus.
+//
+// Held for the whole of a rebuild and the whole of a run rather than only while
+// the meter reads busy: a rebuild is a string of encodes with gaps between, and
+// a run embeds whenever a seat searches -- after an idle spell long enough for
+// the daemon to unload the model, so a search mid-run can be a fresh load. A
+// graph redrawn in every gap would be laid out again every time for nothing.
+let GRAPH_HOLD = "";                          // why the graph is not drawn, or ""
+let SERVER_BUSY = {indexing: false, run: false};  // from the 5s status poll
+
+function graphHoldReason(){
+  if(SERVER_BUSY.indexing) return "the corpus is being rebuilt";
+  if(CURRENT.inflight || SERVER_BUSY.run) return "a run is in flight";
+  if(EMBED_LIGHT.busy || EMBED_LIGHT.watchers) return "the embedder is working";
+  return "";
+}
+
+function clearGraph(why){
+  stopLayout();
+  NODES = []; EDGES = [];
+  $("#g").innerHTML = "";
+  $("#gstat").textContent = "";
+  $("#gempty").style.display = "grid";
+  $("#gempty").innerHTML = `Graph not drawn while ${esc(why)}.<br>The embedding model `
+    + "needs the GPU memory it would take; it draws itself when the embedder is done.";
+}
+
+// Called wherever one of the three sources changes. A hold that lifts redraws
+// only when the Graph tab is on screen; otherwise the tab draws when opened,
+// since the hold left NODES empty.
+function updateGraphHold(){
+  const why = graphHoldReason(), was = GRAPH_HOLD;
+  GRAPH_HOLD = why;
+  if(why && why !== was) clearGraph(why);
+  else if(!why && was && document.querySelector('.panel.on[data-p="graph"]'))
+    sweep().catch(graphFailed);
+}
+
 // `emptyNote` replaces the corpus-state message when the canvas is empty for a
 // reason of its own: a trace that matched nothing is not "no graph yet".
 function draw(ns, es, emptyNote){
+  // Asked again here rather than trusted from the last update: a sweep asked
+  // for before a hold began arrives after it.
+  GRAPH_HOLD = graphHoldReason();
+  if(GRAPH_HOLD) return clearGraph(GRAPH_HOLD);
   const svg = $("#g"), W = svg.clientWidth || 900, H = svg.clientHeight || 520;
   $("#gempty").style.display = ns.length ? "none" : "grid";
   if(!ns.length) $("#gempty").innerHTML = emptyNote || (CORPUS === "absent"
@@ -869,71 +917,246 @@ function draw(ns, es, emptyNote){
     g.onpointerdown = ev0 => {
       ev0.stopPropagation();     // a node drag, not a pan
       n.fix = true; g.setPointerCapture(ev0.pointerId);
+      LAYOUT?.post({type: "fix", i: n.i, x: n.x, y: n.y});
       const mv = e2 => { const p = toGraph(e2.clientX, e2.clientY);
-        n.x = p.x; n.y = p.y; n.vx = n.vy = 0; place(n); };
-      const up = () => { n.fix = false;
+        n.x = p.x; n.y = p.y; place(n);
+        LAYOUT?.post({type: "fix", i: n.i, x: n.x, y: n.y}); };
+      const up = () => { n.fix = false; LAYOUT?.post({type: "release", i: n.i});
         g.removeEventListener("pointermove", mv); g.removeEventListener("pointerup", up); };
       g.addEventListener("pointermove", mv); g.addEventListener("pointerup", up);
     };
   });
 
-  cancelAnimationFrame(raf);
-  tick(W, H, 0);
+  startLayout(W, H);
 }
 
 const mk = t => document.createElementNS("http://www.w3.org/2000/svg", t);
 
-function tick(W, H, step){
-  // Plain spring layout: repulsion between every pair, attraction along edges,
-  // and a weak pull to centre. It stops on its own rather than burning a RAF
-  // loop forever.
-  //
-  // The constants scale with how many nodes are actually on screen. A fixed
-  // set tuned for a couple of dozen collapses a few hundred into one ball:
-  // the ideal separation between nodes falls as the canvas is divided up, so
-  // repulsion range, strength and edge rest length have to fall with it.
-  const count  = Math.max(NODES.length, 1);
-  // Every pair is compared on every frame, so a frame costs count squared, and
-  // a fixed frame count made the whole layout grow with it: a depth-3 trace of
-  // 713 nodes ran 900 frames at ~40ms each, half a minute of a stuttering tab.
-  // Frames are capped by pair comparisons instead, at about what a 237-node
-  // sweep spends settling, so a graph that size or smaller lays out as before
-  // and a larger one stops while the page is still usable.
-  const PAIR_BUDGET = 25e6;
-  const FRAMES = Math.max(60, Math.min(count > 60 ? 900 : 600,
-    Math.round(PAIR_BUDGET / Math.max(1, count * (count - 1) / 2))));
-  const spread = Math.sqrt((W * H) / count);
-  const REST   = Math.max(52, Math.min(150, spread * 0.62));
-  // Repulsion has to reach well past one hop, or separate clusters never push
-  // each other apart and the whole graph stays balled up in the middle with
-  // the canvas empty around it.
-  const RANGE  = Math.max(260, spread * 3.2);
-  const REPEL  = REST * REST * 0.55;
-  const PULL   = 0.0016 * Math.min(1, 30 / count);
+// The spring layout: repulsion between nodes, attraction along edges, and a
+// weak pull to centre, stopping on its own rather than burning a loop forever.
+//
+// It runs in a Web Worker, off the thread that paints and answers the mouse,
+// and repulsion goes through a Barnes-Hut quadtree instead of every pair. On
+// the page thread every pair was compared on every frame, so a frame cost
+// count squared and the frame count had to be rationed to keep the tab usable:
+// a depth-3 trace of 713 nodes had run 900 frames at ~40ms each, and a
+// 2,000-node sweep was cut to 60 steps -- far short of settled, which is why the
+// whole corpus came out balled up. A quadtree answers a far-off group of nodes
+// as one mass at its centre, n log n a step, and the worker keeps even that off
+// the page, so every graph gets its full run of steps and the tab stays live.
+//
+// `makeLayout` must stay self-contained: the worker is built from its source
+// text, so it cannot reach anything else on this page. The same function runs
+// on the page thread when a worker cannot be made, so there is one simulation.
+function makeLayout({W, H, xs, ys, edges}){
+  const n = xs.length;
+  const vx = new Float64Array(n), vy = new Float64Array(n), fixed = new Uint8Array(n);
+  // How far apart a group must be, relative to its size, to count as one
+  // mass. 0.8 is the usual trade: the layout is indistinguishable by eye.
+  const THETA = 0.8;
+  // Mean speed, in pixels a step, below which the graph counts as settled.
+  const SETTLED = 0.02;
+  let w, h, REST, RANGE, REPEL, PULL, left = n > 60 ? 900 : 600;
 
-  for(let i = 0; i < NODES.length; i++) for(let j = i+1; j < NODES.length; j++){
-    const a = NODES[i], b = NODES[j];
-    let dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy) || 1;
-    if(d < RANGE){ const f = REPEL/(d*d);
-      a.vx -= dx/d*f; a.vy -= dy/d*f; b.vx += dx/d*f; b.vy += dy/d*f; }
+  // The constants scale with how many nodes are on screen. A fixed set tuned
+  // for a couple of dozen collapses a few hundred into one ball: the ideal
+  // separation falls as the canvas is divided up, so repulsion range, strength
+  // and edge rest length have to fall with it.
+  function resize(W2, H2){
+    w = W2; h = H2;
+    const spread = Math.sqrt((w * h) / Math.max(n, 1));
+    REST  = Math.max(52, Math.min(150, spread * 0.62));
+    // Repulsion has to reach well past one hop, or separate clusters never
+    // push each other apart and the graph stays balled up in the middle.
+    RANGE = Math.max(260, spread * 3.2);
+    REPEL = REST * REST * 0.55;
+    PULL  = 0.0016 * Math.min(1, 30 / Math.max(n, 1));
   }
-  EDGES.forEach(e => {
-    const dx = e.t.x-e.s.x, dy = e.t.y-e.s.y, d = Math.hypot(dx,dy) || 1, f = (d-REST)*.008;
-    e.s.vx += dx/d*f; e.s.vy += dy/d*f; e.t.vx -= dx/d*f; e.t.vy -= dy/d*f;
+  resize(W, H);
+
+  function build(){
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for(let i = 0; i < n; i++){
+      if(xs[i] < x0) x0 = xs[i]; if(xs[i] > x1) x1 = xs[i];
+      if(ys[i] < y0) y0 = ys[i]; if(ys[i] > y1) y1 = ys[i];
+    }
+    const root = {x: x0, y: y0, s: Math.max(x1 - x0, y1 - y0, 1), m: 0, cx: 0, cy: 0, b: -1, k: null};
+    for(let i = 0; i < n; i++) insert(root, i, 0);
+    return root;
+  }
+  function insert(c, i, depth){
+    const x = xs[i], y = ys[i];
+    c.cx = (c.cx * c.m + x) / (c.m + 1); c.cy = (c.cy * c.m + y) / (c.m + 1); c.m++;
+    if(!c.k){
+      if(c.m === 1){ c.b = i; return; }
+      // Coincident nodes would subdivide forever; past this depth they share
+      // a leaf and count as one mass.
+      if(depth > 40){ c.b = -1; return; }
+      const old = c.b; c.b = -1; c.k = [null, null, null, null];
+      if(old >= 0) place(c, old, depth);
+    }
+    place(c, i, depth);
+  }
+  function place(c, i, depth){
+    const half = c.s / 2, right = xs[i] >= c.x + half, low = ys[i] >= c.y + half;
+    const q = (right ? 1 : 0) + (low ? 2 : 0);
+    if(!c.k[q]) c.k[q] = {x: c.x + (right ? half : 0), y: c.y + (low ? half : 0), s: half,
+                           m: 0, cx: 0, cy: 0, b: -1, k: null};
+    insert(c.k[q], i, depth + 1);
+  }
+
+  function step(){
+    if(left <= 0) return false;
+    const root = build(), stack = [];
+    for(let i = 0; i < n; i++){
+      const x = xs[i], y = ys[i];
+      let fx = 0, fy = 0;
+      stack.push(root);
+      while(stack.length){
+        const c = stack.pop();
+        if(!c.m || c.b === i) continue;
+        // A cell wholly beyond RANGE contributes nothing, as a pair beyond it
+        // never did.
+        const ox = Math.max(c.x - x, 0, x - c.x - c.s), oy = Math.max(c.y - y, 0, y - c.y - c.s);
+        if(ox * ox + oy * oy >= RANGE * RANGE) continue;
+        const dx = c.cx - x, dy = c.cy - y, d = Math.hypot(dx, dy) || 1;
+        if(!c.k || c.s / d < THETA){
+          if(d < RANGE){ const f = REPEL * c.m / (d * d); fx -= dx / d * f; fy -= dy / d * f; }
+        } else {
+          for(const k of c.k) if(k) stack.push(k);
+        }
+      }
+      vx[i] += fx; vy[i] += fy;
+    }
+    for(let e = 0; e < edges.length; e += 2){
+      const a = edges[e], b = edges[e + 1];
+      const dx = xs[b] - xs[a], dy = ys[b] - ys[a], d = Math.hypot(dx, dy) || 1, f = (d - REST) * .008;
+      vx[a] += dx / d * f; vy[a] += dy / d * f; vx[b] -= dx / d * f; vy[b] -= dy / d * f;
+    }
+    let speed = 0;
+    for(let i = 0; i < n; i++){
+      if(fixed[i]){ vx[i] = vy[i] = 0; continue; }
+      vx[i] += (w / 2 - xs[i]) * PULL; vy[i] += (h / 2 - ys[i]) * PULL;
+      vx[i] *= .86; vy[i] *= .86; xs[i] += vx[i]; ys[i] += vy[i];
+      xs[i] = Math.max(30, Math.min(w - 30, xs[i]));
+      ys[i] = Math.max(26, Math.min(h - 20, ys[i]));
+      speed += Math.abs(vx[i]) + Math.abs(vy[i]);
+    }
+    left--;
+    if(n && speed / n < SETTLED) left = 0;
+    return left > 0;
+  }
+
+  return {
+    xs, ys, step,
+    fix(i, x, y){ fixed[i] = 1; xs[i] = x; ys[i] = y; vx[i] = vy[i] = 0; },
+    release(i){ fixed[i] = 0; },
+    reheat(W2, H2, steps){ resize(W2, H2); left = Math.max(left, steps); },
+  };
+}
+
+// The worker's side: step for ~12ms, send the positions, yield so a drag's
+// messages are read, and go again until the layout settles.
+const LAYOUT_WORKER_SOURCE = `const makeLayout = ${makeLayout};
+let engine = null, timer = null;
+function run(){
+  timer = null;
+  const t0 = performance.now();
+  let more = true;
+  while(more && performance.now() - t0 < 12) more = engine.step();
+  postMessage({xs: engine.xs.slice(), ys: engine.ys.slice()});
+  if(more) timer = setTimeout(run, 0);
+}
+onmessage = e => {
+  const m = e.data;
+  if(m.type === "start") engine = makeLayout(m);
+  if(!engine) return;
+  if(m.type === "fix") engine.fix(m.i, m.x, m.y);
+  if(m.type === "release") engine.release(m.i);
+  if(m.type === "reheat") engine.reheat(m.W, m.H, m.steps);
+  if((m.type === "start" || m.type === "reheat") && timer === null) run();
+};`;
+let LAYOUT_WORKER_URL = null;
+
+// The page-thread fallback, for a browser that will not make the worker: the
+// same simulation, a slice of it per animation frame.
+function pageLayout(init, onPositions){
+  const engine = makeLayout(init);
+  let frame = null;
+  const run = () => {
+    frame = null;
+    const t0 = performance.now();
+    let more = true;
+    while(more && performance.now() - t0 < 8) more = engine.step();
+    onPositions(engine.xs, engine.ys);
+    if(more) frame = requestAnimationFrame(run);
+  };
+  run();
+  return {
+    post(m){
+      if(m.type === "fix") engine.fix(m.i, m.x, m.y);
+      if(m.type === "release") engine.release(m.i);
+      if(m.type === "reheat"){ engine.reheat(m.W, m.H, m.steps); if(frame === null) run(); }
+    },
+    stop(){ cancelAnimationFrame(frame); frame = null; },
+  };
+}
+
+function spawnLayout(init, onPositions){
+  let inner;
+  try{
+    LAYOUT_WORKER_URL = LAYOUT_WORKER_URL
+      || URL.createObjectURL(new Blob([LAYOUT_WORKER_SOURCE], {type: "text/javascript"}));
+    const worker = new Worker(LAYOUT_WORKER_URL);
+    worker.onmessage = e => onPositions(e.data.xs, e.data.ys);
+    // A worker that fails to load says so here, not at construction.
+    worker.onerror = () => { worker.terminate(); inner = pageLayout(init, onPositions); };
+    worker.postMessage({type: "start", ...init});
+    inner = {post: m => worker.postMessage(m), stop: () => worker.terminate()};
+  }catch{
+    inner = pageLayout(init, onPositions);
+  }
+  return {post: m => inner.post(m), stop: () => inner.stop()};
+}
+
+// Positions arrive as fast as the worker makes them; the page paints the
+// latest once a frame. A node being dragged is the pointer's, not the layout's.
+let LAYOUT = null, LAID = null, paintFrame = null;
+
+function startLayout(W, H){
+  stopLayout();
+  const index = new Map(NODES.map((n, i) => [n, i]));
+  NODES.forEach((n, i) => { n.i = i; });
+  const edges = new Int32Array(EDGES.length * 2);
+  EDGES.forEach((e, k) => { edges[2*k] = index.get(e.s); edges[2*k+1] = index.get(e.t); });
+  LAYOUT = spawnLayout({
+    W, H, edges,
+    xs: Float64Array.from(NODES, n => n.x),
+    ys: Float64Array.from(NODES, n => n.y),
+  }, (xs, ys) => {
+    LAID = {xs, ys};
+    if(paintFrame === null) paintFrame = requestAnimationFrame(paintLayout);
   });
+}
+
+function stopLayout(){
+  if(LAYOUT){ LAYOUT.stop(); LAYOUT = null; }
+  cancelAnimationFrame(paintFrame); paintFrame = null; LAID = null;
+}
+
+function paintLayout(){
+  paintFrame = null;
+  if(!LAID) return;
+  const {xs, ys} = LAID;
   NODES.forEach(n => {
-    if(n.fix) return;
-    n.vx += (W/2-n.x)*PULL; n.vy += (H/2-n.y)*PULL;
-    n.vx *= .86; n.vy *= .86; n.x += n.vx; n.y += n.vy;
-    n.x = Math.max(30, Math.min(W-30, n.x));
-    n.y = Math.max(26, Math.min(H-20, n.y));
+    if(n.fix || xs[n.i] === undefined) return;
+    n.x = xs[n.i]; n.y = ys[n.i];
     n.el.setAttribute("transform", `translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`);
   });
   EDGES.forEach(e => {
     e.el.setAttribute("x1", e.s.x); e.el.setAttribute("y1", e.s.y);
     e.el.setAttribute("x2", e.t.x); e.el.setAttribute("y2", e.t.y);
   });
-  if(step < FRAMES) raf = requestAnimationFrame(() => tick(W, H, step+1));
 }
 
 // Likewise a trace or sweep the server refused says so on the canvas.
@@ -969,8 +1192,10 @@ $("#g").addEventListener("dblclick", e => {
   if(!(e.target.closest && e.target.closest(".node"))) resetView();
 });
 $("#gnode").onkeydown = e => { if(e.key === "Enter") trace().catch(graphFailed); };
+// A resize reheats the layout briefly for the new canvas rather than laying
+// the graph out again from scratch.
 addEventListener("resize", () => { if(NODES.length){
-  const svg = $("#g"); cancelAnimationFrame(raf); tick(svg.clientWidth, svg.clientHeight, 400); }});
+  const svg = $("#g"); LAYOUT?.post({type: "reheat", W: svg.clientWidth, H: svg.clientHeight, steps: 150}); }});
 
 /* ---------- retrieval ---------- */
 async function search(){
@@ -1399,6 +1624,7 @@ function setRunButtons(){
   $("#eng-stop").disabled = !CURRENT.inflight || CURRENT.stopping;
   $("#eng-stop").textContent = CURRENT.stopping ? "Stopping…" : "Stop";
   setClearButton();
+  updateGraphHold();
 }
 
 // The run_goal fetch is deliberately left in flight. It is how the partial
@@ -1722,6 +1948,7 @@ function followEmbedder(e){
   EMBED_LIGHT.busy = !!e.busy;
   if(e.busy || fresh) EMBED_LIGHT.heldTo = performance.now() + SEAT_MIN_LIT_MS;
   settleEmbedderLight();
+  updateGraphHold();
 }
 
 function settleEmbedderLight(){
@@ -1735,6 +1962,7 @@ function settleEmbedderLight(){
 function releaseEmbedderLight(){
   EMBED_LIGHT.busy = false;
   settleEmbedderLight();
+  updateGraphHold();
 }
 
 function pollEmbedder(){
@@ -1751,6 +1979,7 @@ function pollEmbedder(){
 async function watchEmbedder(request){
   if(CURRENT.inflight) return request;       // the run's poll is already reading it
   if(EMBED_LIGHT.watchers++ === 0) EMBED_LIGHT.poll = setInterval(pollEmbedder, SEAT_POLL_MS);
+  updateGraphHold();
   try{
     return await request;
   }finally{
@@ -1762,6 +1991,7 @@ async function watchEmbedder(request){
       await EMBED_LIGHT.inflight;
       await pollEmbedder();
       if(!EMBED_LIGHT.watchers) releaseEmbedderLight();
+      updateGraphHold();
     }
   }
 }
@@ -2107,6 +2337,8 @@ async function poll(quiet){
       rpc("rag_stats", {}, true),
     ]);
     showEmbeddingDevice(st.embedding_device);
+    SERVER_BUSY = {indexing: !!(st.indexing && st.indexing.running), run: !!st.run_in_flight};
+    updateGraphHold();
     BUILDS_ON_RUN = st.indexes_on_run !== false;
     applyIndexableSuffixes(st.indexable_suffixes);
     setCorpusState(stats.corpus || (stats.total_chunks ? "indexed" : "empty"));

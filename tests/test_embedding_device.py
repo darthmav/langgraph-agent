@@ -138,6 +138,57 @@ def test_a_refused_request_is_named_not_raised_bare(monkeypatch):
         OllamaEmbedder(EMBEDDING_MODEL_NAME).encode("a passage")
 
 
+def _flaky(monkeypatch, failures: int, code: int = 500) -> dict[str, int]:
+    """`/api/embed` answering `code` for its first `failures` requests, then vectors."""
+    import urllib.error
+    import urllib.request
+
+    calls = {"n": 0}
+
+    def urlopen(request: Any, timeout: float | None = None) -> _Reply:
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise urllib.error.HTTPError(
+                request.full_url, code, "Error", None,
+                io.BytesIO(b"llama-server process has terminated: exit status 1"),
+            )
+        return _Daemon().urlopen(request, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(config, "ollama_cpu_share", lambda model: None)
+    monkeypatch.setattr(gs, "OLLAMA_EMBED_RETRY_SECONDS", 0.0)
+    return calls
+
+
+def test_a_failed_model_load_is_retried_until_it_loads(monkeypatch):
+    """The 2026-09-18 startup: three 500s from a load short of GPU memory, then a load."""
+    calls = _flaky(monkeypatch, failures=3)
+
+    vectors = OllamaEmbedder(EMBEDDING_MODEL_NAME).encode(["a", "b"])
+
+    assert vectors.shape == (2, 3)
+    assert calls["n"] == 4
+
+
+def test_a_load_that_never_succeeds_says_how_often_it_was_tried(monkeypatch):
+    calls = _flaky(monkeypatch, failures=100)
+
+    with pytest.raises(RuntimeError, match=r"after \d+ attempts.*llama-server"):
+        OllamaEmbedder(EMBEDDING_MODEL_NAME).encode("a passage")
+
+    assert calls["n"] == gs.OLLAMA_EMBED_LOAD_RETRIES + 1
+
+
+def test_a_refusal_is_not_retried(monkeypatch):
+    """A 4xx is the daemon saying no to the request; asking again changes nothing."""
+    calls = _flaky(monkeypatch, failures=100, code=404)
+
+    with pytest.raises(RuntimeError):
+        OllamaEmbedder(EMBEDDING_MODEL_NAME).encode("a passage")
+
+    assert calls["n"] == 1
+
+
 # ---------------------------------------------------------------------------
 # placement is the daemon's; this process only reads it back
 # ---------------------------------------------------------------------------

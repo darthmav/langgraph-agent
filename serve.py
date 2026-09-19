@@ -709,6 +709,12 @@ def rpc_status(_: dict[str, Any]) -> dict[str, Any]:
         # without this the console shows a server that has decided to do
         # nothing about either.
         "indexing": _startup_index_status(),
+        # Whether a run is in flight, whoever started it. The console keeps the
+        # Graph tab blank while a run or a rebuild can load the embedder: the
+        # model is pinned wholly to two 3 GB cards, and a browser rasterising a
+        # two-thousand-node SVG at the moment of the load is VRAM the load then
+        # does not get. A run started from another tab has to count too.
+        "run_in_flight": _run_in_flight(),
         # What an upload may be, for the console's pickers and tooltips. From
         # the walk's own list, so the page cannot promise a different one.
         "indexable_suffixes": list(INDEXABLE_SUFFIXES),
@@ -1395,6 +1401,11 @@ def _index_the_project_at_startup() -> None:
         print(line)
 
 
+def _run_in_flight() -> bool:
+    with _run_lock:
+        return bool(_run_progress["running"])
+
+
 def _startup_index_status() -> dict[str, Any]:
     """What the header needs: whether a rebuild is in flight, and its last word."""
     with _run_lock:
@@ -1570,7 +1581,14 @@ def _corpus_feed_line(report: dict[str, Any], *, when: str = "before the run") -
         )
 
     errors = report.get("errors") or []
-    note = f" {len(errors)} file(s) failed to index." if errors else ""
+    # Named, not only counted: a count says the corpus is short and nothing
+    # about whether the fix is a rebuild, a freed card or a file.
+    note = (
+        f" {len(errors)} file(s) failed to index: {'; '.join(errors[:3])}"
+        + (f"; and {len(errors) - 3} more." if len(errors) > 3 else ".")
+        if errors
+        else ""
+    )
 
     if source == "built":
         was = (
