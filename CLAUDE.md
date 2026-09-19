@@ -337,6 +337,19 @@ the top-twenty entity list is *pinned* rather than judged: the test fails when
 the graph's answer moves, which is not a bug report but the audit asking to be
 redone at the one moment the answer changed.
 
+**Its census counts only the files every checkout has.** Fetched pages were
+already out, because they mint no entities; `uploads/` is out as of 2026-09-18
+for a different reason -- an upload *does* mint entities, but it is whatever the
+operator handed this machine, so the census differed per machine and a pinned
+list cannot be green in two places at once. Measured: `Research` sat at 14
+documents here and outside the top 24 in a clean checkout, so it was inside the
+audited twenty on every developer machine and outside it in CI. That had been
+red in CI for three commits and nobody could see it, because a missing `scipy`
+aborted collection before any test ran -- the guard that cannot *run* pins
+nothing, one level up from the guard that cannot fail. An audit of what the
+project is about should not move because somebody uploaded a document to their
+own console.
+
 The guards are proven by breaking each claim and watching the test fail. A
 guard that cannot fail pins nothing, and the first version of the entity guard
 was asleep -- it fired only at zero free capitals, and `Measured` had acquired

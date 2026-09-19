@@ -30,7 +30,7 @@ a fixture would test the checker.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import tomllib
@@ -40,6 +40,7 @@ from langgraph_agent.graphrag_server import (
     EMBEDDING_BATCH_SIZE,
     ENTITY_STOPWORDS,
     MAX_INDEXABLE_BYTES,
+    UPLOADS_DIR,
     _mints_entities,
     iter_project_files,
 )
@@ -430,6 +431,16 @@ _STRIP = "\"'`()[]{}<>.,!?;:*=+-/\\|"
 _SENTENCE_END = (".", "!", "?", ":", ";")
 
 
+def _is_upload(path: str) -> bool:
+    """True for a document the operator handed *this machine*.
+
+    Uploads are the other per-machine corner of the walk, and the reason this
+    exists is in `_capital_census` below.
+    """
+    parts = PurePosixPath(path.replace("\\", "/")).parts
+    return UPLOADS_DIR in parts[:-1]
+
+
 def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
     """Per minted token: documents, and capitals position does not explain.
 
@@ -443,10 +454,24 @@ def _capital_census(root: Path = ROOT) -> dict[str, dict[str, int | set[str]]]:
     entities the real graph never held. They are not named here on purpose:
     this file is in the walk, and naming a word mid-sentence gives it the free
     capital that takes it out of the first guard's reach.
+
+    **And skips `uploads/`, which is the same failure one directory over.** An
+    upload does mint entities, unlike a fetched page, so this one is not
+    mirroring `add_document` -- it is the only way a *pinned* list can be a
+    claim anybody else can check. The walk includes whatever the operator
+    handed this machine, so the census differed per machine and the two guards
+    below could not be green in both places at once: measured on 2026-09-18,
+    `Research` sits at 14 documents here and outside the top 24 in a clean
+    checkout, which put it in the audited twenty on every developer machine and
+    out of it in CI. That had been red in CI for three commits and was invisible
+    the whole time, because a missing `scipy` aborted collection before any test
+    ran -- the guard that cannot run pins nothing, one level up from the guard
+    that cannot fail. An audit of what the *project* is about should not move
+    because somebody uploaded a PDF's worth of prose to their own console.
     """
     census: dict[str, dict] = {}
     for path in iter_project_files(str(root)):
-        if not _mints_entities(str(path)):
+        if not _mints_entities(str(path)) or _is_upload(str(path)):
             continue
         try:
             text = (root / path).read_text(encoding="utf-8")
@@ -553,7 +578,7 @@ AUDITED_TOP_ENTITIES = frozenset({
     "Architect", "Builder", "Researcher", "Laplacian", "Planner", "System",
     "ValueError", "Fiedler", "AgentState", "Spectral", "Exception", "Graph",
     "GraphRAG", "Python", "Verdict", "Cheeger", "GraphRAGKnowledgeBase",
-    "LangGraph", "Search", "Research",
+    "LangGraph", "Search", "Embedding",
 })
 
 
