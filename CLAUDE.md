@@ -35,6 +35,9 @@ python -m pytest tests/ -v
 # Start the web console
 ./launch_console.sh
 
+# Or the same console in a container (Arch image, host networking)
+docker compose up --build
+
 # Find out which model actually works in which seat
 python scripts/diagnose_seats.py --list
 python scripts/diagnose_seats.py --phase probe
@@ -80,7 +83,7 @@ python example_usage.py
 │   ├── test_corpus_absent.py  # The two doors: reading never creates a corpus
 │   ├── test_graph.py          # Pytest suite
 │   ├── test_diagnose_seats.py # Guards the seat diagnostic's verdicts
-│   ├── test_thinking.py       # The per-seat thinking switch: support, wire, parsing
+│   ├── test_thinking.py       # Per-seat capability: the thinking switch, and tool support
 │   ├── test_console_stop.py   # Emergency stop, deferred exit, snapshot
 │   ├── test_chunking.py       # Document chunking, chunk ids, search collapse
 │   ├── test_corpus_admin.py   # Corpus clear / export / reindex guards
@@ -97,6 +100,7 @@ python example_usage.py
 │   ├── test_corpus_staleness.py   # Corpus vs disk, and not crying wolf
 │   ├── test_startup_index.py  # The corpus is rebuilt when the console comes up
 │   ├── test_graph_queries.py  # Undirected traversal of the knowledge graph
+│   ├── test_gpu_arbiter.py    # The cards: one model at a time, every layer on the GPU
 │   ├── test_research_length.py # How much retrieved evidence reaches the Builder
 │   ├── test_rpc_params.py     # RPC parameters: typed, bounded, refused by name
 │   ├── test_projects.py       # Generated projects: the held-out walk, the write scope, embedding
@@ -122,6 +126,12 @@ python example_usage.py
 │   ├── operations.py          # spectral graph arithmetic
 │   └── stability.py           # numerical stability utilities
 ├── experimental/              # an agent run's own notes; out of the corpus (PROJECT_INDEX_EXCLUDES)
+├── docker/
+│   └── entrypoint.sh          # the container's start: git identity, and what it can reach
+├── Dockerfile                 # the console as an Arch image; the daemon stays on the host
+├── Dockerfile.kali            # the same console on Kali rolling; gh from GitHub's own repo
+├── docker-compose.yml         # host networking: the daemon, the database and SearxNG are on it
+├── .dockerignore              # the venv, the caches, and every per-machine artifact
 ├── install.sh                 # Arch / Omarchy: everything, from nothing to a running console
 ├── cuda-embed-ollama.sh       # NVIDIA cards below compute 7.5: Ollama's CUDA 12 build, model 100% on the GPU
 ├── launch_console.sh          # starts serve.py and waits on /api/status before opening a browser
@@ -236,8 +246,22 @@ python -m pytest tests/ -v
 
 ### Change a seat's model
 - Update `DEFAULT_SEATS` (and `_DEFAULT_AGENT_MODELS`) in `src/langgraph_agent/config.py`, plus `.env.example`.
-- Add the model to `AGENT_LLM_OPTIONS` so it appears in the console dropdown. That list is the whole offer -- `kimi-k3:cloud`, `qwen3.5:397b-cloud` and `qwen3.8:latest` -- so a tag the daemon carries is not offered until it is added there, and `set_seat` refuses any model not in it (and the test in `test_rpc_params.py` pins the list).
+- Add the model to `AGENT_LLM_OPTIONS` so it appears in the console dropdown. That list is the whole offer -- `kimi-k3:cloud`, `qwen3.5:397b-cloud`, `qwen3.8:latest` and `hf.co/mradermacher/dolphin-2.9.1-yi-1.5-9b-GGUF:Q4_K_M` -- so a tag the daemon carries is not offered until it is added there, and `set_seat` refuses any model not in it (and the test in `test_rpc_params.py` pins the list).
 - Nothing in `frontend/index.html` hard-codes a model; the seat cards render whatever `list_seats` reports.
+- **Check the tag reports `tools` before seating it as the Builder.** The offer is
+  not all of one kind any more: dolphin reports `completion` alone, and the
+  Builder is the one seat whose work *is* tool calls -- `files_changed` is
+  appended only when a write tool reports success, never from the model's
+  prose -- so a Builder on it answers in full and changes nothing. That is
+  the `StubLLM` failure with a live seat behind it, and no other chip would
+  show it, because the seat is live and every call succeeds. `tool_support`
+  reads the daemon's answer (the one `thinking_support` already caches, so
+  it costs no request) and `get_agent_status` puts a **NO TOOLS** chip on
+  the Builder's card alone: the other three are offered no tools, so a model
+  without them is the right seat for them rather than a defect. `None` is
+  kept apart from `False` for the reason thinking keeps `unknown` apart from
+  `never` -- a daemon down for thirty seconds must not read as a seat that
+  lost a capability.
 
 ### Add a fifth agent
 The seat list is `AGENTS` in `config.py` and is read by everything that iterates
@@ -252,8 +276,7 @@ The Action Feed that sat to the right of the Director is gone: the stage cards
 were a third telling of what the Director reports and what the Crew lights
 already say, and `run_progress.turns` drives those lights from each seat's turn
 as it happens, which beats the feed's `node` -- that names the seat which just
-finished. `stageCard` and the `.stage` CSS went with it, and the Clear button's
-tooltip no longer promises to clear a pane that does not exist.
+finished. `stageCard` and the `.stage` CSS went with it.
 
 Two things it held moved rather than went. The **clock** and the last finished
 stage live in one `#run-live` line inside the Director, rewritten each second
@@ -335,15 +358,13 @@ redone at the one moment the answer changed.
 **Its census counts only the files every checkout has.** Fetched pages were
 already out, because they mint no entities; `uploads/` is out as of 2026-09-18
 for a different reason -- an upload *does* mint entities, but it is whatever the
-operator handed this machine, so the census differed per machine and a pinned
-list cannot be green in two places at once. Measured: `Research` sat at 14
-documents here and outside the top 24 in a clean checkout, so it was inside the
-audited twenty on every developer machine and outside it in CI. That had been
-red in CI for three commits and nobody could see it, because a missing `scipy`
-aborted collection before any test ran -- the guard that cannot *run* pins
-nothing, one level up from the guard that cannot fail. An audit of what the
-project is about should not move because somebody uploaded a document to their
-own console.
+operator handed this machine, so a pinned list cannot be green in two places
+at once. Measured: `Research` sat at 14 documents here and outside the top 24
+in a clean checkout, so it was inside the audited twenty on every developer
+machine and outside it in CI -- red there for three commits with nobody able
+to see it, because a missing `scipy` aborted collection before any test ran,
+the guard that cannot *run* pinning nothing one level up from the guard that
+cannot fail.
 
 The guards are proven by breaking each claim and watching the test fail. A
 guard that cannot fail pins nothing, and the first version of the entity guard
@@ -370,9 +391,8 @@ four the moment this file described the problem.
   executed, passing file under "not written". The normalizer errs one way on
   purpose -- over-stripping only hides a real accusation, under-stripping
   invents one -- so it also drops "None"/"N/A" answers and prose sentences,
-  and its trailing-parenthesis strip is a whitelist of annotation words
-  because real filenames here carry parentheses
-  (`examples/filter_band_pass_(40_60_hz).png`).
+  and its trailing-parenthesis strip is a whitelist of annotation words,
+  because a filename can carry parentheses of its own.
 - **`state["files_changed"]` accumulates across passes; the local list does
   not.** Inside `builder_node` the local `files_changed` is what *this* pass
   wrote, and the verification logic depends on that: `carried` uses it to tell
@@ -389,18 +409,14 @@ four the moment this file described the problem.
   differ, so a quiet pass never reads as though the run lost its work.
   **It also retracts.** A path is dropped from the record once it is no longer
   on disk, and named in the report rather than simply vanishing. The 2026-09-11
-  run ended listing four paths of which three were gone -- a generator script
-  at the project root and two more under /tmp, written on one pass and removed
-  with `rm` on a later one, with nothing retracting them. So the console's
-  "changed this machine" block, which is a safety notice about files on disk,
-  named three files nobody could find, and the Architect ruled on the same
-  record through the state injection block. That is the mirror of "described
-  but not written" -- the report's harshest claim, guarded a dozen lines
-  further down in the other direction -- and this was the unguarded direction.
-  A run whose every product was deleted now reports none, which is the
-  accurate account rather than the empty one described just above: the report
-  still says what
-  went. The retraction runs *after* `written` is computed, and a test pins that
+  run ended listing four paths of which three had been written on one pass and
+  removed with `rm` on a later one, with nothing retracting them: the console's
+  "changed this machine" block, a safety notice about files on disk, named
+  three files nobody could find, and the Architect ruled on the same record.
+  That is the mirror of "described but not written", in the direction nothing
+  guarded. A run whose every product was deleted now reports none, and the
+  report still says what went.
+  The retraction runs *after* `written` is computed, and a test pins that
   ordering, because `written` has to keep seeing the whole record -- a file
   this pass wrote through a real tool call and then removed did come from a
   successful write, so naming it under `## Files Modified` is not a lie and
@@ -410,11 +426,11 @@ four the moment this file described the problem.
   an absolute path, a `..` or a symlinked parent put the Builder's writes
   anywhere the account could reach, and on 2026-09-11 a run working on this
   checkout wrote `/tmp/gen_doc.py` and `/tmp/gen_overview.py`. Two costs, and
-  the second is the one that bites: the obvious one is a file outside the
-  project that no reindex, no `corpus_staleness` and no `git status` will ever
-  mention, and the quiet one is that `files_changed` feeds the "changed this
-  machine" notice, so a write outside the root makes that notice name a path
-  the operator cannot find from the project. `_resolve_write_path` refuses
+  the second bites: a file outside the project is one no reindex, no
+  `corpus_staleness` and no `git status` will ever mention, and
+  `files_changed` feeds the "changed this machine" notice, so such a write
+  makes that notice name a path the operator cannot find from the project.
+  `_resolve_write_path` refuses
   before the write, the shape `_resolve_cwd` already uses beside it. It
   resolves the *parent* rather than the leaf -- the leaf normally does not
   exist yet, and a symlinked parent is the way out that matters -- and it
@@ -425,9 +441,9 @@ four the moment this file described the problem.
   `run_goal({goal, discuss_only: true})`) and never by an agent -- the third
   flag of that shape, after `expect_failures` and `research_web`. The Builder
   is offered **no tools at all**. It briefly got the three read-only ones on
-  the argument that reading changes nothing; zero is the stronger guarantee to
-  state, because it needs no argument about which reads are harmless and cannot
-  be weakened later by a tool added to that set which turns out to do more than
+  the argument that reading changes nothing; zero is the stronger guarantee,
+  because it needs no argument about which reads are harmless and cannot be
+  weakened later by a tool added to that set which turns out to do more than
   read. `DISCUSSION_TOOL_NAMES` is empty rather than short, so nothing is bound
   and the node takes the path a seat whose model cannot call tools already
   takes -- there is no tool loop on a discussion run, and "took no action" is a
@@ -481,9 +497,8 @@ four the moment this file described the problem.
   agent opens and immediately merges is not a review, which is true and is not
   something a default can decide. What it produced was a tool that is one call
   because the flow is one act, doing six sevenths of it every time and leaving
-  the seventh to a caller who had no way to know it was outstanding -- observed
-  directly, twice in one afternoon, both times by an operator who had asked for
-  the whole flow. The review point is now opt-*in*: naming `stages` without
+  the seventh to a caller who had no way to know it was outstanding. The
+  review point is now opt-*in*: naming `stages` without
   `merge` stops at `pr`, the same list the old default was, spelled by whoever
   wants it. `merge` is `--squash --delete-branch`, so the default branch gets
   one commit carrying the pull request's title and body -- which makes those
@@ -529,9 +544,9 @@ four the moment this file described the problem.
   at all, so its files are executed as scripts like any other.
 - **What the Builder writes is linted the way CI lints it.** Running a file
   proves it does not raise; it says nothing about whether CI accepts it. The
-  module an agent run wrote on 2026-09-12 imported, ran and was approved -- and
-  carried 103 ruff errors, so its first push would have failed.
-  `_lint_written_files` runs `ruff check` over every Python file a pass wrote
+  module an agent run wrote on 2026-09-12 imported, ran and was approved --
+  and carried 103 ruff errors. `_lint_written_files` runs `ruff check` over
+  every Python file a pass wrote
   or carried, with the project's own configuration, before those files are
   executed. ruff fixes only what cannot change behaviour
   (`LINT_AUTOFIX_RULES`: trailing whitespace, a missing final newline, import
@@ -547,10 +562,10 @@ four the moment this file described the problem.
   (`HEADLESS_VERIFY_ENV`), and `stdin` closed. Both are about the same
   failure: a file that waits for a human burns its whole
   `VERIFY_TIMEOUT_SECONDS` and is reported `FAILED` for it. A plotting
-  example ending in `plt.show()` — the ordinary way to write one — is
-  correct code that hung forever, and the first one to do it ate most of the
-  Builder's budget, so the rest of the pass came back `NOT RUN` and blocked
-  approval. The display variables are unset as well as `MPLBACKEND` set,
+  example ending in `plt.show()` — the ordinary way to write one — is correct
+  code that hung forever, and the first one to do it ate most of the Builder's
+  budget, so the rest of the pass came back `NOT RUN`. The display variables
+  are unset as well as `MPLBACKEND` set,
   because a library that probes for a display itself never consults
   `MPLBACKEND`. `stdin=DEVNULL` is in `_terminal_execute` and `_run_tests`
   rather than the verify path alone: no Builder tool call ever has someone at
@@ -560,9 +575,9 @@ four the moment this file described the problem.
   `_timeout_detail` appends the *tail* to the report. The message alone cannot
   distinguish a file that blocked on its first line from one that did all its
   work and then waited at the end, and the Builder does not leave that blank —
-  it read a bare timeout as a missing dependency, installed a package that was
-  already there, and spent a second full timeout on an identical retry. The
-  tail is what says how far it got, so truncation trims the front.
+  it read a bare timeout as a missing dependency and spent a second full
+  timeout on an identical retry. The tail is what says how far it got, so
+  truncation trims the front.
 - **A silent Researcher is not research.** `_parse_researcher_output` defaults
   the status to `ready_for_builder`, so a seat that answered with nothing was
   announced as "Research complete" while `research` reached the Builder empty.
@@ -579,9 +594,9 @@ four the moment this file described the problem.
   not a guess: `scripts/diagnose_seats.py --phase probe` asks each candidate
   the Researcher's own question with retrieval stubbed out, and on this
   machine `gemma4:cloud`, `nemotron-3-ultra:cloud` and `kimi-k2.7-code:cloud`
-  all answer with nothing, while `qwen3.5:397b-cloud` and `kimi-k3:cloud`
-  answer in full. Re-run it before changing the seat rather than trusting that
-  list, which is one machine on one day.
+  all answer with nothing while `qwen3.5:397b-cloud` and `kimi-k3:cloud`
+  answer in full -- one machine on one day, so re-run it rather than trusting
+  the list.
 - **The Planner sees a map of the project before it plans.** It used to plan
   from the goal and the Architect's direction alone, so it could name no file
   the goal did not -- and `_gather_research` searches on `plan`, so a plan
@@ -594,9 +609,10 @@ four the moment this file described the problem.
   skipped. Measured on 2026-09-12 with a local 9B seat, three goals each way:
   without the map no plan named a project file, and one listed the Planner's
   own instructions as its steps; with it, the seat-timeout goal was planned
-  against `config.py`, `mcp_client.py` and `nodes.py`. The two UI goals still
-  named none, because that corpus had not yet indexed `frontend/index.html` --
-  the map is exactly as good as retrieval. `tests/conftest.py` switches it off
+  against `config.py`, `mcp_client.py` and `nodes.py`, while the two UI goals
+  still named none, because that corpus had not yet indexed
+  `frontend/index.html` -- the map is exactly as good as retrieval.
+  `tests/conftest.py` switches it off
   (`PLANNER_PROJECT_MAP`), so no planning test reads the developer's corpus.
   The Builder's section is `## Blockers` now, not `## Next Steps / Blockers`
   -- a heading that invites next steps gets them -- and on a discussion run
@@ -610,13 +626,10 @@ four the moment this file described the problem.
   indexed before the Architect opens, the web phase may embed pages into that
   same corpus, and then the Researcher runs only if the Planner's reply
   happens to name it. A seat that writes a confident plan names the Builder.
-  Measured on the run of 2026-09-12: 77 documents and 1,659 passages built in
-  77.3s, 11 pages read and 8 embedded in 25.8s, both cycles Planner ->
-  Builder, and the run ended with `research` empty and `research_status`
-  unset. Every seat
-  worked and the knowledge base was never consulted -- 103s of embedding spent
-  on a run that could not have used a word of it, with nothing in the record
-  saying so.
+  Measured on the run of 2026-09-12: both cycles went Planner -> Builder and
+  the run ended with `research` empty and `research_status` unset -- 103s of
+  embedding spent on a run that could not have used a word of it, with nothing
+  in the record saying so.
   The override can be unconditional because it is nearly free where it is
   redundant: on a goal the corpus answers, `_gather_research` formats the
   retrieved chunks and returns without invoking the seat at all (see *the
@@ -640,14 +653,12 @@ four the moment this file described the problem.
   into the findings
   and returns without invoking the seat at all. So on a question the corpus
   answers well, the Researcher's model is not a variable: two different models
-  produce byte-identical `research`, in ~0.0s. This is worth knowing before
-  blaming or crediting a Researcher seat for a run's quality, and it is why
-  the seat's model matters most in precisely the case that is hardest to
-  notice -- a question the corpus cannot answer, which is also when a silent
-  seat sends the run round the loop. `scripts/diagnose_seats.py` keeps the two
-  apart: the `research` exercise measures retrieval, `offcorpus` is the one
-  that reaches
-  the model, and the phase 1 probes stub retrieval out entirely.
+  produce byte-identical `research`, in ~0.0s. So the seat's model matters
+  most in precisely the case that is hardest to notice -- a question the
+  corpus cannot answer, which is also when a silent seat sends the run round
+  the loop. `scripts/diagnose_seats.py` keeps the two apart: the `research`
+  exercise measures retrieval, `offcorpus` is the one that reaches the model,
+  and the phase 1 probes stub retrieval out entirely.
 - **The relevance floor is measured per corpus, never stated, and a corpus has
   none until it is measured.** The floor is what `_gather_research` reads off
   `results[0]["score"]` to decide whether the corpus answered at all, and a
@@ -658,10 +669,8 @@ four the moment this file described the problem.
   an empty band, and `0.3` sat at the top of the *wrong* population -- the
   project's own off-corpus probe (the `offcorpus` exercise on PostgreSQL
   vacuum) crossed it, and was therefore served to the Builder as though the
-  corpus had answered. That exercise exists because it is *"the only team
-  exercise where the Researcher's model is the variable"*, and the gate had
-  been quietly denying it that: it was measuring retrieval and reporting on
-  the seat.
+  corpus had answered -- an exercise whose whole point is that the
+  Researcher's model is the variable, measuring retrieval instead.
   So there is no constant any more. `relevance_floor()` returns the floor from
   the corpus's own `floor_calibration.json` -- and only when that record names
   `EMBEDDING_MODEL_NAME`, since a floor measured under one embedding model
@@ -725,13 +734,12 @@ four the moment this file described the problem.
   the first node containing the text in enumeration order, so the same query
   could trace a different node after a reindex. `neighborhood` and
   `query_graph` return `resolved_from` and `alternatives` whenever the id
-  typed was not the id found. The server log held 1,772 lines on 2026-09-12:
-  1,177 were a sweep's per-document `query_graph` calls (see *a sweep is one
-  call*), 84 were HTTP requests logged at INFO -- every call to Ollama and to
-  huggingface.co. The MCP SDK's constructor runs `logging.basicConfig` at the
-  level its server is
-  built with, so importing `graphrag_server` switched every library's INFO on;
-  the server is built at WARNING now. The chunker's tokenizer (Qwen3's own,
+  typed was not the id found. The server log held 1,772 lines on 2026-09-12,
+  1,177 of them a sweep's per-document `query_graph` calls (see *a sweep is
+  one call*) and 84 HTTP requests logged at INFO: the MCP SDK's constructor
+  runs `logging.basicConfig` at the level its server is built with, so
+  importing `graphrag_server` switched every library's INFO on, and the server
+  is built at WARNING now. The chunker's tokenizer (Qwen3's own,
   via `transformers`) loads from the local cache first, so a warm start asks
   huggingface.co nothing and a machine without a network still chunks.
   Embedding itself is a POST to the Ollama daemon; nothing else is fetched.
@@ -750,12 +758,11 @@ four the moment this file described the problem.
   1,373, so 300 carried **34%** of a typical passage. On a `research/web`
   document the opening is the provenance header, and there the loss was total:
   the top-scoring source of the 2026-09-09 run reached the Builder as a title,
-  a URL, a timestamp and the goal it was fetched for, truncated mid-word, with
-  not one character of the article attached -- a citation and no evidence.
-  1,500 clears the p99, so a passage normally arrives whole and the cap guards
-  against a pathological chunk;
-  measured across three questions the Builder now receives ~4,900 characters
-  from five sources against 900 from three. A cut that does bite is announced
+  a URL and a timestamp, with not one character of the article attached -- a
+  citation and no evidence. 1,500 clears the p99, so a passage normally
+  arrives whole and the cap guards against a pathological chunk; the Builder
+  now receives ~4,900 characters from five sources against 900 from three. A
+  cut that does bite is announced
   in the text (`_research_snippet`), for the reason `_fit_to_index_limit`
   writes its note onto the page: a silent trim is indistinguishable from a
   source that had nothing more to say, and the Builder cannot ask.
@@ -765,11 +772,10 @@ four the moment this file described the problem.
   failed; a file in `unverified`, which nobody executed; or a Builder pass cut
   off before it finished (`builder_cut_off`: `turn_cap` or `deadline`). The
   step ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot
-  hang it. The last two were missing until 2026-09-12, and both let unchecked
-  work through. The gate held one list and cleared all of it under
-  `expect_failures`, unrun files included — against the rule below that the
-  opt-out never excuses an unrun file. And a Builder stopped at its tool-turn
-  cap, with a blocker saying so, was approved as "complete and verified". The
+  hang it. The last two were missing until 2026-09-12: the gate held one list
+  and cleared all of it under `expect_failures`, unrun files included, and a
+  Builder stopped at its tool-turn cap, with a blocker saying so, was approved
+  as "complete and verified". The
   cost is real: a goal that legitimately wants a failing file (a deliberate
   fixture, an expected-to-fail test) cannot be approved without the opt-out,
   and work too large for one pass is not approved until a pass finishes it.
@@ -799,13 +805,12 @@ four the moment this file described the problem.
   the seat working now. `_finish_run` clears it as a backstop, since a light
   left on outlives the run in every console still open.
   **A light fed by a poll is a sample, and a sample misses whatever falls
-  between two polls.** Measured on 2026-09-13 through the real page in
-  headless Chromium, polling once a second: a 0.4s Researcher turn never lit
-  at all, the opening Architect sat dark for the first second of its turn, the
-  Planner stayed lit half a second into the turn after its own -- and the
-  five-second crew poll rebuilt every card, so a Builder lit for 12s restarted
-  its rainbow from red four times. The short turn is the one that bites in
-  practice: a Researcher answering from retrieval makes no model call (see
+  between two polls.** Measured on 2026-09-13 through the real page, polling
+  once a second: a 0.4s Researcher turn never lit at all, the opening
+  Architect sat dark for the first second of its turn, and the five-second
+  crew poll rebuilt every card, so a Builder lit for 12s restarted its rainbow
+  from red four times. The short turn is the one that bites in practice: a
+  Researcher answering from retrieval makes no model call (see
   *the Researcher's model is only consulted when retrieval is thin*), so on a
   goal the corpus answers well its light was the one that never came on. So
   `ACTIVITY` also keeps the run's recent turns -- numbered, kept after they
@@ -822,10 +827,9 @@ four the moment this file described the problem.
   only when something they draw has changed, which is why `setSeat` now
   repaints from the server after a refusal, as `setThinking` always did: the
   unconditional rebuild had been quietly putting a refused choice back.
-  Measured again after the change, same page and seats: every turn lit, the
-  0.4s Researcher included, each within one poll of its turn and of its end;
-  no rainbow restarted, and a page reloaded mid-run met the run through
-  `reattach()`.
+  Measured again after the change: every turn lit, the 0.4s Researcher
+  included, each within one poll of its turn and of its end, and a page
+  reloaded mid-run met the run through `reattach()`.
   **The embedder card has a light of its own, read off a meter rather than
   inferred from who asked.** `EMBEDDER_ACTIVITY` (`control.py`) is marked by
   `_embedder_at_work` on the only two places the model does anything --
@@ -841,10 +845,9 @@ four the moment this file described the problem.
   hold differs from a seat's on purpose: lit while working, and for
   `SEAT_MIN_LIT_MS` past the last reply that showed work, because an index is
   a string of encodes with a store write between each and a light that went
-  out in every gap would flicker. Measured on 2026-09-13 through the same
-  page, a fresh five-document corpus: ten spells of work, from a 4.68s corpus
-  phase down to a 7ms query, every one lit and no light without work under it,
-  the corpus phase reading as one unbroken light across its six spells.
+  out in every gap would flicker. Measured on 2026-09-13, a fresh
+  five-document corpus: ten spells of work, from a 4.68s corpus phase down to
+  a 7ms query, every one lit and no light without work under it.
 - **The emergency stop is cooperative, and the recovery is the point.**
   `RUN_CONTROL` (`control.py`) is a process-global flag, not a state field: the
   graph compiles without a checkpointer, so nothing outside a node can write
@@ -885,18 +888,18 @@ four the moment this file described the problem.
   same lock. So whoever holds it either sees a live run and hands it the exit,
   or sees none and takes the exit itself — exactly one, never neither. Claiming
   the exit after the stop lost it outright: the stop is what sends the run to
-  its teardown, a run at a superstep boundary gets there in microseconds, it
-  read the flag unset and declined to request the shutdown — correctly, on what
-  it could see — and by the time the flag was set there was no run left to
-  honour it. Nothing set `_shutdown_requested` at all, so the X did not shut
-  the server down. `rpc_stop_run` has the same shape and now guards the same
+  its teardown, a run at a superstep boundary gets there in microseconds, and
+  it read the flag unset and declined to request the shutdown — correctly, on
+  what it could see. Nothing set `_shutdown_requested` at all, so the X did
+  not shut the server down. `rpc_stop_run` has the same shape and now guards
+  the same
   way, or it pins `stopping` True on a run that has already ended.
 - **The console confirms the exit by the server's silence, never by the
   reply.** The reply to `shutdown` says the exit was *asked for*, and an exit
   can be lost after it is asked for, so `waitForExit` polls until the socket
   is dead — on both branches, including the one with nothing in flight, which
-  used to print "The server has stopped" the instant the reply landed and read
-  identically whether the process went or stayed. The probe is a bare `fetch`
+  used to print "The server has stopped" the instant the reply landed. The
+  probe is a bare `fetch`
   rather than `rpc()`, since only the fetch failing is evidence; `rpc()` throws
   on an ordinary error reply too. When the wait runs out it says the server is
   still running instead of leaving "Closing…" over a live process.
@@ -915,9 +918,8 @@ four the moment this file described the problem.
   the run, but is checked **between
   graph supersteps** — a node in flight never reaches a superstep boundary, so
   it cannot end a hung node. That gap is the whole reason for the other two:
-  before them a stalled seat hung a run indefinitely while the console still
-  named the *previous* node as current, and `_SeatLLM` recorded nothing because
-  a hang raises nothing.
+  before them a stalled seat hung a run indefinitely, and `_SeatLLM` recorded
+  nothing because a hang raises nothing.
 - **A command's timeout is a budget, not a verdict.** `terminal_execute`
   defaulted to 30 seconds while `run_tests` got 600, and `BUILDER_TOOLS`
   offered only `command` -- so the Builder could not raise it and was never
@@ -940,9 +942,8 @@ four the moment this file described the problem.
   `()`.** It was `shell=True` behind a whitelist of permitted characters, and
   the whitelist refused the ordinary way to write a one-liner: `python -c
   "import x; print(x.y)"` trips on `;` `(` `)`, as does any path containing
-  parentheses -- and this project has those
-  (`examples/filter_band_pass_(40_60_hz).png`), so a runnable file named that
-  way could never be verified and would sit in `failed_verification` forever.
+  parentheses, so a runnable file named that way could never be verified and
+  would sit in `failed_verification` forever.
   Meanwhile the filter admitted a bare `rm -rf /` without complaint: it never
   guarded against a destructive command, only against chaining one onto
   another. The command is now `shlex.split` into an argv list and run
@@ -955,10 +956,10 @@ four the moment this file described the problem.
   the program as the literal argument `|`, which is worse than a refusal: the
   Builder reads the strange result as the command failing and repairs the wrong
   thing. `SHELL_OPERATORS` now refuses an operator that stands alone in argv
-  and says which one it was (`_shell_operator_error`). The measured case:
+  and says which one it was (`_shell_operator_error`): measured,
   `wc -l notes.md && tail -50 notes.md` gave `wc` the arguments `&&`, `tail`
-  and `-50` and came back `wc: invalid option -- '5'`, never having counted the
-  file it was handed, with nothing in the message naming the chain.
+  and `-50` and came back `wc: invalid option -- '5'`, naming the chain
+  nowhere.
   **This is not the character whitelist coming back**, and the difference is
   where it runs: the old filter scanned the raw string and refused
   `python -c "import x; print(y)"` over a `;` that was never syntax, while this
@@ -969,10 +970,9 @@ four the moment this file described the problem.
   the canary file, not the rejection. Two things follow from matching tokens.
   Only a *spaced* operator is caught: `echo hi; rm -rf /` splits to
   `['echo', 'hi;', ...]`, so that `;` rides on `hi`, stays inert, and is what
-  the canary test still pins -- this catches the shapes a caller writes on
-  purpose, not every shape that exists. And a literal `&&` can no longer be
-  passed as an argument even quoted, since `shlex` leaves the two
-  indistinguishable; nothing here needs that. Redirection is answered with
+  the canary test still pins. And a literal `&&` can no longer be passed as an
+  argument even quoted, since `shlex` leaves the two indistinguishable;
+  nothing here needs that. Redirection is answered with
   `filesystem_write`, the way `cd` is answered with `cwd`, while chaining has
   no replacement and is not given a fake one.
   **A redirect glued to its target is caught too** (`_GLUED_REDIRECT`):
@@ -998,26 +998,22 @@ four the moment this file described the problem.
   `_resolve_cwd` **before** the subprocess rather than left to raise: a missing
   directory raises the same `FileNotFoundError` a missing program does and
   would be answered `Command not found: 'python'`, naming the one thing that
-  was fine, while a `cwd` pointing at a file raises `NotADirectoryError` and
-  falls through to a bare errno string. A relative `cwd` resolves against the
-  project root, the base the filesystem tools already use, and `~` is not
-  expanded: there is no shell here, and a `cwd` that expanded what an argument
-  on the same line would not is a worse surprise than a refusal naming the
-  path.
-  **The schema was not enough on its own, which is measured rather than
-  assumed.** Re-running the same goal after `cwd` shipped, the Builder reached
-  for `cd there && ...` three times before using the argument that replaces
-  it, then used `cwd` on all eleven of its remaining terminal calls and never
-  went back. A description is consulted before the turn; an error is read at
-  the moment the mistake is made, so `_missing_program_error` names the
-  replacement in the `FileNotFoundError` path. Only the `cd` family gets one:
-  `export` and `source` are equally builtins with nothing here to replace
-  them, so they get the fact that ends the retry instead of an alternative
-  that does not exist. And the report line carries `[cwd=...]`, because the
-  Architect rules on that report and `find . -type f -> ok` names no
-  directory -- once the Builder passes `cwd`, the command alone stopped
-  locating anything, since the same relative command means a different thing
-  in every directory it could have run in.
+  was fine. A relative `cwd` resolves against the project root, the base the
+  filesystem tools already use, and `~` is not expanded: there is no shell
+  here, and a `cwd` that expanded what an argument on the same line would not
+  is a worse surprise than a refusal naming the path.
+  **The schema was not enough on its own.** Re-running the same goal after
+  `cwd` shipped, the Builder reached for `cd there && ...` three times before
+  using the argument that replaces it, then used `cwd` on all eleven of its
+  remaining terminal calls: a description is consulted before the turn, while
+  an error is read at the moment the mistake is made, so
+  `_missing_program_error` names the replacement in the `FileNotFoundError`
+  path. Only the `cd` family gets one: `export` and `source` are equally
+  builtins with nothing here to replace them, so they get the fact that ends
+  the retry instead of an alternative that does not exist. And the report line
+  carries `[cwd=...]`, because the Architect rules on that report and the same
+  relative command means a different thing in every directory it could have
+  run in.
   A failed line also says why (`_failure_reason`): eleven of forty-seven
   calls on the 2026-09-10 run read only `failed`, eight of them correct
   refusals of shell syntax. That run is also why `prompts/builder.txt` names
@@ -1082,18 +1078,16 @@ four the moment this file described the problem.
   abandoned worker would hold up interpreter shutdown.
 - **A document is embedded in chunks, because the model's window is 256
   tokens and silence is how it says so.** `add_document` used to embed a whole
-  file in one `encode()` call while `MAX_INDEXABLE_BYTES` then allowed 100 KB,
-  so everything past roughly the first thousand characters was discarded --
-  without an error, a warning, or a counter that moved. Measured before the
-  fix: **73 of 77 documents truncated, 224,809 tokens present and 19,147
-  embedded, 91.5% of the corpus unreachable by search**, with the vector for
-  all 46,094 characters of `CLAUDE.md` bit-identical (cosine 1.000000) to the
-  vector for its first 1,000. Two failures followed and neither announces
-  itself. Retrieval acquired a **length bias**: a short file is fully
-  represented while a long one is represented by its preamble, so the file
-  that answers the query loses to a shorter one that merely mentions it. And
-  scores sat low enough that plan-shaped queries fell under the relevance gate
-  in `_gather_research`, discarding retrieval and sending the run to the
+  file in one `encode()` call, so everything past roughly the first thousand
+  characters was discarded -- without an error, a warning, or a counter that
+  moved. Measured before the fix: **73 of 77 documents truncated, 91.5% of the
+  corpus unreachable by search**, with the vector for all 46,094 characters of
+  `CLAUDE.md` bit-identical to the vector for its first 1,000. Two failures
+  followed and neither announces itself. Retrieval acquired a **length bias**:
+  a short file is fully represented while a long one is represented by its
+  preamble, so the file that answers the query loses to a shorter one that
+  merely mentions it. And scores sat low enough that plan-shaped queries fell
+  under the relevance gate in `_gather_research`, sending the run to the
   Researcher's model -- the loop *"A silent Researcher is not research"*
   already describes. After chunking, the same ten queries average **+0.162**
   and none falls under the gate.
@@ -1150,12 +1144,12 @@ four the moment this file described the problem.
   all real terms and no stopword token remains in the graph.
   **That claim expired once, and the way it expired is the thing to remember.**
   A hand-audited list is audited against a *vocabulary*, and this corpus's
-  vocabulary kept growing -- largely through prose written into this very file.
+  vocabulary keeps moving -- largely through prose written into this very file.
   By 2026-09-09 `Tests`, `Measured` and `System` were the 6th, 8th and 10th
-  best-connected entities: the original failure exactly, one vocabulary later.
-  `Measured` is the sharpest case, because CLAUDE.md opens sentences with it
-  twenty-nine times, so the prose recording these measurements was minting the
-  entity. Thirty tokens were added and the claim holds again.
+  best-connected entities: the original failure exactly, one vocabulary later,
+  and `Measured` is the sharpest case, because the prose recording these
+  measurements was minting the entity. Thirty tokens were added and the claim
+  holds again.
   The audit that chose them is worth repeating rather than re-deriving. For
   every candidate, count the capitals that **position does not explain** --
   not at a line start, not after a full stop, not the first cell of a table
@@ -1163,15 +1157,13 @@ four the moment this file described the problem.
   same heuristic this bullet rejects below, used the only way it is sound: to
   *nominate* candidates for a human to rule on, never to filter. Two
   nominations were refused on exactly that reading, and they are why this
-  stays a hand audit. It moved again on 2026-09-12: `Reported` and
-  `Computed` crossed the four-document floor at zero free capitals while prose
-  was being written about what a phase reports, and hours later `Cached`,
-  `Complete`, `Convert` and `Dimension` did the same from the numpy docstrings
-  of a module a Builder run wrote into `spectral_graph/`, with `Naming`
-  following from a docstring about `git_dwell`. The guard caught each before
-  the commit, which is what it is for, and the lesson past the tokens is that
-  **a run that writes code writes docstrings, and docstrings are where the
-  forced capitals live.** Four rulings from that round are worth keeping.
+  stays a hand audit. It moved again on 2026-09-12, when `Reported` and
+  `Computed` crossed the four-document floor at zero free capitals from prose
+  about what a phase reports, and `Cached`, `Complete`, `Convert`,
+  `Dimension` and `Naming` did the same from the numpy docstrings of a module
+  a Builder run wrote into `spectral_graph/`: the lesson past the tokens is
+  that **a run that writes code writes docstrings, and docstrings are where
+  the forced capitals live.** Four rulings from that round are worth keeping.
   `Complete` goes on the list although *complete graph* is a real term in the
   spectral half of this project, because the term is the bigram and the entity
   is the bare word -- which appears with a chosen capital nowhere in the
@@ -1185,18 +1177,14 @@ four the moment this file described the problem.
   before trusting the list again; it is a claim about a vocabulary, and
   vocabularies move.
   **On 2026-09-19 it moved by subtraction, which is the direction nobody
-  watches.** Every previous movement came from text arriving -- prose written
-  into this file, docstrings written by a run. This one came from deleting
-  `examples/`: the seventeen Fourier and spectral demo files went, and with
-  them the documents anchoring `Spectral`, which fell out of the top twenty
-  and was replaced there by `BUILDER_DEADLINE_SECONDS` -- a real constant that
-  had simply been outranked. In the same stroke `Nodes` and `Spectrum` crossed
-  the four-document floor at zero free capitals, because removing files
-  changes which *remaining* docstrings are a large enough share of the corpus
-  to matter. So the vocabulary this list is audited against moves when
-  documents leave, not only when they arrive, and a deletion needs the count
-  re-run exactly as an addition does. `Spectral` stays out of
-  `ENTITY_STOPWORDS` throughout: it lost rank, not its two free capitals.
+  watches.** Deleting `examples/` took the documents anchoring `Spectral` with
+  it, so it fell out of the top twenty and `BUILDER_DEADLINE_SECONDS` -- a
+  real constant that had simply been outranked -- replaced it, while `Nodes`
+  and `Spectrum` crossed the four-document floor at zero free capitals,
+  because removing files changes which *remaining* docstrings are a large
+  enough share of the corpus to matter. A deletion needs the count re-run
+  exactly as an addition does. `Spectral` stays out of `ENTITY_STOPWORDS`
+  throughout: it lost rank, not its two free capitals.
   **The obvious alternative was built, measured and rejected.** Dropping a
   token that only ever appears where a capital is forced (line start, after a
   full stop) removes the same noise and severs real edges doing it: `Planner`
@@ -1239,14 +1227,12 @@ four the moment this file described the problem.
   leaves behind exactly what was asked to be removed.
   **What was missing was the act itself, and the button was the wrong place
   for it.** Both doors were right and nothing opened the creating one on a
-  fresh install: `install.sh`, two scripts and the console's Reindex button
-  were the only ways a corpus came into being, and missing all of them costs
-  nothing visible -- the search answers `no_corpus`, `_gather_research` falls
-  through to the Researcher's own model, and the run reports itself finished.
-  The same silence covers a corpus built once and drifting since, the
-  8-documents-against-a-walk-of-103 failure `corpus_staleness` was written
-  for. Both were left to an operator remembering to press something.
-  So `rpc_run_goal` calls `_index_the_project_before_the_run` after claiming
+  fresh install, which costs nothing visible -- the search answers
+  `no_corpus`, `_gather_research` falls through to the Researcher's own model,
+  and the run reports itself finished. The same silence covers a corpus built
+  once and drifting since, the 8-documents-against-a-walk-of-103 failure
+  `corpus_staleness` was written for. Both were left to an operator
+  remembering to press something. So `rpc_run_goal` calls `_index_the_project_before_the_run` after claiming
   the run lock, through `_kb_for_indexing`, on **every** run -- and there is
   no Reindex button and no `rpc_reindex` any more. A run is a request to
   search a corpus, which is what makes this an act of indexing rather than a
@@ -1255,12 +1241,11 @@ four the moment this file described the problem.
   (`_index_the_project_at_startup`), because a run is something the operator
   asks for and that left the state between runs unattended: the header reported
   drift it had no way to fix, and restarting the server did not clear it, since
-  starting up only *opens* the store. Seen on 2026-09-18 -- a commit added
-  `ollama_client.py` and excluded `experimental/`, the store was two days older
-  than both, and `stale: 1 not indexed, 1 not in the walk` survived every
-  restart with nothing to press. A standing verdict the operator cannot act on
-  is the credibility problem `corpus_health` measures every file's size twice
-  to avoid, one level up. Both phases share `_rebuild_the_corpus`, which
+  starting up only *opens* the store -- seen on 2026-09-18, where
+  `stale: 1 not indexed, 1 not in the walk` survived every restart with
+  nothing to press. A standing verdict the operator cannot act on is the
+  credibility problem `corpus_health` measures every file's size twice to
+  avoid, one level up. Both phases share `_rebuild_the_corpus`, which
   counts the walk before opening the creating door and classifies what the
   rebuild did, so the five outcomes are worded in one place;
   `_corpus_feed_line` takes a `when`, since "indexed before the run" is a lie
@@ -1287,12 +1272,11 @@ four the moment this file described the problem.
   for `_index_lock`.
   **Two consoles in one checkout are the same collision across processes, and
   `_claim_the_rebuild` is what stops it.** They share the store on disk and not
-  the lock in memory. The port stops the common case -- the server binds before
-  the index thread starts, so a second console on the same port never reaches
-  it
-  -- and stops nothing on `PORT=8081`. That shape was rare while a run was the
-  only thing that rebuilt, needing two servers *and* a goal started in each; a
-  phase that rebuilds the moment a console comes up makes it ordinary. So the
+  the lock in memory, and the port stops only the common case: a second
+  console on the same port never reaches the index thread, and nothing stops
+  one on `PORT=8081`. That shape was rare while a run was the only thing that
+  rebuilt; a phase that rebuilds the moment a console comes up makes it
+  ordinary. So the
   claim is an `flock` on `knowledge.lock`, beside the store and named after it,
   and a caller that cannot take it reports `busy_elsewhere` -- neither a
   failure nor a no-op, because the work is being done by somebody else. Three
@@ -1313,9 +1297,8 @@ four the moment this file described the problem.
   `_index_lock` alone: refusing to index because the claim could not be taken
   would turn a rare collision into a corpus nobody rebuilds. The relevance
   floor is still measured by the first run, since
-  `_calibrate_the_floor_before_the_run` writes into the run feed; a corpus
-  this phase has just finished makes that a matter of seconds. Five decisions
-  in it are not interchangeable with the obvious alternatives.
+  `_calibrate_the_floor_before_the_run` writes into the run feed. Five
+  decisions in it are not interchangeable with the obvious alternatives.
   *It rebuilds every time rather than only when the corpus is missing*, which
   is affordable because `index_project_files` keeps the vectors of every
   document whose text still hashes to what the store holds -- 52.0s to
@@ -1339,10 +1322,8 @@ four the moment this file described the problem.
   that a line on every run is a line nobody reads, and that was wrong in a way
   only an operator could see: a rebuild that re-embeds nothing takes ~0.1s and
   does not load the model, so silence is exactly what the phase not running
-  looks like -- the console mentioned the corpus on the run that built it and
-  never again, and on 2026-09-12 that read as no embedding happening at all.
-  Same failure as a `#run-live` that only counted seconds: a run that did the
-  work and a run that skipped it must not look identical. `disabled` is the one
+  looks like. A run that did the work and a run that skipped it must not look
+  identical. `disabled` is the one
   state that still says nothing, because it is a machine-level setting the
   header already reports and the one state where the phase really did not run.
   A discussion run still does it,
@@ -1397,8 +1378,8 @@ four the moment this file described the problem.
   lives at the project root and is not part of the installed distribution, so a
   top-level import would turn a missing diagnostic into a module that will not
   load at all from anywhere but the root. The result is cached against
-  `(nodes, edges)` because the console polls `stats()` every five seconds and
-  the eigendecomposition is ~44ms on a 920-node graph; that key is sound
+  `(nodes, edges)` because the console polls `stats()` every five seconds; that
+  key is sound
   because every mutation path here only adds (`add_document`) or zeroes
   (`clear`), and a re-add that moves neither count moves no structure either.
 - **`bottleneck()` has three verdicts, and the middle one is why it is worth
@@ -1425,8 +1406,8 @@ four the moment this file described the problem.
   an orphan" is what `connectivity()` already says. `tied_cuts` reports
   `mu_2 ~= mu_3`, meaning several equally narrow cuts and an arbitrary choice
   between them: measured on a three-topic corpus, the *split* alternates
-  between runs (99/198 and 97/200) while the conductance and the bridge
-  entities are identical across all 12. Without the flag a working diagnostic
+  between runs while the conductance and the bridge entities do not, across
+  all 12. Without the flag a working diagnostic
   reads as a broken one, and the tie is itself a finding -- three or more topic
   areas, not two. It is a separate RPC rather than part of `stats()`: an
   eigenvector plus a sweep over every edge is not something to put on a
@@ -1438,8 +1419,8 @@ four the moment this file described the problem.
   bipartite document/entity graph groups documents with the entities that
   define them -- so a cluster reads as a topic and `top_entities` names it.
   This is the whole-corpus map `neighborhood()` cannot give.
-  The proposal's weak point was `k`, and it is not wired straight through.
-  The architecture benchmark measured the eigengap heuristic
+  The weak point is `k`, and it is not wired straight through: the
+  architecture benchmark measured the eigengap heuristic
   wrong on 3 of 8 architectures, k = 10 for a barbell whose answer is 2, and it
   always returns *some* k -- so on a corpus with no topics it invents one, and
   clusters shown without that caveat are a fabricated map. What rescues it is
@@ -1492,9 +1473,9 @@ four the moment this file described the problem.
   **This used to rank by distance in a spectral embedding, and the measurement
   retired that.** It returned 33,060 candidates of which **67% sat at distance
   exactly 0.0000 with neighbourhood overlap 1.00** -- its own strongest
-  evidence -- topped by `['LEGAL', 'Virginia']`. Those are pendant collisions:
-  two entities each mentioned by the same single document are structurally
-  identical by construction, and 60% of this corpus's entities have degree 1.
+  evidence. Those are pendant collisions: two entities each mentioned by the
+  same single document are structurally identical by construction, and 60% of
+  this corpus's entities have degree 1.
   The true duplicates -- `Builder`/`Builders` and all thirty case variants --
   were **not candidates at any rank**. Graded against ground truth, spectral
   distance scored 0% precision and 0% recall; so did Jaccard, and so did
@@ -1507,7 +1488,7 @@ four the moment this file described the problem.
   Jaccard kept beside it so the disagreement stays visible. *And structure
   cannot generate candidates on a real corpus at all*: tightened as far as it
   goes -- Jaccard 1.00 with at least three shared documents -- the survivors
-  are collocations (`Oppenheim`/`Schafer`, `Nyquist`/`Frequency`,
+  are collocations (`Nyquist`/`Frequency`,
   `BUILDER_DEADLINE_SECONDS`/`NODE_DEADLINE_SECONDS`). The synthetic fixture
   that justified the structural signal assigns entities to documents **at
   random**, which makes an identical neighbourhood real evidence; a corpus is
@@ -1562,6 +1543,67 @@ four the moment this file described the problem.
   has to be Ollama's own CUDA 12 build, because Arch's `ollama-cuda` is built
   with CUDA 13 and finds no card at all there; `cuda-embed-ollama.sh` installs
   it, and `install.sh` runs that script.
+- **A local seat is told to put every layer on the cards, and only one model is
+  ever on them.** Two separate defects with one cause: the cards hold 6 GB
+  between them and every model here is bigger than either card, so nothing
+  about placement can be left to an estimate.
+  *The seat half.* `get_llm` built `ChatOllama` with no options at all, so
+  every locally-run seat took the daemon's own estimate -- the same estimate
+  `OLLAMA_EMBED_OPTIONS` was written to overrule for the embedder, never
+  extended to seats. Measured 2026-09-20, dolphin-2.9.1-yi-1.5-9b Q4_K_M on two
+  3 GB GTX 1060s: with nothing sent, 37% CPU / 63% GPU at 1,940 + 1,981 MiB;
+  with `num_ctx` 2048, the same 37% at 1,892 + 1,919. The window is not what
+  decides it -- the estimator leaves ~1.1 GB unused on *each* card whatever it
+  is asked for, and runs a third of the model on the CPU beside 2.2 GB of idle
+  VRAM. With `num_gpu: 999`, 100% GPU at 2,968 + 2,975 MiB and the full
+  4,096-token window kept. So `OLLAMA_SEAT_GPU_OPTIONS` sends the layer count
+  and deliberately sends no window: a cap that never moved the split would only
+  cost the seat context.
+  *The exclusion half.* qwen3-embedding is 4.7 GB and a 9B seat is 5.3 GB,
+  which is ~10 GB of a 6 GB pool. The daemon's answer to being asked for both
+  is not a split but a failed load: the journal caught one at 07:02:10 on
+  2026-09-20, `timed out waiting for llama-server to start: context canceled`
+  after twenty seconds spent walking `ngl_per_device_high[1].n_layer` down from
+  48, trying to pack every layer onto card 1 because the embedder held card 0
+  -- which is what an operator sees as one card never being touched.
+  `GPU_ARBITER` (`control.py`) serializes the two, taken by `_SeatLLM.invoke`
+  and by `_needs_the_cards` around `_encode`.
+  Four decisions in it are not interchangeable with the obvious alternatives.
+  *It is a lock, not `EMBEDDER_ACTIVITY`*, which sits beside it and counts
+  overlapping work precisely because a meter exists to draw a light; the meter
+  is entered *inside* the arbiter, so a batch queued behind a seat reads as
+  waiting rather than working. *It evicts as well as serializing*
+  (`free_the_cards_for`): the daemon keeps a runner resident five minutes after
+  its last token, so one-at-a-time in time alone still leaves a finished seat
+  holding 3 GB against the embedder's load. A `:cloud` tag is never evicted
+  because it was never loaded, and the model about to be used is kept, so this
+  cannot evict its own caller. *It is reentrant*, because `_encode` reaches
+  `_load_embedder` and a plain lock would turn any future nesting into a run
+  hung for ever with no node on the stack. *And the wait is bounded*
+  (`GPU_WAIT_SECONDS`), then proceeds anyway: a seat call abandoned by
+  `_with_deadline` holds the arbiter until its own socket timeout, and a node
+  inheriting that queue position would stall behind a call nobody is reading.
+  Holding the cards never delays a stop -- `encode` asks `should_stop` between
+  batches, which a waiting embed reaches as readily as a working one.
+  *Where the two halves differ is the failure.* `num_gpu: 999` trades a
+  graceful split for a hard failure when the model does not fit, which is right
+  for the embedder -- a corpus built on a split placement has different vectors
+  -- and wrong for a seat, where it would fail the run. qwen3.8 is 17 GB and can
+  never fit. So a seat is built through a factory, and a failure
+  `_is_gpu_fit_failure` recognises (`cudaMalloc failed: out of memory`,
+  `unable to allocate CUDA0 buffer`, `timed out waiting for llama-server`)
+  rebuilds it unforced and retries once; every other failure is the seat's own
+  and is raised as before. The rebuild is sticky for that seat's life, or a
+  machine that genuinely cannot run the model pays a fresh load per call and
+  still fails -- but a seat is built per node turn, so the forced attempt comes
+  back next turn, which is right, since what usually blocked it was a model
+  since evicted. The bound belt is carried across the rebuild: the Builder is
+  mid-turn, and a seat rebuilt without its tools cannot finish one.
+  Measured end to end on 2026-09-20: seat alone at 2,958 + 2,975 MiB, an embed
+  evicting it and taking 2,400 + 2,931, the next seat call taking them back at
+  2,958 + 2,975 -- one model resident throughout, 100% GPU, ~6s a handover. And
+  qwen3.8 forced, failing, rebuilding unforced and answering at 98% CPU in
+  70.5s rather than failing the run.
 - **There is exactly one embedding model, and a corpus belongs to it.**
   `EMBEDDING_MODEL_NAME` is `qwen3-embedding:latest`, served by the local
   Ollama daemon, and there is no switch: the console's embedder card reports
@@ -1602,10 +1644,9 @@ four the moment this file described the problem.
   reads each page by **link density plus block length**: a nav strip is short
   and almost all anchor text, an article is long and almost none, and a block
   is dropped only when *both* tests fail it — headings are exempt from the
-  length test, being short by nature. It reports `kept`/`dropped`/`fell_back`
+  length test, being short by nature. It reports `kept`/`dropped`/`fell_back`,
   because an extractor that cannot be graded would be the one unmeasured link
-  in a chain where the floor, the chunker and the duplicate scan were all
-  tuned against printed numbers.
+  in a chain tuned against printed numbers throughout.
   Then `select_pages` decides what is *embedded*, which the engine's rank
   deliberately does not. Every fetched page is scored with `BM25Index` against
   the goal and kept only above a **ratio of the best page's score** — never an
@@ -1640,11 +1681,11 @@ four the moment this file described the problem.
   each further request prolongs the block.
   **It is per-run opt-in, default off** (`research_web`, or the console's
   *research online* box) -- set by the caller and never by an agent, exactly as
-  `expect_failures` is. That is measured rather than cautious. Whether a page
-  earns a place cannot be decided from the goal text, and three gates were
-  built and graded against 13 hand-labelled pages from two real runs to find
-  out -- ranking fetched pages against the project's own documents, skipping
-  the phase when the corpus already answers the goal (backwards on the
+  `expect_failures` is. That is measured rather than cautious: three gates
+  that would decide a page's place from the goal text were built and graded
+  against 13 hand-labelled pages from two real runs, and all three failed --
+  ranking fetched pages against the project's own documents, skipping the
+  phase when the corpus already answers the goal (backwards on the
   measurement), and the relevance floor itself (3/13). No fourth threshold
   helps, and the lambda run is why: the *wrong* pages outscored the right ones
   on both instruments, 0.553-0.631 for AWS Lambda deployment guides against
@@ -1655,8 +1696,8 @@ four the moment this file described the problem.
   The cost of guessing wrong is not one bad run: a fetched page becomes a
   permanent corpus member indistinguishable from project knowledge, and after
   the 2026-09-11 run the five blogs it kept took every one of the top five
-  retrieval slots for that goal, shutting the project's own files out entirely.
-  `_research_online_before_the_run` carries the numbers.
+  retrieval slots for that goal. `_research_online_before_the_run` carries the
+  numbers.
   **It runs before the Architect opens, and that ordering is the design.**
   `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
   lock, after the corpus phase above and before `graph.stream`, so the corpus
@@ -1665,24 +1706,20 @@ four the moment this file described the problem.
   `_refuse_while_a_run_is_in_flight`; it is the only ordering that obeys it.
   Measured end to end on 2026-09-09: 12 pages read, 8 embedded, 174 passages,
   19.6s, and the Researcher then retrieved one of them at 0.74 -- comfortably
-  over the floor -- with its provenance header intact in the matched chunk.
+  over the floor.
   **It is handed the creating door unopened.** Storing a page is indexing, so
   `_kb_for_indexing` is the right door here -- but resolving it on the way
   *in*, before the phase knew whether it would run at all, left a corpus
   holding **nothing** behind every run that researched no pages, reporting
-  `empty` where the truth was `absent`. That is the *"no corpus exists until
-  someone indexes one"* rule failing on timing rather than on which door it
-  picked. `research_online` now takes a factory and calls it on the first page
-  that earns a place, once for the batch, pinned twice in
-  `test_corpus_absent.py`: through `rpc_run_goal` on a fresh machine, and on
-  the factory itself, which must be called never for an empty selection and
-  exactly once for a full one.
-  The phase reaches the Researcher through **the corpus and nothing else**.
-  There is deliberately no path by which a fetched page skips retrieval: it is
-  embedded, and the Researcher finds it with the same search, the same hybrid
-  re-rank and the same relevance floor as everything else. A page fetched for a
-  goal that cannot be retrieved for that goal should not reach the Builder on
-  the strength of having been fetched.
+  `empty` where the truth was `absent`. `research_online` now takes a factory
+  and calls it on the first page that earns a place, once for the batch,
+  pinned twice in `test_corpus_absent.py`: through `rpc_run_goal` on a fresh
+  machine, and on the factory itself, which must be called never for an empty
+  selection and exactly once for a full one.
+  The phase reaches the Researcher through **the corpus and nothing else**:
+  there is deliberately no path by which a fetched page skips retrieval, so a
+  page fetched for a goal that cannot be retrieved for that goal does not
+  reach the Builder on the strength of having been fetched.
   Every failure is swallowed into the report and none of them stops the run --
   a goal the web cannot answer, an engine that is down, a machine with no
   network. The feed line words the empty outcomes apart, because "switched
@@ -1692,12 +1729,11 @@ four the moment this file described the problem.
   **The suite must never run this.** `tests/conftest.py` switches it off for
   every test, the same way and for the same reason it forces `StubLLM`.
   Without that, every test starting a run fetched a dozen live pages and
-  embedded them: it took the suite from 28s to 138s, broke a stop test whose
-  five-second wait had been generous, and wrote **31 web pages into the
-  developer's own corpus** from goals like `"Do a thing"` and `"a long job"` --
-  Bible verses and project-management blogs, indexed as project knowledge.
-  `test_web_research.py` turns it back on and answers every request from a
-  `MockTransport`.
+  embedded them: the suite went from 28s to 138s, a stop test whose
+  five-second wait had been generous broke, and **31 web pages** from goals
+  like `"Do a thing"` landed in the developer's own corpus as project
+  knowledge. `test_web_research.py` turns it back on and answers every request
+  from a `MockTransport`.
 - **A fetched web page is a retrieval source, not knowledge-graph material.**
   `add_document` skips entity extraction for anything under `WEB_RESEARCH_DIR`
   (`_is_web_document`), decided from the **path** and never from the call site
@@ -1708,10 +1744,9 @@ four the moment this file described the problem.
   and numpy docstrings where the forced capitals are `Returns`, `Every`,
   `False`. Web prose opens sentences with a different vocabulary entirely.
   Measured on 2026-09-09, after a handful of runs: 15 fetched pages had minted
-  **551 entities no project document mentions -- 19% of the whole graph, 36.7
-  per page** -- `Although`, `Afterward`, `Altogether`, `Again`, `Accessed`.
-  Skipping them took the graph from 2,830 entities to 2,285 and duplicate
-  candidates from 205 to 171. The page is still chunked, embedded and fully
+  **551 entities no project document mentions -- 19% of the whole graph** --
+  `Although`, `Afterward`, `Again`, `Accessed`. Skipping them took the graph
+  from 2,830 entities to 2,285. The page is still chunked, embedded and fully
   retrievable; it simply stops voting on what the entities of this project are.
   The side effect is that such a page has no edges and is therefore an isolated
   node -- which is exactly the symptom `connectivity()` exists to detect, and
@@ -1723,11 +1758,10 @@ four the moment this file described the problem.
   `.txt` and `.rst`, so `frontend/index.html` -- the console itself -- could
   not be retrieved, and asked about the Corpus tab a discussion Builder
   proposed changes to "a React/Vue/Angular component" the project does not
-  have. Measured on 2026-09-12 by embedding that file's passages against five
-  questions about the console: it would rank first on three -- "how does the
-  console reattach to a run after a page reload" at 0.644 against a best of
-  0.426 -- and lifts one question the corpus could not answer at all over the
-  relevance floor, 0.308 before and 0.383 after. So `.html`, `.js`, `.css`,
+  have. Measured on 2026-09-12 against five questions about the console: that
+  file would rank first on three, and lifts one the corpus could not answer at
+  all over the relevance floor, 0.308 before and 0.383 after. So `.html`,
+  `.js`, `.css`,
   `.sh`, `.toml`, `.yml`, `.yaml`, `.ini` and `.cfg` are indexed, and
   `INDEXABLE_SUFFIXES` follows; the upload controls now take their list from
   `status` rather than hard-coding one. None of them mints entities
@@ -1752,10 +1786,9 @@ four the moment this file described the problem.
 - **Deleting a file does not delete the document, and git will not tell you
   either.** Two separate gaps, and the 2026-09-09 cleanup hit both. Removing a
   file from disk leaves its chunks in the store answering searches with text
-  that is nowhere in the project until something rebuilds -- which is exactly
-  what `corpus_staleness`'s `extra` reports, and it did: three entries appeared
-  the moment the files were unlinked and cleared on the next reindex. So the
-  sequence is delete, reindex, check; not delete and assume.
+  that is nowhere in the project until something rebuilds -- which is what
+  `corpus_staleness`'s `extra` reports. So the sequence is delete, reindex,
+  check; not delete and assume.
   The second gap is why this paragraph exists at all: everything removed that
   day was **untracked**, so `git log` will never show it happened, and a
   future reader finding these paths in an old report has nothing else to
@@ -1774,9 +1807,8 @@ four the moment this file described the problem.
   corpus as indexed documents, because **the walk is a glob and not git**.
   Anything gitignored is still retrievable unless it is also in
   `PROJECT_INDEX_EXCLUDES`, so a transient artifact that outlives its run does
-  not merely take up disk -- it answers questions. The corpus went from 122
-  documents to 108 on the reindex that followed. `reports/diagnostics/` is now
-  in `PROJECT_INDEX_EXCLUDES`, because deleting the sweeps fixed the afternoon
+  not merely take up disk -- it answers questions. It is in
+  `PROJECT_INDEX_EXCLUDES` now, because deleting the sweeps fixed the afternoon
   and not the next `diagnose_seats.py` run; the deliberate `reports/*.md`
   beside them stay indexed, and the test asserts both halves through the walk.
 - **The corpus rots in silence, so something has to compare it against the
@@ -1784,14 +1816,14 @@ four the moment this file described the problem.
   on `rag_stats` because the console header is where it will actually be seen.
   It exists because of a failure with no symptom at all: measured here on
   2026-09-09, the store held **8 documents, all of them uploads, against a walk
-  offering 103**. Every project query therefore scored under
-  the relevance floor -- `BUILDER_DEADLINE_SECONDS` returned an
-  unrelated upload at 0.284 -- so `_gather_research` discarded retrieval and
-  fell through to the Researcher's seat on *every* run, which is the
-  step-burning loop described above. Nothing reported it. `rag_stats` said
-  `indexed`, every counter was non-zero and consistent with the others, and the
-  full suite passed. The only way to see it was to put two numbers side by side
-  that nobody had ever compared.
+  offering 103**. Every project query therefore scored under the relevance
+  floor -- `BUILDER_DEADLINE_SECONDS` returned an unrelated upload at 0.284 --
+  so `_gather_research` discarded retrieval and fell through to the
+  Researcher's seat on *every* run, which is the step-burning loop described
+  above. Nothing reported it: `rag_stats` said `indexed`, every counter was
+  non-zero and consistent with the others, and the full suite passed. The only
+  way to see it was to put two numbers side by side that nobody had ever
+  compared.
   Three states, and they are not one request. `missing` is in the walk and not
   in the corpus -- work written since the last reindex. `extra` is in the
   corpus and not in the walk -- a file deleted or renamed, whose text is
@@ -1808,8 +1840,8 @@ four the moment this file described the problem.
   an accusation -- an indexable file excluded reads as `extra`, a skipped one
   included as `missing` -- and one standing false accusation teaches the
   operator to ignore the whole signal.
-  It lives in its own module because writing it inside `graphrag_server` pushed
-  that file from 98,920 characters to 104,582, past `MAX_INDEXABLE_BYTES`: the
+  It lives in its own module because writing it inside `graphrag_server`
+  pushed that file past `MAX_INDEXABLE_BYTES`: the
   module that defines the corpus would have been dropped *from* the corpus at
   the next reindex, silently, as the direct result of adding the check meant to
   catch exactly that. That is why it is a separate module and stays one.
@@ -1823,15 +1855,13 @@ four the moment this file described the problem.
   chunking ended that, and `search` collapsing chunks onto documents ended it
   again -- a document takes exactly one result slot however many chunks it
   holds, measured at 1 of 5 for CLAUDE.md, which carries 7.1% of all chunks.
-  What 100,000 still did was decide the project's shape: `corpus_health.py` is
-  a separate module because of it, `nodes.py` had reached 82% of it and this
-  file 99.99%, so the next paragraph written here would have silently cost the
-  project its own documentation. The ceiling is not unbounded, though, and the
-  reason is at the constant: `search` fills a window of chunks *before*
-  collapsing them, so a document large enough to fill that window with itself
-  starves every other source. `INDEXABLE_WARN_RATIO` now fails the suite at 80%
-  of the limit, because `oversized` only fires once a file is already being
-  skipped -- which is the point at which the only fix left is surgery.
+  What 100,000 still did was decide the project's shape, this file having
+  reached 99.99% of it. The ceiling is not unbounded, though, and the reason
+  is at the constant: `search` fills a window of chunks *before* collapsing
+  them, so a document large enough to fill that window with itself starves
+  every other source. `INDEXABLE_WARN_RATIO` now fails the suite at 80% of the
+  limit, because `oversized` only fires once a file is already being skipped
+  -- which is the point at which the only fix left is surgery.
   The walk is cached for `WALK_CACHE_SECONDS` since the console polls every
   five seconds; `forget_expected_documents` drops it, and
   `rpc_upload_document` calls it because an upload is the one writer that
@@ -1857,22 +1887,21 @@ four the moment this file described the problem.
   The layout runs in a Web Worker (`makeLayout`, the same function on the page
   thread if a worker cannot be made) with Barnes-Hut repulsion. On the page
   thread it compared every pair every frame -- 41.6ms a step on a 2,000-node
-  graph -- so steps were rationed and a full sweep got 60 of them and came out
-  balled up. Measured on 2026-09-18 on the same shape: 2.1ms a step, all 900
-  steps in 1.9s, none of it on the thread that paints.
+  graph against 2.1ms measured on 2026-09-18 -- so steps were rationed and a
+  full sweep got 60 of them and came out balled up.
   `makeLayout` is sent to the worker as its source text, so it must reach
   nothing outside itself.
 - **`query_graph` traverses undirected, and must.** Every edge in the knowledge
   graph runs **document -> entity**, so an entity has in-edges only and a
   *directed* walk from one reaches nothing. It traversed directed until
   2026-09-09 and returned the entity by itself -- `neighbors` of length 1 --
-  for every entity in the corpus: `Planner` has 21 edges and reported none, and
-  its real 2-hop neighbourhood is 614 nodes. That is the Researcher's
+  for every entity in the corpus: `Planner` has 21 edges and reported none,
+  against a real 2-hop neighbourhood of 614 nodes. That is the Researcher's
   `query_knowledge_graph` tool, so one half of retrieval answered every
   relationship question with "this term connects to nothing", which reads as a
   finding rather than as a broken traversal. `neighborhood` already took the
-  undirected view and carried the comment explaining why; this is the same fix,
-  arrived at late. Both now share `_resolve_node`, so the console and the
+  undirected view; this is the same fix, arrived at late. Both now share
+  `_resolve_node`, so the console and the
   Researcher cannot resolve an id differently.
 - Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
 - A reindex **rebuilds** rather than accumulates: it clears the graph and
@@ -1884,8 +1913,8 @@ four the moment this file described the problem.
   in the graph the rebuild cleared. Embedding is the whole cost here: measured
   warm on this project's 77 files and 1,618 chunks, 52.0s to re-embed
   everything and 0.09s when nothing changed, of which reading every file,
-  hashing it, fetching the store's metadata and rebuilding the entire entity
-  graph account for 0.1s. That is what makes a rebuild something every run can
+  hashing it and rebuilding the entire entity graph account for 0.1s. That is
+  what makes a rebuild something every run can
   do for itself instead of something a person has to remember.
 - **A corpus clear empties in place and must reach disk.** `clear()` deletes
   every Chroma id, *then* clears the graph — never the other way round, and it
@@ -1897,11 +1926,11 @@ four the moment this file described the problem.
   load-bearing, and `index_project_files` now ends with the same two lines for
   the same reason. It had exactly this hole: its `graph.clear()` and its prune
   of stale Chroma rows were persisted and invalidated only as a side effect of
-  `add_document`, so a reindex that added nothing — no matching files, or every
-  one of them oversized or unreadable — emptied the graph in memory, reported
-  `indexed: 0` and success, and left the old `knowledge_graph.json` for the
-  next process start to reload. The corpus it had just rebuilt came back. The
-  lexical index went the same way: built before the prune, it went on answering
+  `add_document`, so a reindex that added nothing emptied the graph in memory,
+  reported `indexed: 0` and success, and left the old `knowledge_graph.json`
+  for the next process start to reload -- the corpus it had just rebuilt came
+  back. The lexical index went the same way: built before the prune, it went
+  on answering
   with the rows the prune deleted. Both lines are unconditional there, since a
   reindex is the one operation after which that index must be rebuilt anyway.
   **The floor record goes with them**, and it is a third half rather than
@@ -1920,19 +1949,18 @@ four the moment this file described the problem.
   left the header reading `stale: 112 not indexed`, arithmetically right and
   useless. Staleness earns its place because a drifting corpus looks exactly
   like a healthy one; an empty corpus wears no such disguise -- it says so on
-  its own chip, it is what the operator asked for a second earlier, and the
-  only thing that acts on the accusation is the run that would rebuild the
-  corpus anyway. The counts stay, because they are the truth about this
-  instant, and the header names the state rather than counting to zero four
-  times.
+  its own chip, and the only thing that acts on the accusation is the run that
+  would rebuild the corpus anyway. The counts stay, because they are the truth
+  about this instant, and the header names the state rather than counting to
+  zero four times.
 - **An uploaded document is a file first and a document second, and that
   ordering is the whole design.** `store_uploaded_document` writes the upload
   under `uploads/` and only then calls `add_document`. The corpus is a function
   of what is on disk: `index_project_files` clears the graph and prunes every
   stored row whose document is not in the walk, so a document embedded straight
   into the store and nowhere else survives exactly until the next reindex,
-  which then deletes it **silently**, in a pass that reports success and a file
-  count that looks right. Writing the file is what puts an upload *inside* the
+  which then deletes it **silently**, in a pass that reports success. Writing
+  the file is what puts an upload *inside* the
   rebuild instead of underneath it, which is why `uploads/` must stay out of
   `PROJECT_INDEX_EXCLUDES` — a new entry that merely contains that string would
   end every upload one reindex later, and `test_uploads.py` checks it through
@@ -1942,8 +1970,7 @@ four the moment this file described the problem.
   Every refusal is a `ValueError` naming what was wrong, because each
   alternative to refusing is worse than a failed upload and none of them
   announces itself. A `.pdf` has no text extractor here, so accepting one
-  embeds whatever its bytes decode to under a real filename — the fabricated
-  retrieval hit `search` was fixed to stop returning. A file over
+  embeds whatever its bytes decode to under a real filename. A file over
   `MAX_INDEXABLE_BYTES` is embedded now and skipped at every rebuild after, so
   the limit is applied here character for character against the walk's own
   test. A name carrying a path writes outside the directory the walk looks at,
@@ -1976,10 +2003,9 @@ four the moment this file described the problem.
   it returns no hits; a corpus midway through a rebuild returns whatever
   fraction of itself has been re-added. Either reads as
   `no_relevant_knowledge` and routes the run as though the knowledge base had
-  simply had nothing useful to say. Nothing raises and
-  nothing is logged, so the seat can never find out it was cut off and the
-  operator is told instead. The refusal names the goal, the way `rpc_shutdown`
-  does. `export_corpus` has
+  simply had nothing useful to say, with nothing raised and nothing logged, so
+  the seat can never find out it was cut off and the operator is told instead.
+  The refusal names the goal, the way `rpc_shutdown` does. `export_corpus` has
   no such guard: reading the corpus takes nothing away from the run using it.
   The upload is guarded for a *different* reason than the other two, and it is
   worth keeping straight: an upload only ever adds, so it could not manufacture
@@ -2006,6 +2032,44 @@ four the moment this file described the problem.
   ask" stays unknown, never "cannot think". A Claude reply that thought is a
   list of blocks, so nodes read replies through `_as_text`.
 - `__pycache__` directories should never be committed (they are removed from git in this repo).
+- **The container joins this machine's network rather than a network of its
+  own, and that is the whole configuration.** The console talks to three things
+  on the host -- the Ollama daemon on 127.0.0.1:11434, which serves every seat
+  and holds the one embedding model; the `postgres18` container Omarchy's
+  installer runs, published on 127.0.0.1:5432 and nowhere else, which is what
+  lets it use trust authentication; and the SearxNG `install.sh` runs on
+  127.0.0.1:8888. All three are loopback-only *on purpose*, so a bridged
+  container reaches none of them: the gateway address it would use is not an
+  address any of those ports is published on. `network_mode: host` makes the
+  URLs in `.env` mean the same thing inside the container as outside it, which
+  is why the database needs no configuration of its own. The alternative --
+  republishing PostgreSQL beyond loopback, or attaching both containers to a
+  network of their own and telling the daemon to listen past 127.0.0.1 -- pays
+  three separate costs to solve one problem, and the first of them gives up the
+  reason that database has no password.
+  **There are two bases and one configuration.** `Dockerfile` is Arch, because
+  this is an Arch/Omarchy project; `Dockerfile.kali` is Kali rolling, which
+  carries the same interpreter (3.14.7) and so resolves the same dependency
+  tree. They are separate files rather than one file with a base argument,
+  since they differ in package manager, package names and what their
+  repositories carry -- Kali packages no `gh`, which comes from GitHub's own
+  apt repository there, and without it `git_dwell` stops at `push`. Everything
+  downstream is shared, `docker/entrypoint.sh` verbatim, and compose keeps the
+  settings in one anchor so a service names only its Dockerfile and its tag.
+  The daemon itself stays on the host and is not containerized: it owns the
+  embedding model's placement on the GPU and holds the ollama.com credentials
+  the `:cloud` tags are proxied with. The image carries the console, its venv,
+  `git` and `gh` -- and the checkout arrives as a bind mount, because a corpus
+  is a function of what is on disk: `knowledge/`, the floor measured for it,
+  `runs/`, `uploads/`, `research/web/` and `projects/` all live in the tree,
+  and a container keeping them in its own layer would throw the corpus away on
+  every rebuild.
+  **`docker stop` is the console's exit button, not a kill.** SIGTERM's default
+  handler ends the process where it stands, and `rpc_run_goal` writes its
+  snapshot from a `finally` -- so the default would lose, on the one exit path
+  nobody watches, exactly the state a restarted console reattaches to.
+  `_exit_the_way_the_console_would` asks for the same exit the X asks for, so a
+  run in flight is stopped and the exit deferred to its own teardown.
 
 ## Troubleshooting
 
@@ -2015,6 +2079,7 @@ four the moment this file described the problem.
 - **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
 - **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
 - **The embedder is on the CPU, or embedding is slow** — Placement is the Ollama daemon's, and this project only reads it back: `ollama ps` shows how much of `qwen3-embedding:latest` the daemon left on the CPU. `journalctl -u ollama` reading `skipping CUDA device` means Arch's CUDA 13 build on a card it cannot drive: run `./cuda-embed-ollama.sh`, which installs Ollama's own CUDA 12 build and proves the model lands 100% on the GPU. Every layer is forced onto the cards (`OLLAMA_EMBED_OPTIONS`), so a load that does not fit errors instead of splitting: `nvidia-smi` shows what else holds the cards, and the next embed reloads the model once they are free.
+- **A local seat runs mostly on the CPU, or one card looks untouched** — `ollama ps` names the split and `nvidia-smi` the cards. A locally-run seat is sent `num_gpu` (`OLLAMA_SEAT_GPU_OPTIONS`), so `37%/63% CPU/GPU` on a model that should fit means the forced load failed and the seat rebuilt itself unforced — `journalctl -u ollama` names the allocation that did not fit. A model genuinely larger than the cards (qwen3.8 is 17 GB against 6 GB) is *meant* to read that way; that is the fallback working, not a fault. Two models resident at once means something reached the daemon around `GPU_ARBITER` — everything in this project embeds through `_encode` and calls seats through `_SeatLLM`, so the usual cause is another process, or `ollama run` in a second terminal.
 - **The header reads `stale: N not indexed` right after the console starts** -- Read the `[Corpus]` line in `/tmp/ambiguity-console.log`: it names each file that failed to index and why. The usual cause is a model load short of GPU memory while something else briefly held a card -- on 2026-09-18, the browser the launcher opens, drawing the whole knowledge graph on the default Graph tab while the startup rebuild loaded the model. So the Graph tab is not drawn while a rebuild or a run is in flight or the embedder is working (`graphHoldReason` in `frontend/index.html`, fed by `status.indexing` and `status.run_in_flight`); it empties the SVG, says why, and redraws itself once the hold lifts. `OllamaEmbedder.encode` retries a 5xx `OLLAMA_EMBED_LOAD_RETRIES` times for exactly that, and `add_document` embeds before it deletes, so a failure that outlasts the retries leaves the old document in place instead of removing it. The next run's rebuild re-embeds it.
 - **Online research finds nothing, or reports DuckDuckGo's bot check** — Check that `SEARXNG_URL` is in `.env`: `install.sh` runs a SearxNG and adds it only once the instance answers. `systemctl --user status ambiguity-searxng` and `journalctl --user -u ambiguity-searxng` show the container. An HTTP 403 means `json` is missing from the instance's `search.formats`. Port 8888 is also Jupyter's default: if something else holds it, set `SEARXNG_PORT` in `.env` and re-run the installer.
 - **`docker` says permission denied, or nothing answers on port 5432** — The database is the one Omarchy's own installer runs, the `postgres18` container, and nothing in the app reads its `DATABASE_URL`. `install.sh` adds you to the `docker` group, which applies only after a reboot; until then `docker` needs sudo (`sudo docker logs postgres18`). It also enables `docker.service`, because Omarchy enables only the socket, and without the service the container stays down after a reboot until something runs `docker`.
