@@ -286,6 +286,18 @@ def rpc_rag_stats(_: dict[str, Any]) -> dict[str, Any]:
             _run_progress.get("running") or _startup_index.get("running")
         ):
             report = {**report, "stale": False, "settling": True}
+        # An empty corpus is not a drifting one. Staleness is worth reporting
+        # because a corpus that has stopped matching the project looks exactly
+        # like one that has not -- every counter non-zero and consistent while
+        # retrieval quietly finds nothing. A corpus holding nothing wears no
+        # such disguise: `corpus: empty` is the header's own word for it, it is
+        # what Clear leaves behind by design, and "112 not indexed" restates
+        # that as an accusation the operator just created on purpose and cannot
+        # act on except by starting the run that would rebuild it anyway. The
+        # counts stay, as they do under `settling`, because they are the truth
+        # about this instant; only the verdict is withheld.
+        if report.get("stale") and stats["corpus"] == "empty":
+            report = {**report, "stale": False, "emptied": True}
         stats["staleness"] = report
     except Exception as exc:  # pragma: no cover - a walk that cannot run
         stats["staleness"] = {"stale": False, "unavailable": str(exc)}

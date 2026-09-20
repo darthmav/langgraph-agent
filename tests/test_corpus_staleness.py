@@ -184,6 +184,50 @@ def test_the_stale_verdict_is_withheld_while_a_run_is_in_flight(monkeypatch, tmp
     assert during["missing_count"] == 1
 
 
+def test_an_emptied_corpus_is_not_accused_of_drifting(monkeypatch, tmp_path):
+    """Clear leaves `empty`, and `empty` is not a verdict about the project.
+
+    Pressing Clear on this project left the header reading "stale: 112 not
+    indexed" -- the store held nothing, the walk offered 112, and the
+    comparison is arithmetically right and useless: it restates the state the
+    operator just asked for as an accusation, and the only thing that acts on
+    it is the run that would rebuild the corpus anyway. Staleness is worth
+    reporting precisely because a drifting corpus looks like a healthy one;
+    an empty corpus says so on its own chip. The counts stay, as they do under
+    `settling`.
+    """
+    import serve
+
+    root = _project(tmp_path, **{"a.md": "alpha", "b.md": "beta"})
+
+    class _KB:
+        graph = __import__("networkx").DiGraph()
+        def __init__(self, chunks):
+            self._chunks = chunks
+        def stats(self):
+            return {"total_documents": 0, "total_chunks": self._chunks,
+                    "total_nodes": 0, "total_edges": 0}
+
+    monkeypatch.setattr(serve, "corpus_staleness", lambda docs: corpus_staleness(docs, root, use_cache=False))
+    monkeypatch.setitem(serve._run_progress, "running", False)
+    monkeypatch.setitem(serve._startup_index, "running", False)
+
+    monkeypatch.setattr(serve, "_open_kb", lambda: _KB(0))
+    emptied = serve.rpc_rag_stats({})
+    assert emptied["corpus"] == "empty"
+    assert not emptied["staleness"]["stale"]
+    assert emptied["staleness"]["emptied"] is True
+    # Still the truth about this instant, as under `settling`.
+    assert emptied["staleness"]["missing_count"] == 2
+
+    # And an indexed corpus that has drifted is still accused: the suppression
+    # is about the empty state, not about the comparison.
+    monkeypatch.setattr(serve, "_open_kb", lambda: _KB(1))
+    drifted = serve.rpc_rag_stats({})
+    assert drifted["corpus"] == "indexed"
+    assert drifted["staleness"]["stale"] is True
+
+
 def test_seat_diagnostic_sweeps_are_not_indexed(tmp_path, monkeypatch):
     """Gitignored is not the same as unindexed: the walk is a glob, not git.
 

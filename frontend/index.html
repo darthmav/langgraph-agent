@@ -2440,9 +2440,14 @@ async function poll(quiet){
     // Four zeros read as a knowledge base that happens to be empty. When none
     // has been built there is nothing to count, and saying so is the honest
     // reading -- it is also the only one that tells the operator what to do.
+    // An emptied corpus is the same sentence with a different first clause:
+    // counting to zero four times says less than naming the state, and it is
+    // what the operator has just this second asked for by pressing Clear.
     const indexing = indexingChip(st);
     $("#stats").innerHTML = CORPUS === "absent"
       ? `<span class="nocorpus">no corpus &mdash; ${BUILDS_ON_RUN ? "a restart or the next run indexes the project" : "nothing indexed"}</span>`+indexing
+      : CORPUS === "empty"
+      ? `<span class="nocorpus">corpus empty &mdash; ${BUILDS_ON_RUN ? "a restart or the next run indexes the project" : "INDEX_PROJECT_BEFORE_RUN is off, so nothing will rebuild it"}</span>`+indexing
       : `<span>docs <b>${stats.total_documents}</b></span>`+
         `<span>chunks <b>${stats.total_chunks}</b></span>`+
         `<span>nodes <b>${stats.total_nodes}</b></span>`+

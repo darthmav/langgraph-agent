@@ -1941,6 +1941,29 @@ four the moment this file described the problem.
   lexical index went the same way: built before the prune, it went on answering
   with the rows the prune deleted. Both lines are unconditional there, since a
   reindex is the one operation after which that index must be rebuilt anyway.
+  **The floor record goes with them**, and it is a third half rather than
+  tidiness: a floor is measured on *these texts* under this embedding model, so
+  one outliving its corpus is a number about a corpus nobody can consult. Two
+  things read it afterwards --
+  `_calibrate_the_floor_before_the_run` treats a record's mere presence as
+  `known`, so the run rebuilding the corpus would never measure a floor for
+  what it built, and the console went on showing that floor over an empty
+  corpus. It is removed *after* both halves are actually empty, so a wipe that
+  raised leaves the corpus and its floor still agreeing, and `removed_floor`
+  says whether there was one.
+  **And what Clear leaves is `empty`, which is not a verdict about the
+  project.** `rag_stats` withheld the stale accusation on an emptied corpus as
+  of 2026-09-19, the way it already does under `settling`: pressing Clear here
+  left the header reading `stale: 112 not indexed`, which is arithmetically
+  right and useless. Staleness earns its place because a drifting corpus looks
+  exactly like a healthy one -- every counter non-zero and consistent while
+  retrieval quietly stops finding the project. An empty corpus wears no such
+  disguise; it says so on its own chip, it is what the operator asked for one
+  second earlier, and the only thing that acts on the accusation is the run
+  that would rebuild the corpus anyway. The counts stay, because they are the
+  truth about this instant, and the header now names the state rather than
+  counting to zero four times -- for the reason four zeros were replaced by
+  `no corpus` one state along.
 - **An uploaded document is a file first and a document second, and that
   ordering is the whole design.** `store_uploaded_document` writes the upload
   under `uploads/` and only then calls `add_document`. The corpus is a function
