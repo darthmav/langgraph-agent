@@ -138,6 +138,7 @@ def test_the_seat_dropdowns_offer_exactly_the_curated_models():
     assert serve.rpc_llm_options({}) == {"options": AGENT_LLM_OPTIONS}
     assert [o["model"] for o in AGENT_LLM_OPTIONS] == [
         "kimi-k3:cloud", "qwen3.5:397b-cloud", "qwen3.8:latest",
+        "hf.co/mradermacher/dolphin-2.9.1-yi-1.5-9b-GGUF:Q4_K_M",
     ]
 
 

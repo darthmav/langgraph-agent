@@ -16,6 +16,7 @@ import os
 import re
 import time
 import urllib.request
+from collections.abc import Callable
 from typing import Any, Literal, cast
 
 from dotenv import load_dotenv
@@ -78,6 +79,16 @@ AGENT_LLM_OPTIONS: list[dict[str, str]] = [
     {"label": "Qwen3.5 397B", "provider": "ollama", "model": "qwen3.5:397b-cloud",
      "group": "Ollama Cloud"},
     {"label": "Qwen3.8", "provider": "ollama", "model": "qwen3.8:latest",
+     "group": "Ollama (local)"},
+    # The only local tag here that fits these cards. qwen3.8 is 17 GB against
+    # 6 GB of VRAM and always takes the CPU fallback (see the seat-placement
+    # bullet in CLAUDE.md); this one is 5.3 GB and loads 100% on the GPU,
+    # measured 2026-09-20 at 2,958 + 2,975 MiB. It reports `completion` and
+    # **not** `tools`, the first offered model that does not, which is why
+    # `get_agent_status` reports tool support: a Builder cannot work without
+    # it, and the other three seats are offered no tools anyway.
+    {"label": "Dolphin 2.9.1 9B", "provider": "ollama",
+     "model": "hf.co/mradermacher/dolphin-2.9.1-yi-1.5-9b-GGUF:Q4_K_M",
      "group": "Ollama (local)"},
 ]
 
@@ -217,6 +228,116 @@ def _same_ollama_tag(a: str, b: str) -> bool:
     return full(a) == full(b)
 
 
+# Sent with every call to a seat the daemon runs locally, and with none it
+# proxies to ollama.com. `num_gpu` is llama.cpp's layer-offload count, and 999
+# means "every layer": the same lever `OLLAMA_EMBED_OPTIONS` pulls for the
+# embedder, which seats were never given.
+#
+# The daemon's own estimate is the problem, and it is not a context-window
+# problem. Measured on 2026-09-20, dolphin-2.9.1-yi-1.5-9b Q4_K_M on two 3 GB
+# GTX 1060s, one load per row:
+#
+#     options sent                      placement        card 0 + card 1
+#     (none -- what a seat got)         37% CPU/63% GPU  1940 + 1981 MiB
+#     num_ctx 2048                      37% CPU/63% GPU  1892 + 1919 MiB
+#     num_ctx 4096, num_gpu 999         100% GPU         2968 + 2975 MiB
+#
+# Shrinking the window moved nothing: the estimator leaves ~1.1 GB unused on
+# *each* card whatever it is asked for, and 37% of the model runs on the CPU
+# beside 2.2 GB of idle VRAM. Forced, the whole model lands on the cards at the
+# full 4,096-token window. No `num_ctx` is sent with it, because the window is
+# the seat's to want and the measurement says it was never what decided the
+# split -- a seat capped here would lose context for nothing.
+OLLAMA_SEAT_GPU_OPTIONS: dict[str, int] = {"num_gpu": 999}
+
+
+def is_local_ollama_model(model: str) -> bool:
+    """Whether this tag runs on the cards here, rather than at ollama.com.
+
+    A `:cloud` tag is proxied by the local daemon and holds no VRAM, so it
+    neither needs the GPU options nor competes for the cards. Spelled the same
+    way `get_agent_status` decides `remote`.
+    """
+    return not model.endswith((":cloud", "-cloud"))
+
+
+def unload_ollama_model(model: str) -> bool:
+    """Ask the daemon to drop `model` from VRAM now. False if it could not be asked.
+
+    `keep_alive: 0` with an empty prompt is Ollama's own spelling of an unload;
+    it returns once the runner is gone rather than scheduling it, which is what
+    makes it usable as "the cards are free from here on".
+    """
+    try:
+        request = urllib.request.Request(
+            f"{_ollama_base_url()}/api/generate",
+            data=json.dumps({"model": model, "keep_alive": 0}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=30.0):
+            return True
+    except Exception:
+        # An unload that fails costs a slower load, never a wrong answer, so
+        # nothing here raises: the caller is about to do its real work either
+        # way and a card it could not free is the state it was already in.
+        return False
+
+
+def free_the_cards_for(model: str) -> list[str]:
+    """Unload every locally-resident model but `model`; return what went.
+
+    Serializing the work in time is not enough on its own, which is the whole
+    reason this exists. The daemon keeps a runner resident for five minutes
+    after its last token, so a seat that finished its turn still holds ~3 GB of
+    a 6 GB pool while the embedder tries to load 4.7 GB beside it -- and the
+    loser of that is not slowed down but failed, as the 07:02:10 journal entry
+    shows. Evicting is what turns "one at a time" into "all of the cards".
+
+    A `:cloud` tag is never unloaded because it was never loaded, and the model
+    about to be used is kept so this cannot evict its own caller. Reload is the
+    price: ~5s for the embedder and ~25s for a 9B seat, paid once per handover
+    rather than once per call, since a model already alone on the cards finds
+    nothing here to evict.
+    """
+    try:
+        loaded = _ollama_ps()
+    except Exception:
+        return []
+    dropped = []
+    for entry in loaded:
+        tag = str(entry.get("name") or entry.get("model") or "")
+        if not tag or _same_ollama_tag(tag, model) or not is_local_ollama_model(tag):
+            continue
+        if unload_ollama_model(tag):
+            dropped.append(tag)
+    return dropped
+
+
+def _is_gpu_fit_failure(exc: Exception) -> bool:
+    """Whether this failure is the daemon refusing to fit a forced offload.
+
+    `num_gpu: 999` trades a graceful split for a hard failure where the model
+    does not fit, which is the right trade for the embedder -- a corpus built
+    on a split placement is a corpus with different vectors -- and the wrong
+    one for a seat, where it would fail the run outright. qwen3.8 is 17 GB
+    against 6 GB of cards and can never fit. So the shapes that mean "it did
+    not fit" are named, and the seat retries without forcing; every other
+    failure is the seat's real failure and is raised as it always was.
+    """
+    text = str(exc).lower()
+    return any(
+        mark in text
+        for mark in (
+            "out of memory",
+            "cudamalloc",
+            "unable to allocate",
+            "no available devices",
+            "timed out waiting for llama-server",
+            "unable to load model",
+        )
+    )
+
+
 # Why the last call to a seat failed, if it did. A key can be present and the
 # seat still unusable -- out of credits, expired, revoked, wrong workspace --
 # and only a real call finds that out. Recording the outcome here is what lets
@@ -258,18 +379,82 @@ class _SeatLLM:
 
     Transparent apart from `invoke`: every other attribute passes through to
     the wrapped model.
+
+    It is also the one place every seat call passes through, which is why the
+    cards are arbitrated here rather than in each node. A call takes
+    `GPU_ARBITER`, so no seat is talking to a model while the embedder is
+    working and no two seats are loading models at once; a locally-run tag
+    additionally evicts whatever else is resident, because the daemon holds a
+    finished runner for five minutes and two models do not fit in 6 GB.
+
+    `build` is kept beside the built model so a forced load that did not fit
+    can be rebuilt unforced -- the fallback that lets `num_gpu: 999` be the
+    default without making an oversized seat a failed run.
     """
 
-    def __init__(self, agent: str, inner: Any) -> None:
+    def __init__(
+        self,
+        agent: str,
+        inner: Any,
+        build: "Callable[[bool], Any] | None" = None,
+        *,
+        force_gpu: bool = True,
+        bound: "tuple[Any, dict[str, Any]] | None" = None,
+    ) -> None:
         self._agent = agent
         self._inner = inner
+        self._build = build
+        self._force_gpu = force_gpu
+        self._bound = bound
+
+    def _model_tag(self) -> str:
+        """The tag this seat calls, for the arbiter and the eviction."""
+        return str(getattr(self._inner, "model", "") or "")
+
+    def _unforce(self) -> bool:
+        """Rebuild this seat with the daemon choosing the split. False if it cannot.
+
+        Sticky: the seat stays unforced for the rest of its life rather than
+        paying a failed load per call. A seat is rebuilt per node turn, so the
+        forced attempt is retried on the next turn -- which is what should
+        happen, since the reason it did not fit is usually another model that
+        has since been evicted.
+        """
+        if self._build is None or not self._force_gpu:
+            return False
+        inner = self._build(False)
+        if self._bound is not None:
+            tools, kwargs = self._bound
+            bind = getattr(inner, "bind_tools", None)
+            if bind is None:
+                return False
+            inner = bind(tools, **kwargs)
+        self._inner = inner
+        self._force_gpu = False
+        return True
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            result = self._inner.invoke(*args, **kwargs)
-        except Exception as exc:
-            _seat_failures[self._agent] = _failure_reason(exc)
-            raise
+        from langgraph_agent.control import GPU_ARBITER
+
+        tag = self._model_tag()
+        local = bool(tag) and is_local_ollama_model(tag)
+        with GPU_ARBITER.exclusive(f"seat:{self._agent}"):
+            if local:
+                # Held inside the arbiter, so nothing loads into the gap
+                # between freeing the cards and using them.
+                free_the_cards_for(tag)
+            try:
+                result = self._inner.invoke(*args, **kwargs)
+            except Exception as exc:
+                if local and _is_gpu_fit_failure(exc) and self._unforce():
+                    try:
+                        result = self._inner.invoke(*args, **kwargs)
+                    except Exception as retried:
+                        _seat_failures[self._agent] = _failure_reason(retried)
+                        raise
+                else:
+                    _seat_failures[self._agent] = _failure_reason(exc)
+                    raise
         # A call that works clears an older failure, so a seat recovers on its
         # own once credits are topped up or the daemon comes back.
         _seat_failures.pop(self._agent, None)
@@ -284,11 +469,20 @@ class _SeatLLM:
         tools at all (`StubLLM`) raise AttributeError here on purpose, so a
         caller wanting the no-tools path catches AttributeError around the
         call itself -- `hasattr` is always True once this method exists.
+
+        The bound seat carries `build` and the tools forward, or an unforced
+        rebuild would come back without the belt the Builder is mid-turn with.
         """
         inner_bind = getattr(self._inner, "bind_tools", None)
         if inner_bind is None:
             raise AttributeError("bind_tools")
-        return _SeatLLM(self._agent, inner_bind(tools, **kwargs))
+        return _SeatLLM(
+            self._agent,
+            inner_bind(tools, **kwargs),
+            self._build,
+            force_gpu=self._force_gpu,
+            bound=(tools, kwargs),
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -384,6 +578,37 @@ def _openai_reasons(model: str) -> bool | None:
         return None
     reasons = (profile or {}).get("reasoning_output")
     return reasons if isinstance(reasons, bool) else None
+
+
+def tool_support(provider: str, model: str) -> tuple[bool | None, str]:
+    """Whether a model can call tools, and why it matters when it cannot.
+
+    Only the Builder is offered any (`BUILDER_TOOLS`), and it is the one seat
+    whose work *is* the tool calls: `files_changed` is appended only when a
+    write tool reports success, never from the model's prose. So a Builder on a
+    model without them reports in full and changes nothing -- the `StubLLM`
+    failure with a live seat behind it, which no chip in the console would
+    otherwise show, because the seat *is* live and every call *does* succeed.
+
+    It earns a place now because `AGENT_LLM_OPTIONS` offers its first such
+    model: dolphin reports `completion` alone, while every tag offered before
+    it reported `tools`. The daemon's answer is already cached by
+    `ollama_model_capabilities`, which `thinking_support` asks on the same poll,
+    so this costs no extra request.
+
+    `None` is "could not ask", kept apart from False for the reason
+    `thinking_support` keeps `unknown` apart from `never`: a daemon down for
+    thirty seconds must not read as four seats that lost a capability.
+    """
+    if provider == "ollama":
+        caps = ollama_model_capabilities(model)
+        if caps is None:
+            return None, ""
+        return ("tools" in caps), ""
+
+    # Anthropic and OpenAI reject a tool call at the API rather than silently
+    # ignoring it, so there is no quiet failure of this shape to warn about.
+    return True, ""
 
 
 def thinking_support(provider: str, model: str) -> tuple[ThinkingSupport, str]:
@@ -514,6 +739,7 @@ def get_llm(
     api_key: str | None = None,
     timeout: float | None = None,
     thinking: bool | None = None,
+    force_gpu: bool = True,
 ) -> Any:
     """Get an LLM instance.
 
@@ -527,6 +753,10 @@ def get_llm(
         timeout: Seconds one call may take; `LLM_TIMEOUT_SECONDS` if omitted.
                  Each provider spells this differently, hence the three
                  separate keyword names below.
+        force_gpu: Whether a locally-run Ollama tag is told to put every
+                   layer on the cards (`OLLAMA_SEAT_GPU_OPTIONS`). Ignored by
+                   every other provider and by `:cloud` tags. `_SeatLLM` turns
+                   it off to rebuild a seat whose forced load did not fit.
         thinking: Whether the model thinks before answering. `None` sends no
                   flag and leaves it to the model, which is what every call
                   did before the console could switch it. Pass a bool only for
@@ -559,12 +789,29 @@ def get_llm(
         # daemon's `thinking` field, so the reasoning is paid for and thrown
         # away. True keeps it in `additional_kwargs`, where the Builder's tool
         # loop hands it back to the model on the next turn.
+        tag = str(model or os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud"))
+
+        # A locally-run tag is told to put every layer on the cards; a
+        # `:cloud` tag is sent nothing, since the options would be forwarded
+        # to ollama.com to describe hardware that is not theirs. `force_gpu`
+        # is how `_SeatLLM` rebuilds this seat unforced after a load that did
+        # not fit -- see `_is_gpu_fit_failure`.
+        # None rather than a missing keyword: langchain_ollama builds the
+        # daemon's `options` from the fields that are not None, so the two are
+        # the same request and this one type-checks.
+        num_gpu = (
+            OLLAMA_SEAT_GPU_OPTIONS["num_gpu"]
+            if force_gpu and is_local_ollama_model(tag)
+            else None
+        )
+
         return ChatOllama(
-            model=str(model or os.getenv("OLLAMA_MODEL", "qwen3.5:397b-cloud")),
+            model=tag,
             temperature=temperature,
             base_url=base_url or _ollama_base_url(),
             client_kwargs={"timeout": timeout},
             reasoning=thinking,
+            num_gpu=num_gpu,
         )
 
     if provider == "anthropic":
@@ -696,17 +943,24 @@ def get_agent_llm(agent: AgentName, temperature: float = 0.1) -> Any:
         Builder    -> Ollama    qwen3.5:397b-cloud
     """
     seat = _resolve_seat(agent)
-    return _SeatLLM(
-        agent,
-        get_llm(
+
+    # The seat is built through a factory rather than once, so `_SeatLLM` can
+    # build it again unforced when a forced offload does not fit the cards.
+    # Everything but the placement is captured here, which is what keeps the
+    # rebuilt seat identical in every other respect -- same model, same
+    # thinking flag, same key.
+    def build(force_gpu: bool) -> Any:
+        return get_llm(
             provider=seat["provider"],  # type: ignore[arg-type]
             model=seat["model"],
             temperature=temperature,
             base_url=seat["base_url"],
             api_key=seat["api_key"],
             thinking=_thinking_for_call(agent),
-        ),
-    )
+            force_gpu=force_gpu,
+        )
+
+    return _SeatLLM(agent, build(True), build)
 
 
 def get_agent_model_info(agent: AgentName) -> dict[str, str]:
@@ -767,6 +1021,18 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
         "never": False,
     }.get(support)
 
+    # Reported for every seat, but only the Builder is warned: the other three
+    # are offered no tools at all, so a model without them is the right seat
+    # for them rather than a defect. False and None are kept apart -- a daemon
+    # that could not be asked must not accuse a model of anything.
+    tools, _ = tool_support(provider, model)
+    tools_note = (
+        f"{model} cannot call tools, so this Builder would report its work and "
+        "change nothing"
+        if tools is False and agent == "builder"
+        else ""
+    )
+
     return {
         "provider": provider,
         "model": model,
@@ -778,6 +1044,8 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
         "thinking": thinking,
         "thinking_switchable": support == "switch",
         "thinking_note": thinking_note,
+        "tools": tools,
+        "tools_note": tools_note,
     }
 
 

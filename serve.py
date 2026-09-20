@@ -13,6 +13,7 @@ the `/api/*` routes are thin compatibility wrappers over the same dispatch.
 import contextlib
 import json
 import os
+import signal
 import sys
 import tempfile
 import threading
@@ -2275,6 +2276,29 @@ class Handler(SimpleHTTPRequestHandler):
         print(f"[API] {request_line}")
 
 
+def _exit_the_way_the_console_would(signum: int, _frame: Any) -> None:
+    """Handle SIGTERM: ask for the exit the console's X asks for.
+
+    SIGTERM is how a container runtime and systemd ask a process to stop, and
+    Python's default handler ends it where it stands. That is the one exit path
+    that loses a run: `rpc_run_goal` writes its snapshot from a `finally`, and
+    a signal that kills the interpreter never runs one -- so a `docker stop`
+    mid-run would leave nothing for a restarted console to reattach to, which
+    is the failure the deferred exit was built to prevent.
+
+    Asking for the console's own exit is the whole fix: with nothing running it
+    sets the flag `main` waits on, and with a run in flight it stops the run
+    and defers the exit to that `finally`. The signal arrives on the main
+    thread, which never holds `_run_lock` -- it only ever waits -- so the
+    handshake cannot deadlock against the handler reaching for it. SIGINT is
+    left alone: Ctrl+C raises KeyboardInterrupt, which `main` already catches.
+    """
+    print(f"\nReceived {signal.Signals(signum).name}; exiting through the console's own path")
+    reply = rpc_shutdown({"stop_first": True})
+    if reply.get("running"):
+        print(f"  {reply['detail']}")
+
+
 def main() -> None:
     """Serve until Ctrl+C or the console asks to exit."""
     # launch_console.sh redirects this process to a log file and tails it, and
@@ -2309,6 +2333,8 @@ def main() -> None:
     threading.Thread(
         target=_index_the_project_at_startup, name="startup-index", daemon=True
     ).start()
+
+    signal.signal(signal.SIGTERM, _exit_the_way_the_console_would)
 
     asked_from_console = False
     try:

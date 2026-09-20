@@ -553,6 +553,11 @@ async function loadCrew(quiet, force){
     // "NO KEY" would be a lie for a key that exists but has no credits.
     const chips = [];
     if(!s.live) chips.push(`<span class="chip bad" title="${esc(s.reason)}">${esc(s.badge || "DEGRADED")}</span>`);
+    // A live seat whose model cannot call tools. Only ever set on the Builder,
+    // because that is the one seat offered any -- and the one failure the card
+    // could not otherwise show, since the seat is live and every call succeeds
+    // while `files_changed` stays empty.
+    if(s.tools_note) chips.push(`<span class="chip bad" title="${esc(s.tools_note)}">NO TOOLS</span>`);
     chips.push(`<span class="chip">${esc(s.placement)}</span>`);
 
     el.innerHTML =

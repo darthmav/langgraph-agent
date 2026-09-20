@@ -9,6 +9,7 @@ do cover is the bookkeeping around a run -- the flag, the snapshot, and the
 from __future__ import annotations
 
 import json
+import signal
 import threading
 
 import pytest
@@ -446,4 +447,40 @@ def test_an_exit_claimed_after_the_run_ended_is_taken_directly(monkeypatch):
 
     assert answer["exiting"] is True
     assert answer["running"] is False
+    assert serve._shutdown_requested.is_set()
+
+
+def test_a_termination_signal_exits_through_the_same_path(monkeypatch):
+    """`docker stop` and `systemctl stop` must not cost a run its snapshot.
+
+    Python's default SIGTERM handler ends the process where it stands, and
+    `rpc_run_goal` writes its snapshot from a `finally` -- so the default would
+    lose exactly the state a restarted console reattaches to, on the one exit
+    path nobody is watching. The handler asks for the console's own exit, which
+    means the deferral below is the run's, not the signal's.
+    """
+    seen = {}
+
+    def look():
+        serve._exit_the_way_the_console_would(signal.SIGTERM, None)
+        seen["armed_during_run"] = serve._shutdown_requested.is_set()
+        seen["exit_claimed"] = serve._exit_after_run.is_set()
+
+    monkeypatch.setattr(
+        serve, "graph", _FakeGraph(["architect", "planner"], during_step=look)
+    )
+    result = serve.rpc_run_goal({"goal": "a long job"})
+
+    # Deferred, not immediate: the process was still up while the run saved.
+    assert seen["armed_during_run"] is False
+    assert seen["exit_claimed"] is True
+    assert result["stopped"] is True
+    # And it really does exit, once the run has handed its state back.
+    assert serve._shutdown_requested.is_set()
+
+
+def test_a_termination_signal_with_no_run_exits_at_once():
+    """Nothing to defer to, so the signal takes the exit itself."""
+    serve._exit_the_way_the_console_would(signal.SIGTERM, None)
+
     assert serve._shutdown_requested.is_set()

@@ -276,3 +276,101 @@ class EmbedderActivity:
 # The console shows one embedder, so one meter, a process-global beside
 # ACTIVITY for the same reason.
 EMBEDDER_ACTIVITY = EmbedderActivity()
+
+
+# How long a piece of work waits for the cards before it gives up waiting and
+# runs anyway. The wait is bounded rather than indefinite because a seat call
+# abandoned by `_with_deadline` keeps its worker thread alive and holding this
+# arbiter until its own socket timeout fires, and a node that inherited an
+# abandoned worker's queue position would be stalled by a call nobody is
+# reading any more. `LLM_TIMEOUT_SECONDS` bounds that worker, so a wait a
+# little past it outlasts every holder that can still finish; past that the
+# guarantee is worth less than the wedge it would cause.
+GPU_WAIT_SECONDS = 150.0
+
+
+class GpuArbiter:
+    """One piece of GPU work at a time: a seat's model, or the embedder.
+
+    This machine has two 3 GB cards and every model that matters is larger than
+    one of them. qwen3-embedding is 4.7 GB and a 9B seat is 5.3 GB, so the two
+    together want roughly 10 GB of a 6 GB pool: they cannot both be resident,
+    and the daemon's answer to being asked anyway is not a graceful split but a
+    failure. Measured from the journal on 2026-09-20 at 07:02:10 -- a seat load
+    timed out with `context canceled` after the daemon spent twenty seconds
+    walking `ngl_per_device_high[1].n_layer` down from 48, trying to pack every
+    layer onto card 1 because the embedder held card 0. That walk is what an
+    operator sees as "one of the cards isn't being touched".
+
+    So the work is serialized rather than left to compete. This is deliberately
+    *not* `EMBEDDER_ACTIVITY`, which sits beside it: that is a meter, read by
+    the console to draw a light, and it counts overlapping work precisely
+    because overlapping work is what it was built to display. This one is a
+    lock, and its whole purpose is that the overlap stops happening.
+
+    Reentrant on purpose. Nothing here nests today -- `_gather_research` embeds
+    and *then* invokes a seat, never inside it -- but a plain lock turns a
+    future nesting into a run that hangs for ever with no node on the stack,
+    which is the one failure this code must not add. Reentrancy makes that
+    mistake a no-op instead.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._state = threading.Lock()
+        self._holder = ""
+        self._depth = 0
+        self._since = 0.0
+        self._waited_out = 0
+
+    @contextmanager
+    def exclusive(self, owner: str, timeout: float = GPU_WAIT_SECONDS) -> Iterator[float]:
+        """Hold the cards for `owner` while the block runs, however it exits.
+
+        Yields the seconds spent waiting, which the caller may report: a wait
+        is the whole visible cost of this arbiter, and one nobody can see reads
+        as the model simply being slow.
+        """
+        start = time.monotonic()
+        taken = self._lock.acquire(timeout=timeout)
+        waited = time.monotonic() - start
+        if not taken:
+            # Ran out of patience rather than deadlocked. Proceeding is the
+            # lesser harm: the cost is the contention this class exists to
+            # avoid, while refusing would fail a run over a lock.
+            with self._state:
+                self._waited_out += 1
+            try:
+                yield waited
+            finally:
+                pass
+            return
+        with self._state:
+            self._depth += 1
+            if self._depth == 1:
+                self._holder = owner
+                self._since = time.monotonic()
+        try:
+            yield waited
+        finally:
+            with self._state:
+                self._depth -= 1
+                if self._depth == 0:
+                    self._holder = ""
+                    self._since = 0.0
+            self._lock.release()
+
+    def snapshot(self) -> dict[str, object]:
+        """Who holds the cards, for how long, and how often the wait ran out."""
+        with self._state:
+            now = time.monotonic()
+            return {
+                "holder": self._holder,
+                "held_for": round(now - self._since, 2) if self._holder else 0.0,
+                "waited_out": self._waited_out,
+            }
+
+
+# One pool of cards, so one arbiter, a process-global beside ACTIVITY and
+# EMBEDDER_ACTIVITY for the same reason.
+GPU_ARBITER = GpuArbiter()

@@ -1,0 +1,49 @@
+# What the build context must not carry.
+#
+# Two kinds of thing are excluded, and only the second is about size. The
+# runtime artifacts are excluded because they are *per-machine*: a corpus and
+# the relevance floor measured for it describe one store under one embedding
+# model, a run snapshot describes one afternoon, and baking either into an
+# image would ship one machine's measurements to every other. They arrive
+# through the bind mount instead, which is where they belong.
+
+# The host's virtualenv: 1.3 GB, built for the host's interpreter, and the
+# image builds its own at /opt/venv.
+.venv/
+venv/
+ENV/
+
+# Caches. .mypy_cache alone is ~174 MB of the context.
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Per-machine runtime state (see above). knowledge.lock is an empty file whose
+# only job is to be flock'ed; a copy of it claims nothing.
+knowledge/chroma/
+knowledge/knowledge_graph.json
+knowledge/floor_calibration.json
+knowledge.lock
+runs/
+uploads/
+research/web/
+projects/
+reports/diagnostics/
+experimental/
+
+# Credentials, never the image's. .env reaches the container through the bind
+# mount, which keeps it on the host where it can be edited and is not baked
+# into a layer anyone can pull apart.
+.env
+
+# Editor and VCS noise the build has no use for.
+.idea/
+.vscode/
+*.swp
+*~
+*.log
