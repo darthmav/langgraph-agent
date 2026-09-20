@@ -209,6 +209,86 @@ Everything it installs is free to use. Elsewhere, or by hand:
 pip install -e ".[dev]"
 ```
 
+### Running in a container
+
+An Arch image of the console, wired to the machine it runs on:
+
+```bash
+docker compose up --build        # http://localhost:8080
+```
+
+**Host networking is the configuration**, and it is what makes the database
+work without a line of its own. The console talks to three things on this
+machine, and all three are loopback-only on purpose: the Ollama daemon on
+127.0.0.1:11434, the `postgres18` container on 127.0.0.1:5432 -- published
+there and nowhere else, which is why it can afford trust authentication -- and
+the SearxNG on 127.0.0.1:8888. A bridged container reaches none of them, so
+`DATABASE_URL` and `OLLAMA_BASE_URL` mean the same thing inside the container
+as outside it, and nothing has to be republished to the world.
+
+**Two bases, one configuration.** `Dockerfile` is Arch, matching the rest of
+this project; `Dockerfile.kali` is Kali rolling, which carries the same Python
+(3.14.7) and so resolves to the same dependency versions. The Kali image is
+behind a compose profile, and comes out smaller -- 913 MB against 1.22 GB --
+because Debian's base with `--no-install-recommends` carries less than Arch's:
+
+```bash
+docker compose --profile kali up --build
+```
+
+Both run the full suite inside the image (757 tests) and answer on the same
+port, so they are alternatives rather than a pair to start together. The Kali
+one installs no pentest tooling -- it is this console on that base;
+`kali-linux-headless` belongs in an image derived from it. `gh` comes from
+GitHub's own apt repository there, since Kali packages none, and without it
+`git_dwell` would stop at `push`.
+
+What stays on the host: the **Ollama daemon**. It owns the embedding model's
+placement on the GPU and holds the ollama.com credentials the `:cloud` tags are
+proxied with, so the image only ever speaks HTTP to it. The entrypoint says
+whether it answers, because a seat with no daemon behind it silently becomes
+`StubLLM` and finishes a run on canned text.
+
+What is mounted: the **checkout itself**, at `/app`. A corpus is a function of
+what is on disk -- `knowledge/`, the relevance floor measured for it, `runs/`,
+`uploads/`, `research/web/` and `projects/` all live in the tree -- so a
+container holding them in its own layer would throw the corpus away on every
+rebuild. It runs as uid 1000 so what a run writes is yours on the host; set
+`AMBIGUITY_UID`/`AMBIGUITY_GID` for any other account.
+
+`git_dwell`'s `push`, `pr` and `merge` stages need your own credentials:
+uncomment the `~/.gitconfig` and `~/.config/gh` mounts in `docker-compose.yml`.
+Without them commits carry a fallback identity and `gh` has no account.
+
+`docker compose stop` is the console's exit button rather than a kill -- a run
+in flight is stopped and the exit deferred until it has written its snapshot,
+so it stays as recoverable as a stop from the browser.
+
+If Docker is still behind sudo (the `docker` group applies after a reboot), the
+same files work rootless with Podman:
+
+```bash
+podman build -t ambiguity-console .
+podman run --rm --network host --userns=keep-id -v "$PWD":/app ambiguity-console
+```
+
+**Bridged instead**, if the host network is not acceptable: attach both
+containers to a network of their own, name the database by container, and tell
+the daemon to listen past loopback.
+
+```bash
+docker network create ambiguity-net
+docker network connect ambiguity-net postgres18
+# then, in docker-compose.yml: drop network_mode, join ambiguity-net, and set
+#   DATABASE_URL=postgresql://postgres@postgres18:5432/postgres
+#   OLLAMA_BASE_URL=http://host.docker.internal:11434
+# with extra_hosts: ["host.docker.internal:host-gateway"], and the daemon
+# started with OLLAMA_HOST=0.0.0.0 so it answers off loopback.
+```
+
+That is three changes to solve one problem, and the first of them is what the
+database's missing password rests on -- which is why it is not the default.
+
 ### Environment Configuration
 
 Copy `.env.example` to `.env`:
