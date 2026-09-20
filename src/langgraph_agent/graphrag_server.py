@@ -464,7 +464,7 @@ ENTITY_STOPWORDS = frozenset(
     Refused Whether Split Asserted Degree Shared Based Demonstrates References
     Generate Extract Point Seconds Deliberately Named Built Asking Pinned
     Insert Tests Write Reported Computed Cached Complete Convert Dimension
-    Naming Perform Useful Prose Measure Observed
+    Naming Perform Useful Prose Measure Observed Nodes Spectrum
     """.split()
 )
 

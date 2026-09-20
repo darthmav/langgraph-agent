@@ -1202,6 +1202,19 @@ four the moment this file described the problem.
   `System` was nominated by rank and cleared by the count at 22 free capitals,
   which is an entity that earned itself. Re-run the count before trusting the
   list again; it is a claim about a vocabulary, and vocabularies move.
+  **On 2026-09-19 it moved by subtraction, which is the direction nobody
+  watches.** Every previous movement came from text arriving -- prose written
+  into this file, docstrings written by a run. This one came from deleting
+  `examples/`: the seventeen Fourier and spectral demo files went, and with
+  them the documents anchoring `Spectral`, which fell out of the top twenty
+  and was replaced there by `BUILDER_DEADLINE_SECONDS` -- a real constant that
+  had simply been outranked. In the same stroke `Nodes` and `Spectrum` crossed
+  the four-document floor at zero free capitals, because removing files
+  changes which *remaining* docstrings are a large enough share of the corpus
+  to matter. So the vocabulary this list is audited against moves when
+  documents leave, not only when they arrive, and a deletion needs the count
+  re-run exactly as an addition does. `Spectral` stays out of
+  `ENTITY_STOPWORDS` throughout: it lost rank, not its two free capitals.
   **The obvious alternative was built, measured and rejected.** Dropping a
   token that only ever appears where a capital is forced (line start, after a
   full stop) removes the same noise and severs real edges doing it: `Planner`

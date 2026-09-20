@@ -589,9 +589,9 @@ def test_no_capital_forced_by_position_becomes_a_hub_entity():
 # from the walk, and an audit left outstanding is the claim going stale quietly.
 AUDITED_TOP_ENTITIES = frozenset({
     "Architect", "Builder", "Researcher", "Laplacian", "Planner", "System",
-    "ValueError", "Fiedler", "AgentState", "Spectral", "Exception", "Graph",
+    "ValueError", "Fiedler", "AgentState", "Exception", "Graph",
     "GraphRAG", "Python", "Verdict", "Cheeger", "GraphRAGKnowledgeBase",
-    "LangGraph", "Search", "Embedding",
+    "LangGraph", "Search", "Embedding", "BUILDER_DEADLINE_SECONDS",
 })
 
 
