@@ -1,4 +1,8 @@
-"""The per-seat thinking switch: what each seat sends, and what its card says.
+"""Per-seat capability: what each seat sends, and what its card says.
+
+The thinking switch, and the tool support beside it -- both read off the
+daemon's capabilities through `ollama_model_capabilities`, on one cached
+answer per tag.
 
 Nothing here reaches a daemon or a provider. The daemon is stubbed at
 `ollama_model_capabilities` -- the one place it is asked -- or at `urlopen`
@@ -387,3 +391,62 @@ def test_the_console_switch_answers_with_the_seat_it_left(monkeypatch):
     assert result["ok"] is True
     assert result["thinking"] is False
     assert serve.RPC_METHODS["set_thinking"] is serve.rpc_set_thinking
+
+
+# ---------------------------------------------------------------------------
+# tools: the other capability a seat card reports
+# ---------------------------------------------------------------------------
+
+
+def test_a_tag_calls_tools_exactly_when_the_daemon_says_it_can(monkeypatch):
+    _daemon(monkeypatch, {"thinks:cloud": THINKS, "plain:latest": PLAIN})
+
+    assert config.tool_support("ollama", "thinks:cloud")[0] is True
+    assert config.tool_support("ollama", "plain:latest")[0] is False
+
+
+def test_a_daemon_that_cannot_answer_is_unknown_not_a_model_without_tools(monkeypatch):
+    """`None` and `False` are different claims, as they are for thinking."""
+    _daemon(monkeypatch, {})
+
+    assert config.tool_support("ollama", "plain:latest")[0] is None
+
+
+def test_a_cloud_provider_is_taken_to_call_tools(monkeypatch):
+    """Anthropic and OpenAI refuse a tool call outright; there is no quiet failure."""
+    assert config.tool_support("anthropic", "claude-opus-5")[0] is True
+    assert config.tool_support("openai", "gpt-4o-mini")[0] is True
+
+
+def test_only_the_builder_is_warned_about_a_model_that_cannot_call_tools(monkeypatch):
+    """The other three seats are offered no tools, so this is the right seat for one."""
+    _daemon(monkeypatch, {"plain:latest": PLAIN})
+    for agent in config.AGENTS:
+        config.set_agent_llm(agent, "ollama", "plain:latest")
+
+    notes = {agent: config.get_agent_status(agent)["tools_note"] for agent in config.AGENTS}
+
+    assert notes["builder"], "a Builder that can change nothing said nothing"
+    assert "cannot call tools" in notes["builder"]
+    assert [notes[a] for a in ("architect", "planner", "researcher")] == ["", "", ""]
+
+
+def test_a_builder_that_can_call_tools_is_not_warned(monkeypatch):
+    _daemon(monkeypatch, {"thinks:cloud": THINKS})
+    config.set_agent_llm("builder", "ollama", "thinks:cloud")
+
+    status = config.get_agent_status("builder")
+
+    assert status["tools"] is True
+    assert status["tools_note"] == ""
+
+
+def test_a_builder_nobody_could_describe_is_not_accused(monkeypatch):
+    """A daemon down for thirty seconds must not read as a seat that lost tools."""
+    _daemon(monkeypatch, {})
+    config.set_agent_llm("builder", "ollama", "plain:latest")
+
+    status = config.get_agent_status("builder")
+
+    assert status["tools"] is None
+    assert status["tools_note"] == ""

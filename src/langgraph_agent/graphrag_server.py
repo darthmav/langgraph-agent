@@ -619,6 +619,46 @@ def _embedder_at_work(method: Callable[_P, _R]) -> Callable[_P, _R]:
     return run
 
 
+def _needs_the_cards(method: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Hold `GPU_ARBITER` and free the cards while `method` embeds.
+
+    This is what makes "nothing else runs while the embedder is working" a
+    property of the code rather than of the phase ordering. The ordering
+    already covers the big cases -- the corpus and web phases both run before
+    `graph.stream` -- and covers none of the small ones: a console search or an
+    upload arrives on its own thread at any moment, and a run's own Planner map
+    and Researcher search embed from inside a node. Those are the embeds that
+    used to meet a seat's model on the cards.
+
+    It goes on `_encode` alone, not on `_embedder_at_work`, and the difference
+    is `_load_embedder`. That builds a handle and loads no weights, but it is
+    also what `self.embedder.tokenizer` goes through -- the chunker asks for a
+    tokenizer that runs in this process and touches no card. Evicting a seat's
+    model in order to cut a document into passages would be a reload paid for
+    nothing, so the marking and the arbitration are separate decorators rather
+    than one.
+
+    The meter is entered *inside* the arbiter by the decorator below, so a
+    batch queued behind a seat reads as waiting rather than working and the
+    console's light keeps meaning "the model is doing something". Holding the
+    cards does not delay a stop: `encode` asks `should_stop` between batches,
+    which a waiting embed reaches as readily as a working one.
+    """
+
+    @functools.wraps(method)
+    def run(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        from langgraph_agent.config import free_the_cards_for
+        from langgraph_agent.control import GPU_ARBITER
+
+        with GPU_ARBITER.exclusive("embedder"):
+            # Freed inside the arbiter, so nothing loads into the gap between
+            # the eviction and the embedding that wanted the room.
+            free_the_cards_for(EMBEDDING_MODEL_NAME)
+            return method(*args, **kwargs)
+
+    return run
+
+
 class GraphRAGKnowledgeBase(CorpusSpectralMixin):
     """Simple GraphRAG: NetworkX graph + Chroma vector store.
 
@@ -708,6 +748,7 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         self.embedding_device_note = None
         return model
 
+    @_needs_the_cards
     @_embedder_at_work
     def _encode(self, texts: str | list[str]) -> Any:
         """Embed at `EMBEDDING_BATCH_SIZE`, stopping between batches when asked.
