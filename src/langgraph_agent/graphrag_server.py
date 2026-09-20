@@ -1610,6 +1610,16 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         with itself while reporting success. On failure this raises with both
         intact.
 
+        The floor record goes with them, and that is a third half rather than
+        tidiness: a floor is measured on *these texts* with this model, so a
+        record outliving the corpus it was taken on is a number about a corpus
+        that no longer exists -- and `_calibrate_the_floor_before_the_run` reads
+        a record's mere presence as `known`, so the run that rebuilds the corpus
+        would never measure a floor for it. The console would go on showing that
+        floor over an empty corpus meanwhile. Removed last, after both halves
+        are actually empty, so a failed wipe leaves the corpus and its floor
+        agreeing.
+
         Returns:
             What was removed, plus the (now zeroed) stats.
         """
@@ -1626,10 +1636,15 @@ class GraphRAGKnowledgeBase(CorpusSpectralMixin):
         # reloads the old graph off disk and the corpus comes back.
         self._save_graph()
 
+        floor_record = _floor_calibration_path(self.persist_dir)
+        removed_floor = floor_record.exists()
+        floor_record.unlink(missing_ok=True)
+
         return {
             "removed_chunks": len(existing),
             "removed_nodes": removed_nodes,
             "removed_edges": removed_edges,
+            "removed_floor": removed_floor,
             **self.stats(),
         }
 

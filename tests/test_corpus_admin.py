@@ -22,6 +22,7 @@ import serve
 from langgraph_agent.graphrag_server import (
     GraphRAGKnowledgeBase,
     index_project_files,
+    relevance_floor,
 )
 
 
@@ -205,6 +206,50 @@ def test_a_chroma_failure_leaves_the_graph_alone(kb):
 
     assert kb.graph.number_of_nodes() == nodes_before
     assert kb.collection.count() == 2
+
+
+def test_clear_retires_the_floor_measured_on_what_it_deleted(kb, tmp_path):
+    """The floor belongs to the corpus, so it cannot outlive one.
+
+    A floor is a measurement of *these texts* under this embedding model, and
+    two things read the record after the corpus is gone: the console's embedder
+    card shows a floor over an empty corpus, and
+    `_calibrate_the_floor_before_the_run` treats a record's mere presence as
+    `known` -- so the run that rebuilds the corpus would never measure a floor
+    for it, and every search would go on being judged against a number taken on
+    a corpus nobody can consult any more.
+    """
+    record = tmp_path / "floor_calibration.json"
+    record.write_text(json.dumps({"model": "qwen3-embedding:latest", "floor": 0.41}),
+                      encoding="utf-8")
+
+    result = kb.clear()
+
+    assert result["removed_floor"] is True
+    assert not record.exists()
+    assert relevance_floor(tmp_path) is None
+
+
+def test_clear_does_not_claim_a_floor_it_never_found(kb, tmp_path):
+    """A corpus whose floor was never measured reports no removal."""
+    assert kb.clear()["removed_floor"] is False
+
+
+def test_a_chroma_failure_leaves_the_floor_alone(kb, tmp_path):
+    """The third half fails with the other two, not without them.
+
+    The record is removed after both halves are actually empty, so a wipe that
+    raised leaves the corpus and the floor measured on it still agreeing.
+    """
+    record = tmp_path / "floor_calibration.json"
+    record.write_text(json.dumps({"model": "qwen3-embedding:latest", "floor": 0.41}),
+                      encoding="utf-8")
+    kb.collection.fail_on_delete = True
+
+    with pytest.raises(RuntimeError):
+        kb.clear()
+
+    assert record.exists()
 
 
 def test_clearing_an_empty_corpus_is_not_an_error(tmp_path):
