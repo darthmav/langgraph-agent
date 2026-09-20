@@ -169,26 +169,14 @@ python example_usage.py
 - **Never send `temperature` to a modern Anthropic model.** Sampling parameters
   were removed on the Opus 5 / Sonnet 5 / 4.6+ families and are rejected with a
   400 that reads like an auth failure. `_accepts_temperature()` gates this.
-- **Tool specialization (critical):**
-  - Architect → no tools.
-  - Planner → no tools.
-  - Researcher → GraphRAG read-only tools only.
-  - Builder → filesystem, git, terminal, test tools only.
-- **`self_healing` is a standalone utility, not wired into any node.** It gives
-  `retry_with_backoff`, `circuit_breaker` and `self_healing_wrapper` decorators
-  (tenacity + pybreaker) plus a structured `SelfHealingLogger`, for a caller
-  that wants in-process retry/circuit-breaker resilience around its own
-  function calls. It is deliberately **not** applied to the LLM seat calls or
-  MCP tool calls: those already have a resilience design of their own —
-  `LLM_TIMEOUT_SECONDS` / `NODE_DEADLINE_SECONDS` / `BUILDER_DEADLINE_SECONDS`,
-  and the rule that work run under a deadline must never write to state (see
-  Important Notes below). Adding a retry loop underneath an abandoned,
-  still-running worker would violate that rule outright, and a circuit breaker
-  keyed on a seat's exceptions would interact with `_seat_failures`
-  (`get_agent_status()`) in ways nobody has designed for. Reach for it for a
-  *new*, independent integration point (e.g. a future external API call a
-  Builder tool makes) rather than retrofitting it onto the existing node/seat
-  call paths.
+- **Tool specialization (critical):** Architect and Planner get no tools; the
+  Researcher gets GraphRAG read-only tools only; the Builder gets filesystem,
+  git, terminal and test tools only. Keep GraphRAG out of `BUILDER_TOOLS`.
+- **`self_healing` is a standalone utility, not wired into any node.** Reach
+  for its `retry_with_backoff` / `circuit_breaker` decorators at a *new*
+  integration point, never retrofitted onto the seat or MCP call paths, which
+  have a resilience design of their own (the deadlines below, and the rule that
+  work under a deadline never writes to state).
 
 ## State Schema
 
@@ -230,1858 +218,207 @@ python -m pytest tests/ -v
 ```
 
 ### Add a new Builder tool
-1. Add the tool method to `src/langgraph_agent/mcp_client.py` in `_discover_tools()`.
-2. Name it clearly under the `filesystem_`, `git_`, `terminal_`, or `test_` namespace.
-3. Add a JSON schema for it to `BUILDER_TOOLS` in `src/langgraph_agent/nodes.py`.
-   The Builder can only call what is offered there — a tool the MCP client
-  exposes but `BUILDER_TOOLS` omits is refused by name in
-  `_run_builder_tools`. Keep GraphRAG out of that list; retrieval is the
-  Researcher's.
-4. Add a test in `tests/test_graph.py` or create a focused unit test.
-5. Update `README.md` MCP Integration section.
+1. Add the method to `_discover_tools()` in `src/langgraph_agent/mcp_client.py`,
+   named under `filesystem_`, `git_`, `terminal_` or `test_`.
+2. Add its JSON schema to `BUILDER_TOOLS` in `src/langgraph_agent/nodes.py` --
+   a tool the MCP client exposes and `BUILDER_TOOLS` omits is refused by name.
+3. Add a test, and update the README's MCP Integration section.
 
 ### Add a new Researcher tool
-1. Prefer GraphRAG read-only tools only.
-2. Extend `src/langgraph_agent/graphrag_server.py` and expose via `mcp_client.py`.
+Read-only GraphRAG tools only: extend `src/langgraph_agent/graphrag_server.py`
+and expose it through `mcp_client.py`.
 
 ### Change a seat's model
-- Update `DEFAULT_SEATS` (and `_DEFAULT_AGENT_MODELS`) in `src/langgraph_agent/config.py`, plus `.env.example`.
-- Add the model to `AGENT_LLM_OPTIONS` so it appears in the console dropdown. That list is the whole offer -- `kimi-k3:cloud`, `qwen3.5:397b-cloud`, `qwen3.8:latest` and `hf.co/mradermacher/dolphin-2.9.1-yi-1.5-9b-GGUF:Q4_K_M` -- so a tag the daemon carries is not offered until it is added there, and `set_seat` refuses any model not in it (and the test in `test_rpc_params.py` pins the list).
-- Nothing in `frontend/index.html` hard-codes a model; the seat cards render whatever `list_seats` reports.
-- **Check the tag reports `tools` before seating it as the Builder.** The offer is
-  not all of one kind any more: dolphin reports `completion` alone, and the
-  Builder is the one seat whose work *is* tool calls -- `files_changed` is
-  appended only when a write tool reports success, never from the model's
-  prose -- so a Builder on it answers in full and changes nothing. That is
-  the `StubLLM` failure with a live seat behind it, and no other chip would
-  show it, because the seat is live and every call succeeds. `tool_support`
-  reads the daemon's answer (the one `thinking_support` already caches, so
-  it costs no request) and `get_agent_status` puts a **NO TOOLS** chip on
-  the Builder's card alone: the other three are offered no tools, so a model
-  without them is the right seat for them rather than a defect. `None` is
-  kept apart from `False` for the reason thinking keeps `unknown` apart from
-  `never` -- a daemon down for thirty seconds must not read as a seat that
-  lost a capability.
+Update `DEFAULT_SEATS` and `_DEFAULT_AGENT_MODELS` in
+`src/langgraph_agent/config.py`, the seat table above, and `.env.example`; add
+the tag to `AGENT_LLM_OPTIONS`, which is the whole offer -- `set_seat` refuses
+anything not in it and `test_rpc_params.py` pins the list. Check the tag
+reports `tools` before seating it as the Builder: that seat's work *is* tool
+calls, and `get_agent_status` puts a **NO TOOLS** chip on its card alone.
 
 ### Add a fifth agent
-The seat list is `AGENTS` in `config.py` and is read by everything that iterates
-agents. Adding one means: a node in `nodes.py`, a prompt in `prompts/`, wiring
-plus a router in `graph.py`, entries in `AGENTS` / `DEFAULT_SEATS` /
-`_DEFAULT_AGENT_MODELS`, a `StubLLM` branch, and a `ROLE_COLOR` entry in
-`frontend/index.html`.
-
-### The Engineer panel is one column
-
-The Action Feed that sat to the right of the Director is gone: the stage cards
-were a third telling of what the Director reports and what the Crew lights
-already say, and `run_progress.turns` drives those lights from each seat's turn
-as it happens, which beats the feed's `node` -- that names the seat which just
-finished. `stageCard` and the `.stage` CSS went with it.
-
-Two things it held moved rather than went. The **clock** and the last finished
-stage live in one `#run-live` line inside the Director, rewritten each second
-and replaced by the verdict when the run ends; it has to keep naming the last
-stage, since showing only a counter made a working run and a wedged one look
-identical. The **"changed this machine"** notice is a `.touched` block on the
-verdict message itself -- a safety notice about files on disk belongs with the
-result someone reads rather than in a pane beside it.
+`AGENTS` in `config.py` is the seat list everything iterates. Adding one means:
+a node in `nodes.py`, a prompt in `prompts/`, wiring plus a router in
+`graph.py`, entries in `AGENTS` / `DEFAULT_SEATS` / `_DEFAULT_AGENT_MODELS`, a
+`StubLLM` branch, and a `ROLE_COLOR` entry in `frontend/index.html`.
 
 ### The console API
-The console drives a single `POST /rpc` taking `{method, params}` and returning
-`{result, elapsed_ms}` or `{error: {message}, elapsed_ms}`. Methods live in
-`RPC_METHODS` in `serve.py`. `export_corpus` and `clear_corpus` go through it
-like everything else rather than getting a file-download route: a failure then
-lands on the console's telemetry path instead of replacing the page with a JSON
-error, and the browser builds the file at the other end. `upload_document` goes
-the other way through the same door for the same reason -- the console reads
-the file and posts its text, rather than a multipart route being added -- and
-takes one document per call, so one PDF among the markdown fails on its own
-instead of taking the batch down. The `/api/*` routes are compatibility wrappers over
-the same functions — `launch_console.sh` polls `/api/status` as its readiness
-check, so it must keep working.
-
-Parameters are typed and bounded, and refused by name (`_int_param`,
-`_float_param`, `_bool_param`, `_str_param`), and every method parses before it
-touches anything. They used to go through a bare `int()` or `bool()`:
-`top_k="abc"` answered with Python's own "invalid literal for int()", a negative
-`top_k` with an empty result the console showed as "no results", and the string
-"false" became True -- on `research_web` that fetches and permanently embeds
-pages. A body that is not a JSON object, `params` that are not one, an unusable
-`Content-Length` or one past `MAX_REQUEST_BYTES` get an error envelope instead
-of the traceback and dropped connection a body of `[]` used to cause.
-
-`run_goal` blocks its own HTTP thread for the whole run, which is why the server
-is a `ThreadingHTTPServer` — `stop_run` and `run_progress` are served on other
-threads while it sits there. Only one run may be in flight: a second `run_goal`
-is refused rather than allowed to clobber `_run_progress`, which has always been
-a single global.
-
-`shutdown` is the console's exit button. `serve_forever` runs on its own thread
-so the main thread can wait on both ways out — Ctrl+C and `_shutdown_requested`.
-Calling `server.shutdown()` from the request thread that asked for it would
-deadlock: it blocks until the serve loop stops, and that loop is what has to
-deliver the reply.
-
-## Documentation claims are tests
-
-`tests/test_claims.py` exists because prose goes stale silently. On 2026-09-09
-this project found four claims that had been true when written and had stopped
-being true -- a comment saying `graphrag_server.py` sat ~250 characters under
-the indexing limit when it had 28,000 to spare, a seat diagnostic quoting a
-relevance floor that no longer matched the constant, this file asserting the
-twenty best-connected entities were all real terms when three were
-sentence-openers, and twelve citations pointing at reports deleted that
-morning. Every one was found by someone reading carefully, which is why each
-had survived being read many times. The rule now: **a claim worth writing down
-is a claim worth failing a build over.**
-
-Most of those guards *recompute* the claim from the repository, so they need no
-maintenance and catch drift nobody predicted: every path cited in prose or a
-docstring resolves, the Project Structure tree above matches the tree on disk
-in both directions, the seat table matches `DEFAULT_SEATS`, the documented
-Python floor matches `pyproject.toml`, no walked file exceeds
-`MAX_INDEXABLE_BYTES`, and CI runs the same commands the Quick Reference does.
-
-Two are different and the difference is the interesting part. A figure quoted
-in prose is checked against its constant through a small registry, because the
-real fix for a figure is not to restate it -- `scripts/diagnose_seats.py` reads
-the floor through `relevance_floor()` rather than quoting it, and markdown
-that cannot do
-that gets a registry entry instead. And the entity audit **cannot** be a rule:
-`Measured` sits at 4 position-free capitals against 34 forced, `Spectral` at 2
-against 24, and no threshold separates the sentence-opener from the domain
-term. That is this file's own rejected-heuristic finding met one level up. So
-the top-twenty entity list is *pinned* rather than judged: the test fails when
-the graph's answer moves, which is not a bug report but the audit asking to be
-redone at the one moment the answer changed.
-
-**Its census counts only the files every checkout has.** Fetched pages were
-already out, because they mint no entities; `uploads/` is out as of 2026-09-18
-for a different reason -- an upload *does* mint entities, but it is whatever the
-operator handed this machine, so a pinned list cannot be green in two places
-at once. Measured: `Research` sat at 14 documents here and outside the top 24
-in a clean checkout, so it was inside the audited twenty on every developer
-machine and outside it in CI -- red there for three commits with nobody able
-to see it, because a missing `scipy` aborted collection before any test ran,
-the guard that cannot *run* pinning nothing one level up from the guard that
-cannot fail.
-
-The guards are proven by breaking each claim and watching the test fail. A
-guard that cannot fail pins nothing, and the first version of the entity guard
-was asleep -- it fired only at zero free capitals, and `Measured` had acquired
-four the moment this file described the problem.
+One `POST /rpc` taking `{method, params}` and returning `{result, elapsed_ms}`
+or `{error: {message}, elapsed_ms}`; methods live in `RPC_METHODS` in
+`serve.py`, and the `/api/*` routes are compatibility wrappers over the same
+functions (`launch_console.sh` polls `/api/status`, so it must keep working).
+Parameters are typed, bounded and refused by name (`_int_param`, `_float_param`,
+`_bool_param`, `_str_param`), parsed before anything is touched.
+`run_goal` blocks its own thread for the whole run -- hence
+`ThreadingHTTPServer` -- and a second one is refused while it is in flight.
 
 ## Important Notes
 
 - Do not let every agent call every tool; the specialization is the whole point.
 - Empty state fields must render as `(empty)` in the state injection block.
-- The Builder must actually call a tool to claim it changed a file. It drives
-  its own tools through `bind_tools` and a turn loop capped at
-  `MAX_BUILDER_TOOL_TURNS`; `files_changed` is appended only when a write
-  tool reports success, never from the model's prose. A seat whose model
-  cannot call tools (`StubLLM`) still reports but changes nothing.
-- **"Described but not written" compares two spellings of a path, so both go
-  through `_report_path_key`.** The check is the report's harshest claim --
-  the mirror of a Builder inventing a file, and the Architect rules on it --
-  which makes a false one expensive. One side is prose from a `## Files
-  Modified` bullet, the other is the raw argument `filesystem_write` recorded,
-  and they disagree over decoration rather than substance: backticks, bold,
-  `*`/`1.` markers, `./` or an absolute prefix, and above all an annotation
-  (`- test_spectral_graph.py (new file)`), which is what filed a written,
-  executed, passing file under "not written". The normalizer errs one way on
-  purpose -- over-stripping only hides a real accusation, under-stripping
-  invents one -- so it also drops "None"/"N/A" answers and prose sentences,
-  and its trailing-parenthesis strip is a whitelist of annotation words,
-  because a filename can carry parentheses of its own.
-- **`state["files_changed"]` accumulates across passes; the local list does
-  not.** Inside `builder_node` the local `files_changed` is what *this* pass
-  wrote, and the verification logic depends on that: `carried` uses it to tell
-  a path this pass rewrote from one only an earlier pass touched, and the
-  "deleted file clears its failure" exemption applies to carried paths alone.
-  The state field answers a different question — what the whole run produced —
-  so `all_files_changed` merges the previous record in before it is written
-  back. Overwriting it per pass meant a run that wrote a file on one cycle and
-  nothing on the next ended reporting it had changed nothing while the file sat
-  on disk, and the Architect ruled on that empty record: a build with a file to
-  its name was approved as having produced none. That is the same false account
-  as claiming a file that was never written, pointing the other way. The feed
-  line still counts this pass, and names the running total only when the two
-  differ, so a quiet pass never reads as though the run lost its work.
-  **It also retracts.** A path is dropped from the record once it is no longer
-  on disk, and named in the report rather than simply vanishing. The 2026-09-11
-  run ended listing four paths of which three had been written on one pass and
-  removed with `rm` on a later one, with nothing retracting them: the console's
-  "changed this machine" block, a safety notice about files on disk, named
-  three files nobody could find, and the Architect ruled on the same record.
-  That is the mirror of "described but not written", in the direction nothing
-  guarded. A run whose every product was deleted now reports none, and the
-  report still says what went.
-  The retraction runs *after* `written` is computed, and a test pins that
-  ordering, because `written` has to keep seeing the whole record -- a file
-  this pass wrote through a real tool call and then removed did come from a
-  successful write, so naming it under `## Files Modified` is not a lie and
-  must not be accused of being one.
-- **`filesystem_write` refuses to leave the project.** It took its argument
-  raw -- `Path(path).write_text()` behind a `parent.mkdir(parents=True)` -- so
-  an absolute path, a `..` or a symlinked parent put the Builder's writes
-  anywhere the account could reach, and on 2026-09-11 a run working on this
-  checkout wrote `/tmp/gen_doc.py` and `/tmp/gen_overview.py`. Two costs, and
-  the second bites: a file outside the project is one no reindex, no
-  `corpus_staleness` and no `git status` will ever mention, and
-  `files_changed` feeds the "changed this machine" notice, so such a write
-  makes that notice name a path the operator cannot find from the project.
-  `_resolve_write_path` refuses
-  before the write, the shape `_resolve_cwd` already uses beside it. It
-  resolves the *parent* rather than the leaf -- the leaf normally does not
-  exist yet, and a symlinked parent is the way out that matters -- and it
-  resolves rather than matching strings, because `project/link/x` is inside the
-  root as text and outside it on disk.
-- **`discuss_only` is the per-run "reason, do not act" switch**, set by the
-  caller (the console's *discussion only* box, or
-  `run_goal({goal, discuss_only: true})`) and never by an agent -- the third
-  flag of that shape, after `expect_failures` and `research_web`. The Builder
-  is offered **no tools at all**. It briefly got the three read-only ones on
-  the argument that reading changes nothing; zero is the stronger guarantee,
-  because it needs no argument about which reads are harmless and cannot be
-  weakened later by a tool added to that set which turns out to do more than
-  read. `DISCUSSION_TOOL_NAMES` is empty rather than short, so nothing is bound
-  and the node takes the path a seat whose model cannot call tools already
-  takes -- there is no tool loop on a discussion run, and "took no action" is a
-  property of the code that ran rather than of a filter having been complete.
-  Online research is
-  forced off whatever its own box says, since the phase writes pages under
-  `research/web/` and embeds them, which changes this machine and every later
-  run's retrieval. `_run_builder_tools` still refuses against the set it was
-  given rather than the full one, so the guarantee holds on that path too if
-  anything ever routes there. And the feed line reads "Discussion only:
-  proposal ready, nothing was changed" rather than "Implementation complete",
-  for the reason the stop and the deadline have their own wording: the
-  Architect rules on that line, and a pass that could not act must not read as
-  one that acted. The prompt carries `DISCUSSION_NOTE` so the seat is told it
-  has no tools and works from the plan and research it was handed.
-- **A generated project is stored apart and embedded only on request.** The
-  console's *where* dropdown sends `run_goal({goal, project})`: blank means
-  this checkout, as before; a name means `output_dir = projects/<name>`, told
-  to every seat through the state injection and to the Builder through
-  `OUTPUT_DIR_NOTE`, and `_outside_output_dir` refuses any `filesystem_write`
-  outside it -- in `_run_builder_tools`, not the MCP client, because the scope
-  belongs to the run. `iter_project_files` holds every `projects/` directory
-  out of the walk until the operator opts it in (`embed_project`, from the
-  verdict or the Corpus tab), because on 2026-09-18 a snake game a run wrote
-  was embedded by the next rebuild and failed the entity guard. The opt-in is
-  `projects/embedded.json` on disk rather than a write into the store, for the
-  reason an upload is a file first: a rebuild prunes whatever the walk does not
-  find. The choice is the caller's, never an agent's, and the file sits outside
-  every project directory so a confined Builder cannot write itself into the
-  corpus. The entity census skips `projects/` as it skips `uploads/`: an
-  embedded project is per-machine.
-- **`git_dwell` is the whole git flow as one call, and it stops before the
-  irreversible part.** The stages are `survey`, `branch`, `stage`, `commit`,
-  `push`, `pr`, `merge`, and they always run in that order however the caller
-  lists them -- "push then commit" is a typo, not an instruction. Each stage
-  records the command's real output, so the result is an account of what
-  happened rather than a claim that it did, and a failure names itself in
-  `stopped_at`: a pipeline reporting only "failed" gets retried whole and
-  re-runs the parts that already worked. It exists because the Builder was
-  otherwise driving `git` through `terminal_execute` one command at a time,
-  where the ordering is the seat's to remember and a half-finished sequence
-  leaves no record of how far it got.
-  One refusal carries the design: *it will not commit onto the default branch*
-  -- `branch` creates one when HEAD is the default, and skipping that stage is
-  refused rather than treated as permission, since an agent picking its own
-  stage list would find that gap immediately. That is what makes the rest safe
-  to default: the work arrives on a branch, through a pull request, with the
-  diff and the checks attached, whatever else runs.
-  **The merge was the second refusal until 2026-09-12 and is now the last stage
-  of the default pipeline.** The old argument was that a pull request the same
-  agent opens and immediately merges is not a review, which is true and is not
-  something a default can decide. What it produced was a tool that is one call
-  because the flow is one act, doing six sevenths of it every time and leaving
-  the seventh to a caller who had no way to know it was outstanding. The
-  review point is now opt-*in*: naming `stages` without
-  `merge` stops at `pr`, the same list the old default was, spelled by whoever
-  wants it. `merge` is `--squash --delete-branch`, so the default branch gets
-  one commit carrying the pull request's title and body -- which makes those
-  two fields the permanent record of the change, not just a review aid.
-  The refusal and the opt-out are both pinned by tests watched to fail with the
-  guard removed.
-  Two smaller decisions matter. *Nothing staged is a success, not a failure* --
-  a clean tree is an ordinary outcome, and failing there sends the Builder off
-  repairing a repository that was never broken; the stages that only make sense
-  after a commit are dropped instead. *And `paths` commits only what it names*,
-  defaulting to everything, because the Builder shares a working tree with
-  whoever is running the console. A `discuss_only` run cannot reach it at all:
-  no tools are bound.
-- **The Builder must run what it writes.** Every file it wrote with a
-  `RUNNABLE_SUFFIXES` extension is executed by `_verify_written_files` after
-  the tool loop, and a file that raises becomes a blocker plus a `FAILED` line
-  in the report — the feed says "N did not run" rather than "Implementation
-  complete". Enforced in code, not left to the prompt, for the same reason
-  `files_changed` is: the Builder's account of its own work is not evidence.
-  A file clears only by running clean: files that failed on an earlier pass are
-  re-verified even when the current pass did not touch them, because otherwise
-  the Builder retires a failure by doing nothing. One path is exempt: a
-  carried path that no longer exists on disk — deleting the file is a real fix,
-  and re-running a missing path fails forever, which pinned
-  `failed_verification` open and made the gate rewrite every `approved` to
-  `revise` until the step ceiling. That exception applies only to carried
-  paths; a path in `files_changed` was just written by a tool that reported
-  success.
-  **A module inside a package is imported, not executed, and it used to be
-  skipped.** `python pkg/mod.py` puts `pkg/` on `sys.path` instead of the
-  directory above it, so a module importing its own package absolutely — the
-  normal way to write one — raises `ModuleNotFoundError` however correct it
-  is. Such a file was reported `SKIPPED`, and a skip proves nothing: on
-  2026-09-12 a run whose only products were two package modules was approved
-  as "complete and verified" with neither ever executed. `_import_target` now
-  finds the directory above the outermost package and the dotted name, and the
-  file is verified the way its callers use it — `python -c "import pkg.mod"`
-  with that directory prepended to `PYTHONPATH` — reading `imported clean` or
-  `FAILED`. An import runs the module's syntax, its imports and its
-  module-level code. Its `__main__` block is deliberately not run: in a package
-  that is a CLI or a server, and its wait would be reported as a hang. A
-  package directory whose name is not a valid module name cannot be imported
-  at all, so its files are executed as scripts like any other.
-- **What the Builder writes is linted the way CI lints it.** Running a file
-  proves it does not raise; it says nothing about whether CI accepts it. The
-  module an agent run wrote on 2026-09-12 imported, ran and was approved --
-  and carried 103 ruff errors. `_lint_written_files` runs `ruff check` over
-  every Python file a pass wrote
-  or carried, with the project's own configuration, before those files are
-  executed. ruff fixes only what cannot change behaviour
-  (`LINT_AUTOFIX_RULES`: trailing whitespace, a missing final newline, import
-  order), which was 60 of those 103; the rest is the Builder's, because a fix
-  ruff marks "safe" can still delete an import kept for its side effect. What
-  is left lands in `lint_failed`, is re-linted on every later pass until it is
-  clean, and blocks approval whatever `expect_failures` says -- CI lints a
-  fixture meant to fail at runtime all the same. A machine without ruff says
-  so in the report and blocks nothing, since a missing linter is not a defect
-  in the file.
-- **Verification runs headless, and never with a keyboard.** The subprocess
-  gets `MPLBACKEND=Agg` with `DISPLAY`/`WAYLAND_DISPLAY` removed
-  (`HEADLESS_VERIFY_ENV`), and `stdin` closed. Both are about the same
-  failure: a file that waits for a human burns its whole
-  `VERIFY_TIMEOUT_SECONDS` and is reported `FAILED` for it. A plotting
-  example ending in `plt.show()` — the ordinary way to write one — is correct
-  code that hung forever, and the first one to do it ate most of the Builder's
-  budget, so the rest of the pass came back `NOT RUN`. The display variables
-  are unset as well as `MPLBACKEND` set,
-  because a library that probes for a display itself never consults
-  `MPLBACKEND`. `stdin=DEVNULL` is in `_terminal_execute` and `_run_tests`
-  rather than the verify path alone: no Builder tool call ever has someone at
-  the keyboard behind it.
-- **A timeout must carry what the file printed.** `_terminal_execute` returns
-  `TimeoutExpired`'s captured `stdout`/`stderr` and sets `timed_out`;
-  `_timeout_detail` appends the *tail* to the report. The message alone cannot
-  distinguish a file that blocked on its first line from one that did all its
-  work and then waited at the end, and the Builder does not leave that blank —
-  it read a bare timeout as a missing dependency and spent a second full
-  timeout on an identical retry. The tail is what says how far it got, so
-  truncation trims the front.
-- **A silent Researcher is not research.** `_parse_researcher_output` defaults
-  the status to `ready_for_builder`, so a seat that answered with nothing was
-  announced as "Research complete" while `research` reached the Builder empty.
-  The cost was not one bad cycle but a loop: the Builder reports an empty
-  store, the gate rules `need_research`, and the run goes back round to the
-  same silent seat, burning a step per cycle to the ceiling. `_said_nothing`
-  catches both shapes — an empty response, and one that filled in the headings
-  and left every section blank — and `_as_text` flattens content blocks first,
-  because a list reads as truthy and non-empty to `len()` and to the section
-  regexes alike. It routes to the **Builder**, not back to the Planner: the
-  plan is not what failed, and re-planning would aim the run at the same seat
-  again. The feed message names the seat's model, since changing it is the
-  only thing that actually fixes this. Which model to name is a measurement,
-  not a guess: `scripts/diagnose_seats.py --phase probe` asks each candidate
-  the Researcher's own question with retrieval stubbed out, and on this
-  machine `gemma4:cloud`, `nemotron-3-ultra:cloud` and `kimi-k2.7-code:cloud`
-  all answer with nothing while `qwen3.5:397b-cloud` and `kimi-k3:cloud`
-  answer in full -- one machine on one day, so re-run it rather than trusting
-  the list.
-- **The Planner sees a map of the project before it plans.** It used to plan
-  from the goal and the Architect's direction alone, so it could name no file
-  the goal did not -- and `_gather_research` searches on `plan`, so a plan
-  naming nothing retrieves nothing in particular. `_project_map` hands it the
-  files the corpus ranks closest to the goal, a short excerpt each, only above
-  the relevance floor. It is context, like the state injection, so the
-  Planner still calls no tool. The floor itself is `relevance_floor()`,
-  measured on the built corpus rather than stated -- see the floor bullet
-  below -- and `None` until that measurement has run, in which case the map is
-  skipped. Measured on 2026-09-12 with a local 9B seat, three goals each way:
-  without the map no plan named a project file, and one listed the Planner's
-  own instructions as its steps; with it, the seat-timeout goal was planned
-  against `config.py`, `mcp_client.py` and `nodes.py`, while the two UI goals
-  still named none, because that corpus had not yet indexed
-  `frontend/index.html` -- the map is exactly as good as retrieval.
-  `tests/conftest.py` switches it off
-  (`PLANNER_PROJECT_MAP`), so no planning test reads the developer's corpus.
-  The Builder's section is `## Blockers` now, not `## Next Steps / Blockers`
-  -- a heading that invites next steps gets them -- and on a discussion run
-  whatever it writes there stays in its report rather than in `blockers`. A run
-  that cannot act cannot be blocked, and "requires approval from the
-  Architect" had sat in the recovery block as though the run were stuck.
-- **The opening cycle always reaches the Researcher, and the Planner's routing
-  stands on every cycle after it.** `_route_from_planner` overrides a first-hop
-  `Builder` because the alternative was not a run that researched less -- it
-  was a corpus nobody read. Nothing else forces retrieval: the project is
-  indexed before the Architect opens, the web phase may embed pages into that
-  same corpus, and then the Researcher runs only if the Planner's reply
-  happens to name it. A seat that writes a confident plan names the Builder.
-  Measured on the run of 2026-09-12: both cycles went Planner -> Builder and
-  the run ended with `research` empty and `research_status` unset -- 103s of
-  embedding spent on a run that could not have used a word of it, with nothing
-  in the record saying so.
-  The override can be unconditional because it is nearly free where it is
-  redundant: on a goal the corpus answers, `_gather_research` formats the
-  retrieved chunks and returns without invoking the seat at all (see *the
-  Researcher's model is only consulted when retrieval is thin*), so the hop
-  costs a search. The case that does reach the model is the goal the corpus
-  cannot answer, and that one routes on to the Builder regardless.
-  Two decisions in it are not interchangeable with the obvious alternatives.
-  *The marker is `research_status`, not `research`* -- a seat can legitimately
-  come back with nothing to say, and forcing on empty findings would re-ask the
-  same question of the same corpus every cycle round the loop; every exit from
-  `researcher_node` sets a status bar the emergency stop, which is ending the
-  run anyway. *And a placeholder plan is exempt* (`plan_is_placeholder`): both
-  `_PLANNER_TIMED_OUT` and `_PLANNER_NO_STEPS` pick the Builder deliberately,
-  because `_gather_research` searches on `plan` -- a plan nobody wrote is a
-  search for a note about the Planner, which is exactly the thin retrieval that
-  falls through to the Researcher's own model, and a second slow seat is the
-  last thing a run with a stalling one needs.
-- **The Researcher's model is only consulted when retrieval is thin.**
-  `_gather_research` calls GraphRAG first and, whenever the top hit clears the
-  corpus's measured floor (`relevance_floor()`), formats those chunks straight
-  into the findings
-  and returns without invoking the seat at all. So on a question the corpus
-  answers well, the Researcher's model is not a variable: two different models
-  produce byte-identical `research`, in ~0.0s. So the seat's model matters
-  most in precisely the case that is hardest to notice -- a question the
-  corpus cannot answer, which is also when a silent seat sends the run round
-  the loop. `scripts/diagnose_seats.py` keeps the two apart: the `research`
-  exercise measures retrieval, `offcorpus` is the one that reaches the model,
-  and the phase 1 probes stub retrieval out entirely.
-- **The relevance floor is measured per corpus, never stated, and a corpus has
-  none until it is measured.** The floor is what `_gather_research` reads off
-  `results[0]["score"]` to decide whether the corpus answered at all, and a
-  cosine similarity has no absolute meaning -- it is a property of the
-  embedding model on this corpus's texts. It was `0.3` once, hard-coded beside
-  the comparison in `nodes.py`, and that number was measured to be wrong:
-  twelve questions this corpus answers against twelve it cannot separated with
-  an empty band, and `0.3` sat at the top of the *wrong* population -- the
-  project's own off-corpus probe (the `offcorpus` exercise on PostgreSQL
-  vacuum) crossed it, and was therefore served to the Builder as though the
-  corpus had answered -- an exercise whose whole point is that the
-  Researcher's model is the variable, measuring retrieval instead.
-  So there is no constant any more. `relevance_floor()` returns the floor from
-  the corpus's own `floor_calibration.json` -- and only when that record names
-  `EMBEDDING_MODEL_NAME`, since a floor measured under one embedding model
-  says nothing about another. Until a record exists it returns `None`, and the
-  run then takes the no-floor paths: `_gather_research` hands every search to
-  the Researcher's model and the Planner gets no map, rather than a number
-  that misfiles some question silently. The run that finishes a corpus
-  measures the floor there and then (`calibrate_relevance_floor`, driven from
-  `serve.py`): it asks the questions in `embedding_calibration.json` -- twelve
-  the corpus answers, twelve it cannot -- and puts the floor in the middle of
-  the gap between the two populations, the way `EIGENGAP_DECISIVENESS` was
-  chosen. A model that leaves no gap gets no floor. The questions live in a
-  JSON file because the walk does not index JSON: anywhere the corpus reads,
-  the unanswerable ones would be answered by their own text.
-- **Search is hybrid, and BM25 re-ranks the dense window rather than
-  retrieving beside it.** A dense embedding is a poor instrument for "this
-  passage contains this exact rare identifier", which is what a plan naming
-  `BUILDER_DEADLINE_SECONDS` is really asking -- the model was trained to put
-  *similar* passages together, and every seat-timeout constant here is similar
-  to every other one. Measured through `search` against the real store, on 541
-  identifiers each defined in exactly one project file: the defining file came
-  first **53.4%** of the time on dense alone and **65.1%** with the re-rank
-  (McNemar p < 0.001, 85 fixed against 22 broken). Recall at 5 moved 93.0% to
-  95.4%, which says where the gain is -- the right file was nearly always
-  retrieved and simply not ranked first. Prose improved too, 66.0% to 68.2% on
-  400 held-out passages, so this is not a code-search special case bought at
-  the expense of ordinary questions.
-  Three decisions in `lexical.py` are not interchangeable with the obvious
-  alternatives. *It re-ranks rather than retrieving in parallel*: full fusion
-  over the whole corpus measured 67.3% against 66.2%, six queries in 541 and
-  inside the noise, and it costs the thing that matters -- a document only the
-  lexical side found has no dense score, and the relevance floor is read off
-  exactly that field. Every result therefore still comes from the dense window
-  and still carries the cosine that window gave it, so the floor's calibration
-  survives. *Identifiers are indexed whole **and** in pieces*, because emitting
-  only the pieces makes `NODE_DEADLINE_SECONDS` and `BUILDER_DEADLINE_SECONDS`
-  near-identical -- the confusion the lexical half exists to resolve. The
-  acronym seam is part of that: without it `GraphRAGKnowledgeBase` splits to
-  `graph` + `ragknowledge` + `base`, and the word `knowledge` is absent from
-  the index entirely. *And ranks are fused, not scores*: a BM25 score is
-  unbounded and corpus-relative while a cosine sits in [-1, 1], so any weighted
-  sum needs a scaling constant that is really a third hyperparameter, tuned on
-  one corpus and wrong on the next.
-  The index is built from the store on first use and **dropped** by
-  `add_document` and `clear` rather than amended -- rebuilding over ~1,200
-  chunks takes 0.17s, and an index maintained in parallel with Chroma is a
-  second account of the same corpus, free to disagree with it. A store that
-  cannot answer `get` falls back to dense-only instead of raising: the lexical
-  half improves an ordering that is already correct without it.
-- **Every retrieved passage says where it came from, and the log says only what
-  matters.** The findings the Builder is handed named no file at all, and each
-  passage began wherever a chunk boundary fell -- "in self.graph: neighbors =
-  ..." -- so the Builder was given code it could not open the file of. `search`
-  now reads each hit's file and anchors the passage (`_passage_location`): its
-  1-based `line`, and the text from the start of that line. A file edited since
-  it was indexed gets no line rather than a guessed one, and a minified line is
-  not reached back into. The findings put `path:line` above every passage, and
-  the Retrieval tab shows the same.
-  A loose node id resolves by rank -- the id ignoring case, a document by file
-  name, a prefix, a substring, the shorter id first -- where it used to take
-  the first node containing the text in enumeration order, so the same query
-  could trace a different node after a reindex. `neighborhood` and
-  `query_graph` return `resolved_from` and `alternatives` whenever the id
-  typed was not the id found. The server log held 1,772 lines on 2026-09-12,
-  1,177 of them a sweep's per-document `query_graph` calls (see *a sweep is
-  one call*) and 84 HTTP requests logged at INFO: the MCP SDK's constructor
-  runs `logging.basicConfig` at the level its server is built with, so
-  importing `graphrag_server` switched every library's INFO on, and the server
-  is built at WARNING now. The chunker's tokenizer (Qwen3's own,
-  via `transformers`) loads from the local cache first, so a warm start asks
-  huggingface.co nothing and a machine without a network still chunks.
-  Embedding itself is a POST to the Ollama daemon; nothing else is fetched.
-- **The Builder gets the whole retrieved passage, from every result.**
-  `RESEARCH_RESULTS` feeds both the `top_k` the Researcher asks for and the
-  slice it forwards, so the two cannot drift: the search used to request five
-  results and hand on three, discarding two passages that had already been
-  retrieved, ranked and re-ranked -- and the *diverse* two, since
-  `SEARCH_ESCALATION` widens the window precisely to stop one file taking every
-  hit. `RESEARCH_SNIPPET_CHARS` then caps each passage at 1,500 characters
-  rather than the old 300.
-  The 300 was the worse of the two, because of *which* 300 it kept. A chunk is
-  the unit retrieval judges -- it matched somewhere inside itself -- so keeping
-  the opening third keeps the part with no particular reason to be relevant.
-  Measured on this corpus, chunks run to a mean of 882 characters and a p99 of
-  1,373, so 300 carried **34%** of a typical passage. On a `research/web`
-  document the opening is the provenance header, and there the loss was total:
-  the top-scoring source of the 2026-09-09 run reached the Builder as a title,
-  a URL and a timestamp, with not one character of the article attached -- a
-  citation and no evidence. 1,500 clears the p99, so a passage normally
-  arrives whole and the cap guards against a pathological chunk; the Builder
-  now receives ~4,900 characters from five sources against 900 from three. A
-  cut that does bite is announced
-  in the text (`_research_snippet`), for the reason `_fit_to_index_limit`
-  writes its note onto the page: a silent trim is indistinguishable from a
-  source that had nothing more to say, and the Builder cannot ask.
-- **Work without evidence cannot be approved.** The Architect's `approved` is
-  rewritten to `revise` — the one place the gate's ruling is overridden — while
-  any of three things holds: a file in `failed_verification` that ran and
-  failed; a file in `unverified`, which nobody executed; or a Builder pass cut
-  off before it finished (`builder_cut_off`: `turn_cap` or `deadline`). The
-  step ceiling and `RUN_BUDGET_SECONDS` still end the run, so the block cannot
-  hang it. The last two were missing until 2026-09-12: the gate held one list
-  and cleared all of it under `expect_failures`, unrun files included, and a
-  Builder stopped at its tool-turn cap, with a blocker saying so, was approved
-  as "complete and verified". The
-  cost is real: a goal that legitimately wants a failing file (a deliberate
-  fixture, an expected-to-fail test) cannot be approved without the opt-out,
-  and work too large for one pass is not approved until a pass finishes it.
-- **`expect_failures` is the per-run opt-out**, set by the caller (the console
-  checkbox, or `run_goal({goal, expect_failures: true})`) and never by an
-  agent. It suppresses the block, not the check: the file is still executed,
-  still reported as `FAILED`, and still listed in `failed_verification`. It
-  just stops that file overruling the gate and sets no blocker — a file nobody
-  executed, or a pass cut off before it finished, still blocks. It is per-run
-  rather than per-file because the Builder chooses the filenames, so a run
-  with it on will not block on an unintended failure either — which is why the
-  failure stays visible in the report instead of being dropped. Defaults off.
-- **The seat lights answer "who is working", and `run_progress["node"]`
-  cannot.** `graph.stream` yields an update when a superstep *completes*, so
-  `node` names the seat that just finished -- right for the feed, which lists
-  what happened, and backwards for a light meaning "this seat is working": it
-  lights the previous seat for the whole of the next seat's turn, so the
-  slowest node in the run is the one node whose light never comes on and a
-  stalled Architect shows as a busy Builder. `ACTIVITY` (`control.py`, a
-  process-global beside `RUN_CONTROL` for the same reason) is entered and left
-  by `_tracked` in `graph.py`, so a seat is lit for as long as its node
-  is on the stack, and `run_progress` reports it as `active`. The marking is a
-  wrapper rather than lines in the node bodies because every node has several
-  exits -- the stop, a deadline fallback, the ordinary return -- and only a
-  `finally` covers the one nobody thought about. `leave` checks the name it was
-  given: a worker `_with_deadline` abandoned finishes late, and must not darken
-  the seat working now. `_finish_run` clears it as a backstop, since a light
-  left on outlives the run in every console still open.
-  **A light fed by a poll is a sample, and a sample misses whatever falls
-  between two polls.** Measured on 2026-09-13 through the real page, polling
-  once a second: a 0.4s Researcher turn never lit at all, the opening
-  Architect sat dark for the first second of its turn, and the five-second
-  crew poll rebuilt every card, so a Builder lit for 12s restarted its rainbow
-  from red four times. The short turn is the one that bites in practice: a
-  Researcher answering from retrieval makes no model call (see
-  *the Researcher's model is only consulted when retrieval is thin*), so on a
-  goal the corpus answers well its light was the one that never came on. So
-  `ACTIVITY` also keeps the run's recent turns -- numbered, kept after they
-  end, cleared by `begin_run` as a run is claimed -- and `run_progress`
-  returns them as `turns`, read under `_run_lock` so no reply pairs one run's
-  `running` with the last run's record. The console polls every `SEAT_POLL_MS`
-  and lights every turn it has not yet shown, one it only heard about after it
-  ended included, for no less than
-  `SEAT_MIN_LIT_MS`, because a flicker nobody sees is not a light. That minimum
-  is the one place a light outlasts its node, and it is bounded: the next seat
-  waits at most that long, and only behind a turn that short, while a turn that
-  ended more than `SEAT_REPLAY_MS` before the console heard of it -- a hidden
-  tab's slowed timers -- is not replayed at all. `loadCrew` rebuilds the cards
-  only when something they draw has changed, which is why `setSeat` now
-  repaints from the server after a refusal, as `setThinking` always did: the
-  unconditional rebuild had been quietly putting a refused choice back.
-  Measured again after the change: every turn lit, the 0.4s Researcher
-  included, each within one poll of its turn and of its end, and a page
-  reloaded mid-run met the run through `reattach()`.
-  **The embedder card has a light of its own, read off a meter rather than
-  inferred from who asked.** `EMBEDDER_ACTIVITY` (`control.py`) is marked by
-  `_embedder_at_work` on the only two places the model does anything --
-  `_load_embedder` and `_encode`, which every embedding passes -- so the corpus
-  phase, a stored page, the Planner's map, a search and an upload are all
-  covered and none can forget to say so, while a search against no corpus
-  embeds nothing and lights nothing. It counts rather than flags, because the
-  work overlaps (a console search can land inside a run's index), and like the
-  turn record it remembers finished work, since a query embeds in
-  milliseconds. A run's poll carries it as `run_progress.embedding`; between
-  runs the console asks `embedding_activity` only while a search or an upload
-  of its own is in flight, rather than polling an idle server forever. Its
-  hold differs from a seat's on purpose: lit while working, and for
-  `SEAT_MIN_LIT_MS` past the last reply that showed work, because an index is
-  a string of encodes with a store write between each and a light that went
-  out in every gap would flicker. Measured on 2026-09-13, a fresh
-  five-document corpus: ten spells of work, from a 4.68s corpus phase down to
-  a 7ms query, every one lit and no light without work under it.
-- **The emergency stop is cooperative, and the recovery is the point.**
-  `RUN_CONTROL` (`control.py`) is a process-global flag, not a state field: the
-  graph compiles without a checkpointer, so nothing outside a node can write
-  into a state the graph is already streaming. It is checked at the top of the
-  Builder's tool turn loop, before each file in `_verify_written_files`, at the
-  top of the three tool-free nodes, and between supersteps in `serve.py` —
-  never inside a tool batch, because skipping calls there leaves `ToolMessage`
-  replies missing for `tool_call_id`s the model was already told about.
-  Nothing in flight is abandoned, for the same reason the Builder's deadline
-  never abandons a tool call. It is kept apart from `_Deadline` deliberately:
-  a run the operator stopped must not be reported as one that overran its own
-  budget, and the report is the only place anyone finds out which happened.
-- **A stopped run must come back with what it produced.** The final state used
-  to be returned to the caller and dropped, so a stop that lost the partial
-  plan, research and report would be no better than killing the server —
-  which is the thing it replaces. `rpc_run_goal` writes a snapshot
-  (`runs/last_run.json`, atomically) in every exit path, *including the
-  exception path*, and `last_run` serves it to a console that reloaded. The
-  bookkeeping is in a `finally`; before that, a run that raised left
-  `_run_progress["running"]` True forever and the console polled a run that no
-  longer existed.
-- **The stop does not touch `expect_failures`, and must not.** A file the stop
-  prevented anyone from executing is `unverified`, and `unverified` blocks
-  approval whatever the opt-out says — that opt-out is for a file the run meant
-  to fail, still executed and still reported, not for a gap in the evidence. So
-  ticking the box cannot make a stopped run look finished. The console says so
-  explicitly in the recovery block rather than leaving it to be inferred.
-- **The exit button never kills a run by surprise.** `shutdown` without
-  `stop_first` refuses while a run is in flight and says what is running; with
-  it, the run is stopped through the ordinary emergency stop and the exit is
-  *deferred to the run's own `finally`*. That deferral is the whole point:
-  exiting the moment the stop is requested would race the snapshot, and a run
-  stopped only so the console could close is exactly the one worth keeping.
-- **The deferred exit is a handshake, and both halves decide under
-  `_run_lock`.** `rpc_shutdown` reads `running` and sets `_exit_after_run` in
-  one hold of the lock, *before* `RUN_CONTROL.stop()`; `_finish_run` (the run's
-  `finally`) clears `running` and reads `_exit_after_run` in one hold of the
-  same lock. So whoever holds it either sees a live run and hands it the exit,
-  or sees none and takes the exit itself — exactly one, never neither. Claiming
-  the exit after the stop lost it outright: the stop is what sends the run to
-  its teardown, a run at a superstep boundary gets there in microseconds, and
-  it read the flag unset and declined to request the shutdown — correctly, on
-  what it could see. Nothing set `_shutdown_requested` at all, so the X did
-  not shut the server down. `rpc_stop_run` has the same shape and now guards
-  the same
-  way, or it pins `stopping` True on a run that has already ended.
-- **The console confirms the exit by the server's silence, never by the
-  reply.** The reply to `shutdown` says the exit was *asked for*, and an exit
-  can be lost after it is asked for, so `waitForExit` polls until the socket
-  is dead — on both branches, including the one with nothing in flight, which
-  used to print "The server has stopped" the instant the reply landed. The
-  probe is a bare `fetch`
-  rather than `rpc()`, since only the fetch failing is evidence; `rpc()` throws
-  on an ordinary error reply too. When the wait runs out it says the server is
-  still running instead of leaving "Closing…" over a live process.
-- **Three nested timeouts, and none of them is redundant.**
-  `LLM_TIMEOUT_SECONDS` (config.py) bounds one provider call at the socket —
-  each provider spells it differently (`client_kwargs={"timeout":…}` for
-  Ollama, `default_request_timeout` for Anthropic, `request_timeout` for
-  OpenAI), so a missed keyword silently restores an unbounded wait on that
-  provider alone. `NODE_DEADLINE_SECONDS` (nodes.py) bounds a whole node turn,
-  and covers the Architect, Planner and Researcher — all single-call, tool-free
-  nodes that can be wrapped whole. It is what catches a model that streams
-  slowly but never stops, and a node making several calls that each finish just
-  inside their own limit. `BUILDER_DEADLINE_SECONDS` is the Builder's larger
-  equivalent — that node legitimately makes up to `MAX_BUILDER_TOOL_TURNS`
-  round trips, some of which run tests. `RUN_BUDGET_SECONDS` (serve.py) bounds
-  the run, but is checked **between
-  graph supersteps** — a node in flight never reaches a superstep boundary, so
-  it cannot end a hung node. That gap is the whole reason for the other two:
-  before them a stalled seat hung a run indefinitely, and `_SeatLLM` recorded
-  nothing because a hang raises nothing.
-- **A command's timeout is a budget, not a verdict.** `terminal_execute`
-  defaulted to 30 seconds while `run_tests` got 600, and `BUILDER_TOOLS`
-  offered only `command` -- so the Builder could not raise it and was never
-  told the limit existed. This project's own `scripts/verify_and_test.py`
-  finishes clean in ~33s and was reported `FAILED` for the difference, which
-  is `MIN_VERIFY_SLICE_SECONDS`' false accusation one level up: the Builder is
-  handed a working script labelled broken and spends its next turns repairing
-  code that was never wrong. `TERMINAL_TIMEOUT_SECONDS` is 60, matching
-  `VERIFY_TIMEOUT_SECONDS` -- both bound a single command a seat is waiting on
-  -- and `timeout` is now in the schema with the cap named in the description,
-  since a limit a seat cannot see is one it reads as a failure. A requested
-  value is clamped by `TERMINAL_TIMEOUT_MAX_SECONDS` rather than trusted: a
-  tool call is never abandoned, so an unbounded request does not overrun a
-  deadline, it hangs the pass past every deadline there is. Raising the default
-  does not make every script runnable inside a pass, and is not meant to --
-  `example_usage.py` is a full 4-agent run at ~256s, past
-  `BUILDER_DEADLINE_SECONDS` (240) entirely. That is a thing to run outside the
-  Builder, not a number to raise.
-- **`terminal_execute` has no shell, which is what lets it accept `;` and
-  `()`.** It was `shell=True` behind a whitelist of permitted characters, and
-  the whitelist refused the ordinary way to write a one-liner: `python -c
-  "import x; print(x.y)"` trips on `;` `(` `)`, as does any path containing
-  parentheses, so a runnable file named that way could never be verified and
-  would sit in `failed_verification` forever.
-  Meanwhile the filter admitted a bare `rm -rf /` without complaint: it never
-  guarded against a destructive command, only against chaining one onto
-  another. The command is now `shlex.split` into an argv list and run
-  directly, so the shell metacharacters are inert *data* -- `echo hi; rm -rf
-  /` runs `echo` with four literal arguments, which is a stronger guarantee
-  than refusing the string was, and a test asserts the canary file survives
-  rather than asserting the refusal.
-  The trade is that shell *features* are gone rather than rejected -- and for a
-  while they were also silent. A pipe was accepted and meaningless, handed to
-  the program as the literal argument `|`, which is worse than a refusal: the
-  Builder reads the strange result as the command failing and repairs the wrong
-  thing. `SHELL_OPERATORS` now refuses an operator that stands alone in argv
-  and says which one it was (`_shell_operator_error`): measured,
-  `wc -l notes.md && tail -50 notes.md` gave `wc` the arguments `&&`, `tail`
-  and `-50` and came back `wc: invalid option -- '5'`, naming the chain
-  nowhere.
-  **This is not the character whitelist coming back**, and the difference is
-  where it runs: the old filter scanned the raw string and refused
-  `python -c "import x; print(y)"` over a `;` that was never syntax, while this
-  runs *after* `shlex.split` and matches whole tokens, so an operator inside a
-  quoted argument is untouched and a filename containing one is still a
-  filename. It is not a safety mechanism either -- the operators were already
-  inert -- so it stays a refusal *before* the spawn, and the guarantee remains
-  the canary file, not the rejection. Two things follow from matching tokens.
-  Only a *spaced* operator is caught: `echo hi; rm -rf /` splits to
-  `['echo', 'hi;', ...]`, so that `;` rides on `hi`, stays inert, and is what
-  the canary test still pins. And a literal `&&` can no longer be passed as an
-  argument even quoted, since `shlex` leaves the two indistinguishable;
-  nothing here needs that. Redirection is answered with
-  `filesystem_write`, the way `cd` is answered with `cwd`, while chaining has
-  no replacement and is not given a fake one.
-  **A redirect glued to its target is caught too** (`_GLUED_REDIRECT`):
-  `shlex` keeps `2>/dev/null` as one token, so on the run of 2026-09-10 it
-  reached `find` as a path. Output redirection only -- a glued `<` cannot be
-  told from `grep "<div>"`, and `>=` is a version bound -- at the cost `&&`
-  already pays: an argument really beginning with `>` cannot be passed. A glob
-  or `~` cannot be refused, since `find -name "*.py"` needs the literal, so
-  `_unexpanded_hint` names one only when the program quotes it back in its
-  own error (`cat: 'dir/*': No such file or directory`).
-  Two failures the shell used to fold into a return code are
-  now surfaced by name: unbalanced quotes cannot be parsed (`shlex` raises,
-  and the message says to check the quoting), and a missing program raises
-  `FileNotFoundError` rather than returning 127, so the error names the
-  program instead of leaving "not found" to read as a missing file argument.
-  The other feature that had to be *replaced* rather than merely lost is
-  `cd`: it is a builtin, not a program, so `cd there && python x.py` does not
-  run in the wrong directory, it fails with `Command not found: 'cd'` -- and a
-  Builder with no other spelling to try burns turns rediscovering absolute
-  paths, which is what it did on the run of 2026-09-08. `cwd` is in the schema
-  for the reason `timeout` is: the tool honoured the argument while
-  `BUILDER_TOOLS` offered no way to ask for it. It is validated by
-  `_resolve_cwd` **before** the subprocess rather than left to raise: a missing
-  directory raises the same `FileNotFoundError` a missing program does and
-  would be answered `Command not found: 'python'`, naming the one thing that
-  was fine. A relative `cwd` resolves against the project root, the base the
-  filesystem tools already use, and `~` is not expanded: there is no shell
-  here, and a `cwd` that expanded what an argument on the same line would not
-  is a worse surprise than a refusal naming the path.
-  **The schema was not enough on its own.** Re-running the same goal after
-  `cwd` shipped, the Builder reached for `cd there && ...` three times before
-  using the argument that replaces it, then used `cwd` on all eleven of its
-  remaining terminal calls: a description is consulted before the turn, while
-  an error is read at the moment the mistake is made, so
-  `_missing_program_error` names the replacement in the `FileNotFoundError`
-  path. Only the `cd` family gets one: `export` and `source` are equally
-  builtins with nothing here to replace them, so they get the fact that ends
-  the retry instead of an alternative that does not exist. And the report line
-  carries `[cwd=...]`, because the Architect rules on that report and the same
-  relative command means a different thing in every directory it could have
-  run in.
-  A failed line also says why (`_failure_reason`): eleven of forty-seven
-  calls on the 2026-09-10 run read only `failed`, eight of them correct
-  refusals of shell syntax. That run is also why `prompts/builder.txt` names
-  the shapes outright -- the Builder sent calls in batches that all failed
-  before one refusal could be read, and the system prompt is read before the
-  batch.
-- **The Builder's deadline may never abandon a tool call.** Only the model's
-  own call is wrapped in `_with_deadline` — discarding a half-received response
-  costs a turn and nothing else. The tool calls underneath it write files,
-  stage commits and run commands, so they always run to completion and the
-  budget is re-checked at the top of the next turn instead. A worker abandoned
-  mid-`filesystem_write` would go on writing into the project after the node
-  returned, which is worse than the hang the deadline exists to stop.
-- **A file the deadline stopped us running is `unverified`, not `ok`.** It
-  reads `NOT RUN` in the report, joins `failed_verification` so the next cycle
-  re-runs it, and blocks approval even under `expect_failures` — that opt-out
-  is for a file the run *meant* to fail, which is still executed and still
-  reported, not for one nobody executed. `VERIFY_RESERVE_SECONDS` is held back
-  from the tool loop (plus whatever the loop leaves unspent) so the pass
-  normally gets to run at all. `MIN_VERIFY_SLICE_SECONDS` is the floor below
-  which a file is left unrun rather than started: `min(VERIFY_TIMEOUT_SECONDS,
-  remaining)` rounded down to a zero-second timeout, and a working file came
-  back `FAILED` with "timed out after 0 seconds" — a false accusation that also
-  set the "files that do not run" blocker.
-- **A timed-out Architect can never rule `approved`.** The gate is what ends
-  the run, so that fallback is the one place a hang could become a false
-  success. It falls back to `revise` on the gate pass and `plan` on the opening
-  pass; both route to the Planner, and neither ends anything. The architecture
-  already in state is kept, since losing it would strip the constraints out of
-  every later prompt.
-- **A timed-out Planner must leave a non-empty `plan`.** This is load-bearing,
-  not cosmetic: the Architect increments `step_count` only while a plan exists,
-  so an empty fallback would send the run round Planner → Builder → Architect
-  uncounted until LangGraph's recursion limit killed it by exception,
-  discarding every message it had produced — the exact failure the counter was
-  moved to the gate to prevent. It keeps a real plan from a previous cycle when
-  there is one, and otherwise writes `_PLANNER_TIMED_OUT`.
-  **And so must a Planner that answered off-format**, which was the same hole
-  reached through the other door. `plan` was whatever `## Steps` matched, so a
-  seat that replied in prose, a bare list or JSON emptied it — while the feed
-  still said "Plan created", and the gate counted no step. Measured with the
-  guard removed: a whole run through such a seat ends at `step_count` 0. That
-  is a seat problem, not a stall and not an unplannable goal, so
-  `_PLANNER_NO_STEPS` is worded apart from the timeout note the way
-  `_RESEARCH_EMPTY` is, and the feed names the model — changing it is the only
-  fix. It also forces `next_agent` to Builder rather than honouring a reply
-  that routed to the Researcher: `_gather_research` searches on `plan`, so a
-  Researcher hop with no plan is a search for the empty string, and retrieval
-  that thin is exactly what falls through to the Researcher's own model. This
-  matters most on a **local** seat, which is where a small model is cheap
-  enough to be worth seating -- and a 9B is the size at which format
-  compliance stops being free, so this guard is what makes a lapse legible
-  instead of silently uncounted.
-- Work run under `_with_deadline` **must not write to state.** The abandoned
-  worker cannot be cancelled — Python cannot interrupt a thread blocked on a
-  socket — so it may finish long after the node returned and would land its
-  result in a state the graph had moved past. Every bounded node follows the
-  same shape: `_rule_on_state`, `_make_plan` and `_gather_research` read state
-  and return parsed output, and their nodes apply it. Keep that split for any
-  node put under a deadline. The worker is a bare daemon thread on purpose:
-  `ThreadPoolExecutor`'s atexit hook joins its non-daemon threads, so one
-  abandoned worker would hold up interpreter shutdown.
-- **A document is embedded in chunks, because the model's window is 256
-  tokens and silence is how it says so.** `add_document` used to embed a whole
-  file in one `encode()` call, so everything past roughly the first thousand
-  characters was discarded -- without an error, a warning, or a counter that
-  moved. Measured before the fix: **73 of 77 documents truncated, 91.5% of the
-  corpus unreachable by search**, with the vector for all 46,094 characters of
-  `CLAUDE.md` bit-identical to the vector for its first 1,000. Two failures
-  followed and neither announces itself. Retrieval acquired a **length bias**:
-  a short file is fully represented while a long one is represented by its
-  preamble, so the file that answers the query loses to a shorter one that
-  merely mentions it. And scores sat low enough that plan-shaped queries fell
-  under the relevance gate in `_gather_research`, sending the run to the
-  Researcher's model -- the loop *"A silent Researcher is not research"*
-  already describes. After chunking, the same ten queries average **+0.162**
-  and none falls under the gate.
-  Four decisions in it are not interchangeable with the obvious alternatives.
-  *`CHUNK_MAX_TOKENS` is 254, not 256*, because the model adds two special
-  tokens. *Boundaries are not snapped to line breaks*: snapping must either
-  shorten a chunk, dropping tokens the model could have read, or lengthen it
-  past the window, which truncates again -- so the cut stays where the
-  arithmetic puts it and `CHUNK_OVERLAP_TOKENS` absorbs the cosmetic cost.
-  *Chunks are re-encoded and trimmed by `_fit_chunks`* rather than the constant
-  being padded by the drift observed once: slicing on the parent's token
-  boundaries does not bound the slice, because a word-piece tokenizer decides
-  on context, and 16 of 1,052 full-size chunks came back a token longer
-  standalone -- 257 against a 256 window, handed straight back to the bug.
-  Which end is trimmed is load-bearing: a chunk's tail is covered by the next
-  chunk's overlap and its head by the previous one's, so the **last** chunk is
-  trimmed at the head and every other at the tail. Trimming the last one's
-  tail would drop the final tokens of the file silently, which is the original
-  bug in miniature. *And `search` collapses chunks back onto documents*,
-  keeping each document's best chunk, so `id` stays the path callers index the
-  graph with and print as a filename while `content` becomes the passage that
-  matched --
-  the 300 characters the Researcher forwards to the Builder used to be 300
-  characters of whichever file's *header* scored best. It widens the query once
-  (`SEARCH_ESCALATION`) when one large file monopolises the first window of
-  hits, since answering a request for five sources with one is narrower than
-  what chunking replaced. Rows are keyed `path#0007`; `_document_id_of`
-  resolves one back to its document and deliberately still resolves a bare,
-  unsuffixed id, because that is what a store written before chunking holds
-  and reading it as a stranger would prune it.
-- **A document's previous chunks are deleted before its new ones land.** Not
-  left to `upsert`: a file that shrank between reindexes -- ten chunks down to
-  three -- overwrites 0..2 and leaves 3..9 in the store, still matching queries
-  with text the file no longer contains. That is the same "a reindex rebuilds
-  rather than accumulates" rule `index_project_files` follows for whole
-  documents, one level down. For the same reason its stale-pruning compares the
-  *document* a row belongs to and never the row's own id: `CLAUDE.md#0007` is
-  not in `wanted` and never will be, so an id-to-id comparison finds every
-  chunk stale and deletes the corpus on every reindex. It happens to end in the
-  same place while everything is re-added in the same pass, which is exactly
-  why it would sit there unnoticed until something indexed a subset.
-- **A capital is not evidence of an entity, and `ENTITY_STOPWORDS` is a list
-  rather than a rule.** `add_document` mints an entity for every capitalised
-  token over four characters. Across prose and numpy-style docstrings that
-  fires constantly on words whose capital comes from where they sit rather
-  than what they mean: a sentence opener (`Every`, `Nothing`), a docstring
-  heading (`Returns`, `Parameters`, `Raises`), a report heading (`Files`,
-  `Status`), a Python literal (`False`, `None`). Before the list, `False` was
-  the **4th** best-connected node in the graph and `Returns` the **6th**, above
-  `Fiedler`, `Planner` and `Cheeger` -- 21 documents joined through `Returns`,
-  which records only that all 21 contain a docstring. Those edges are read as
-  evidence by `neighborhood()`, by `top_entities`, and by
-  `duplicate_entities()`. After the list the twenty best-connected entities are
-  all real terms and no stopword token remains in the graph.
-  **That claim expired once, and the way it expired is the thing to remember.**
-  A hand-audited list is audited against a *vocabulary*, and this corpus's
-  vocabulary keeps moving -- largely through prose written into this very file.
-  By 2026-09-09 `Tests`, `Measured` and `System` were the 6th, 8th and 10th
-  best-connected entities: the original failure exactly, one vocabulary later,
-  and `Measured` is the sharpest case, because the prose recording these
-  measurements was minting the entity. Thirty tokens were added and the claim
-  holds again.
-  The audit that chose them is worth repeating rather than re-deriving. For
-  every candidate, count the capitals that **position does not explain** --
-  not at a line start, not after a full stop, not the first cell of a table
-  row. Zero of those means the token is recording where it sits. That is the
-  same heuristic this bullet rejects below, used the only way it is sound: to
-  *nominate* candidates for a human to rule on, never to filter. Two
-  nominations were refused on exactly that reading, and they are why this
-  stays a hand audit. It moved again on 2026-09-12, when `Reported` and
-  `Computed` crossed the four-document floor at zero free capitals from prose
-  about what a phase reports, and `Cached`, `Complete`, `Convert`,
-  `Dimension` and `Naming` did the same from the numpy docstrings of a module
-  a Builder run wrote into `spectral_graph/`: the lesson past the tokens is
-  that **a run that writes code writes docstrings, and docstrings are where
-  the forced capitals live.** Four rulings from that round are worth keeping.
-  `Complete` goes on the list although *complete graph* is a real term in the
-  spectral half of this project, because the term is the bigram and the entity
-  is the bare word -- which appears with a chosen capital nowhere in the
-  corpus. `Dimension` never opens a line at all; it sits after a colon in
-  `hidden_dim: Dimension of hidden representations`, which `_SENTENCE_END`
-  counts as forced for the same reason a full stop is. `L_dense` scores zero
-  free capitals because an assignment starts its line -- it is a real
-  identifier and stays out, as does `Spectral` at two marginal ones, a term
-  the corpus is about. `System` was nominated by rank and cleared by the count
-  at 22 free capitals, which is an entity that earned itself. Re-run the count
-  before trusting the list again; it is a claim about a vocabulary, and
-  vocabularies move.
-  **On 2026-09-19 it moved by subtraction, which is the direction nobody
-  watches.** Deleting `examples/` took the documents anchoring `Spectral` with
-  it, so it fell out of the top twenty and `BUILDER_DEADLINE_SECONDS` -- a
-  real constant that had simply been outranked -- replaced it, while `Nodes`
-  and `Spectrum` crossed the four-document floor at zero free capitals,
-  because removing files changes which *remaining* docstrings are a large
-  enough share of the corpus to matter. A deletion needs the count re-run
-  exactly as an addition does. `Spectral` stays out of `ENTITY_STOPWORDS`
-  throughout: it lost rank, not its two free capitals.
-  **The obvious alternative was built, measured and rejected.** Dropping a
-  token that only ever appears where a capital is forced (line start, after a
-  full stop) removes the same noise and severs real edges doing it: `Planner`
-  fell from 18 documents to 15, `Spectral` 19 to 15, `ValueError` 14 to 11,
-  because a term introduced in a bulleted list (`- **Planner** -- interprets
-  goals`) appears nowhere else in that document. A hand-audited list costs no
-  meaningful term a single edge, and its failures are visible on the page
-  rather than buried in a heuristic. The list is matched case-insensitively
-  against the **whole** token, never as a prefix, so `Returns` is stopped while
-  `Researcher` is not.
-  **It does not make `topics()` decisive, and was never going to.** That was
-  the first hypothesis and the measurement refused it: removing every one of
-  the 97 entities that bridge this corpus's two topic areas moves the eigengap
-  decisiveness from 1.12x to 1.09x, and the list itself to 1.22x against a
-  3.0x threshold. The corpus genuinely has no decisive k -- the same extractor
-  recovers planted topics at 14-25x on a synthetic corpus that does -- so
-  `no_clear_structure` here is the correct answer, and tuning the extractor
-  until the number rose would have manufactured the finding `topics()` exists
-  to refuse.
-  What the list does not touch either is the **degree-1 majority**: 60% of
-  entities are mentioned by exactly one document, contribute no relation, and
-  are what floods `duplicate_entities()` with structurally identical pendants.
-  That is a separate defect with a separate fix.
+- **The Builder's account of its own work is not evidence.** `files_changed` is
+  appended only when a write tool reports success, never from prose.
+  `state["files_changed"]` accumulates across passes while the local list in
+  `builder_node` is this pass alone, and a path no longer on disk is retracted
+  from the record and named in the report. "Described but not written" compares
+  both spellings through `_report_path_key`.
+- **Writes cannot leave the project.** `_resolve_write_path` resolves the
+  parent, not the leaf; on a run given a project, `_outside_output_dir` confines
+  writes to `projects/<name>`.
+- **What a pass writes is run and linted.** `_verify_written_files` executes
+  every `RUNNABLE_SUFFIXES` file (a module inside a package is imported, not
+  executed) and `_lint_written_files` runs `ruff check` with the project's own
+  config first. Files that failed earlier are re-checked until clean. A file
+  nobody ran (`unverified`), a lint failure, and a pass cut off before it
+  finished all block approval; `expect_failures` suppresses only the
+  runtime-failure block, never the others.
+- Verification runs headless (`HEADLESS_VERIFY_ENV`) and with `stdin` closed.
+- **`terminal_execute` has no shell.** The command is `shlex.split` and run
+  directly, so metacharacters are inert data; `SHELL_OPERATORS` and
+  `_GLUED_REDIRECT` refuse operators that survive as whole argv tokens, `cwd`
+  replaces `cd` (validated by `_resolve_cwd`), and a requested `timeout` is
+  clamped by `TERMINAL_TIMEOUT_MAX_SECONDS`. A timeout reports the tail of what
+  the file printed.
+- **`git_dwell` runs its stages in fixed order** -- survey, branch, stage,
+  commit, push, pr, merge -- whatever order the caller lists them in, and it
+  will not commit onto the default branch. The default pipeline ends at
+  `merge` (`--squash --delete-branch`); naming `stages` without it stops at
+  `pr`. Nothing staged is a success, and `paths` commits only what it names.
+- **`expect_failures`, `research_web` and `discuss_only` are per-run flags set
+  by the caller, never by an agent.** A discussion run binds no tools at all
+  and forces online research off.
+- **Work run under `_with_deadline` must not write to state** -- the abandoned
+  worker cannot be cancelled and may finish after the node returned. The
+  Builder's deadline never abandons a tool call. A timed-out Architect can
+  never rule `approved`, and a timed-out or off-format Planner must leave a
+  non-empty `plan` (`_PLANNER_TIMED_OUT`, `_PLANNER_NO_STEPS`), since the gate
+  counts a step only while a plan exists.
+- **A silent Researcher is not research**: `_said_nothing` routes to the
+  Builder and names the seat's model. Every exit from `researcher_node` sets
+  `research_status`, and `_route_from_planner` forces the opening cycle through
+  the Researcher.
+- **Retrieval decides whether a seat is consulted at all.** `_gather_research`
+  returns the retrieved chunks without invoking the Researcher's model whenever
+  the top hit clears `relevance_floor()` -- measured per corpus into
+  `floor_calibration.json`, `None` until it has been, and never borrowed
+  between embedding models. Search is hybrid: BM25 re-ranks the dense window
+  (`lexical.py`), ranks fused rather than scores, so every result keeps the
+  cosine the floor is read off.
+- **Documents are embedded in chunks** (`CHUNK_MAX_TOKENS` 254 against a
+  256-token window); `search` collapses chunks back onto documents, and a
+  document's previous chunks are deleted before its new ones land.
 - **No corpus exists until someone indexes one, and reading is not indexing.**
-  `GraphRAGKnowledgeBase.__init__` *creates* the store -- `mkdir`, plus
-  Chroma's files -- so the two doors are kept apart: `get_knowledge_base()`
-  builds and is reserved for the two acts that ask for a corpus, while
-  `open_knowledge_base()` returns `None` when there is nothing on disk and is
-  what every read goes through (`corpus_exists` / `corpus_state` answer without
-  opening anything at all). Wiring a read to the creating door is not a
-  cosmetic mistake: `serve.py` used to start a preload thread at import and the
-  console polls `rag_stats` every five seconds, so starting the server was
-  enough to leave a store behind within seconds -- one that had never been
-  indexed and reported itself as a knowledge base to everything that looked
-  afterwards. The console reports `absent` / `empty` / `indexed` rather than a
-  bare count, because four zeros read as a knowledge base that happens to be
-  empty, and only one of those states means nothing has been built here yet.
-  *Export* and
-  *Clear* refuse when it is absent: creating a store in order to empty it
-  leaves behind exactly what was asked to be removed.
-  **What was missing was the act itself, and the button was the wrong place
-  for it.** Both doors were right and nothing opened the creating one on a
-  fresh install, which costs nothing visible -- the search answers
-  `no_corpus`, `_gather_research` falls through to the Researcher's own model,
-  and the run reports itself finished. The same silence covers a corpus built
-  once and drifting since, the 8-documents-against-a-walk-of-103 failure
-  `corpus_staleness` was written for. Both were left to an operator
-  remembering to press something. So `rpc_run_goal` calls `_index_the_project_before_the_run` after claiming
-  the run lock, through `_kb_for_indexing`, on **every** run -- and there is
-  no Reindex button and no `rpc_reindex` any more. A run is a request to
-  search a corpus, which is what makes this an act of indexing rather than a
-  read that creates.
-  **And `main()` does the same when the console comes up**
-  (`_index_the_project_at_startup`), because a run is something the operator
-  asks for and that left the state between runs unattended: the header reported
-  drift it had no way to fix, and restarting the server did not clear it, since
-  starting up only *opens* the store -- seen on 2026-09-18, where
-  `stale: 1 not indexed, 1 not in the walk` survived every restart with
-  nothing to press. A standing verdict the operator cannot act on is the
-  credibility problem `corpus_health` measures every file's size twice to
-  avoid, one level up. Both phases share `_rebuild_the_corpus`, which
-  counts the walk before opening the creating door and classifies what the
-  rebuild did, so the five outcomes are worded in one place;
-  `_corpus_feed_line` takes a `when`, since "indexed before the run" is a lie
-  from startup and reads as the phase not existing. Four things it must not
-  break, each pinned in `tests/test_startup_index.py` and each watched to fail
-  with the guard removed.
-  *It is started from `main()` and never at import* -- the old preload thread
-  built a store merely by being imported, and the suite imports this module.
-  *It does not block `/api/status`*, which `launch_console.sh` waits on, so it
-  runs on its own daemon thread while the header reports it. *A run wins* --
-  `should_stop` is "a run has claimed the flag, or the console is exiting", so
-  a run started into a build takes over within one embedding batch and
-  finishes the job through its own phase, where making the run wait would hold
-  `running` True with no node on the stack for as long as a whole build, which
-  is exactly what a wedged run looks like. *And `_index_lock` serializes the
-  two*, because `index_project_files` prunes and clears before it re-adds, so
-  two rebuilds interleaved give neither caller's result and both report
-  success -- the half-rebuilt corpus `_refuse_while_a_run_is_in_flight` exists
-  to stop an
-  operator manufacturing by hand, reachable without one. The lock order is
-  `_index_lock` first and `_run_lock` briefly inside it: the build holds the
-  first for its whole length and reaches for the second from its `progress` and
-  `should_stop`, while a run takes `_run_lock`, releases it, and only then asks
-  for `_index_lock`.
-  **Two consoles in one checkout are the same collision across processes, and
-  `_claim_the_rebuild` is what stops it.** They share the store on disk and not
-  the lock in memory, and the port stops only the common case: a second
-  console on the same port never reaches the index thread, and nothing stops
-  one on `PORT=8081`. That shape was rare while a run was the only thing that
-  rebuilt; a phase that rebuilds the moment a console comes up makes it
-  ordinary. So the
-  claim is an `flock` on `knowledge.lock`, beside the store and named after it,
-  and a caller that cannot take it reports `busy_elsewhere` -- neither a
-  failure nor a no-op, because the work is being done by somebody else. Three
-  properties decided it over a pid file: the kernel owns the claim, so it is
-  released by a process *dying* as surely as by one finishing and there is no
-  stale claim to clear up (measured -- `SIGKILL` the holder and the next
-  rebuild reads `built`); the file's contents and existence mean nothing, so a
-  leftover empty file claims naught; and it is taken non-blockingly, so
-  "somebody else is rebuilding" is an answer rather than an unbounded wait. It
-  sits beside `knowledge/` rather than inside it because creating that
-  directory is reserved for indexing, and is taken *after* the walk for the
-  reason the creating door is: no work, no file. The **startup index does
-  not wait** (whoever holds the claim is rebuilding the same corpus from the same walk)
-  while the **run waits** `CORPUS_LOCK_WAIT_SECONDS`, polled rather than
-  blocking so the emergency stop can reach a run parked there, because that
-  phase is what makes the corpus whole before any seat searches it. A machine
-  with no `fcntl`, or a directory that cannot be written, rebuilds on
-  `_index_lock` alone: refusing to index because the claim could not be taken
-  would turn a rare collision into a corpus nobody rebuilds. The relevance
-  floor is still measured by the first run, since
-  `_calibrate_the_floor_before_the_run` writes into the run feed. Five
-  decisions in it are not interchangeable with the obvious alternatives.
-  *It rebuilds every time rather than only when the corpus is missing*, which
-  is affordable because `index_project_files` keeps the vectors of every
-  document whose text still hashes to what the store holds -- 52.0s to
-  re-embed this project's 77 files against 0.09s when nothing changed. A
-  rebuild gated on `absent`/`empty` would have left drift exactly where it
-  was: the state that needs fixing most is the one where every counter already
-  looks right. *It compares content, not the walk* -- `corpus_staleness`
-  cannot see an edit, because an edited file is in both, and the Builder edits
-  files. *It goes before the online research phase*, which writes pages under
-  `research/web/` and embeds them: going second meant a corpus of nothing but
-  fetched pages counted above zero. *It counts the walk before it opens the
-  door*, so a machine with nothing to index keeps reporting `absent` rather
-  than `empty` -- the same mistake `research_online` made by resolving its door
-  on the way in, guarded the same way. *And a run already stopped does not
-  start one*, the check before the work rather than inside it, because
-  `index_project_files` clears the graph up front and a rebuild abandoned
-  midway is the half-finished corpus `_refuse_while_a_run_is_in_flight` exists
-  to stop anyone else from manufacturing.
-  The feed line speaks on every run that checked the corpus, the ordinary
-  already-matched case included. It used to stay silent there, on the argument
-  that a line on every run is a line nobody reads, and that was wrong in a way
-  only an operator could see: a rebuild that re-embeds nothing takes ~0.1s and
-  does not load the model, so silence is exactly what the phase not running
-  looks like. A run that did the work and a run that skipped it must not look
-  identical. `disabled` is the one
-  state that still says nothing, because it is a machine-level setting the
-  header already reports and the one state where the phase really did not run.
-  A discussion run still does it,
-  where it never researches online: that phase brings in material from outside
-  and makes it permanent corpus material, while this one embeds files already
-  on disk into a runtime artifact a reindex reproduces exactly, so "nothing was
-  changed" -- a promise about the project -- still holds.
-  `INDEX_PROJECT_BEFORE_RUN=0` turns it off for a machine that wants a frozen
-  corpus, and `tests/conftest.py` does exactly that for every test, the same
-  way and for the same reason it switches the web phase off.
-- **A search with no corpus returns nothing, and says so.** It used to come
-  back with one fabricated row -- `[GraphRAG not indexed]`, score 0.0, in
-  `results` -- which is a made-up retrieval hit in the field real ones arrive
-  in, and the Builder reads that field. The empty answer carries
-  `source: "no_corpus"` and `NO_CORPUS_NOTE` instead, worded once in
-  `graphrag_server` so the MCP tools, the Builder's belt and the console cannot
-  describe the same absence differently.
-- **The A-numbers, and where they went.** `connectivity()`, `topics()`,
-  `bottleneck()`, `neighborhood(split=True)` and `duplicate_entities()` are
-  the A1-A5 applications, after two spectral write-ups that ranked and
-  measured them. **Both were deleted on 2026-09-09**, with their citations,
-  and the labels stay because five methods and their tests are named by them.
-  Nothing consulted at read time went with the files: every measurement this
-  file relies on is quoted inline where it is used -- the Cheeger bracket's 4x
-  to 546x, the eigengap wrong on 3 of 8 architectures, the 5.1-23.4
-  decisiveness range on planted topics against 1.0-1.8 on structureless
-  graphs.
-- **`stats()` carries a structural health check, and it counts components
-  with networkx rather than with the spectrum.** `connectivity()` reports
-  `components`, `largest_component`, `isolated_nodes` and `lambda_2` -- the A1
-  application (see *the A-numbers* below). It exists because an
-  entity-extraction regression in `add_document` changes no counter and raises
-  nothing: it fragments the graph, and that is visible here and nowhere else.
-  Three decisions that are not interchangeable with the obvious alternatives.
-  *Components come from `nx.number_connected_components`, not from a
-  zero-eigenvalue count.* The identity "multiplicity of 0 = number of
-  components" holds for `L = D - A`; on the **normalized** Laplacian an
-  isolated node has `D^-1/2 = 0`, so it contributes eigenvalue **1, not 0**.
-  On this project's graph shape that returns 1 where the truth is 30, because
-  29 of the 30 components are orphans -- at 42x the linear-time answer.
-  *`lambda_2` is measured on the largest component*, because on the whole graph
-  it is identically 0 whenever the corpus is disconnected, which a real one is;
-  a signal that reads 0.0 every time is not a signal. *And it is normalized*,
-  so it stays in [0, 2] and does not scale with degree -- an unnormalized
-  `lambda_2` grows as documents mention more entities, which makes this
-  reindex's value incomparable with last week's, and comparing across reindexes
-  is the whole point. `lambda_2` is `None`, never 0.0, when there is nothing to
-  measure: 0.0 is a real reading meaning "about to split in two", and the empty
-  corpus must not report the alarming one. A failure to compute it is named in
-  `lambda_2_unavailable` rather than dropped, so "could not measure" never
-  reads as "measured 0". `spectral_graph` is imported **inside** the method: it
-  lives at the project root and is not part of the installed distribution, so a
-  top-level import would turn a missing diagnostic into a module that will not
-  load at all from anywhere but the root. The result is cached against
-  `(nodes, edges)` because the console polls `stats()` every five seconds; that
-  key is sound
-  because every mutation path here only adds (`add_document`) or zeroes
-  (`clear`), and a re-add that moves neither count moves no structure either.
-- **`bottleneck()` has three verdicts, and the middle one is why it is worth
-  having.** The A3 application: sweep
-  the normalized Fiedler vector for the narrowest cut, then name the nodes
-  whose edges cross it -- the entities two topic areas connect through, which
-  are the terms a search should expand on for a query straddling both. Degree
-  does not find them: a bridge entity mentioned by two documents has degree 2.
-  The trap is that **a minimisation always returns something**. Ask for the
-  narrowest cut in a well-knit corpus and you get one, and calling it a bridge
-  is a fabricated finding of the kind `search` was fixed for. Cheeger's *lower*
-  bound is what refuses it, because `mu_2 / 2` is a proof that no cut anywhere
-  in the graph is narrower: `certified_none` when that bound is itself above
-  `BOTTLENECK_CONDUCTANCE` (a theorem about the whole graph, not a failed
-  search), `found` when the sweep cut came in under the line, and
-  `inconclusive` when the bound permits a bottleneck the sweep did not find.
-  That third state is real, not hedging -- the Cheeger bracket runs from 4x to
-  546x wide across the eight architectures the benchmark covered, so the sweep
-  genuinely can
-  miss, and collapsing it into "no bottleneck" reports a gap in the evidence as
-  a finding. Like `connectivity()` it runs on the largest component, because on
-  a disconnected graph the Fiedler vector is a component indicator and an
-  orphan is a conductance-0 cut that would win every time -- "your corpus has
-  an orphan" is what `connectivity()` already says. `tied_cuts` reports
-  `mu_2 ~= mu_3`, meaning several equally narrow cuts and an arbitrary choice
-  between them: measured on a three-topic corpus, the *split* alternates
-  between runs while the conductance and the bridge entities do not, across
-  all 12. Without the flag a working diagnostic
-  reads as a broken one, and the tie is itself a finding -- three or more topic
-  areas, not two. It is a separate RPC rather than part of `stats()`: an
-  eigenvector plus a sweep over every edge is not something to put on a
-  five-second poll, and it takes no run guard, for the reason `export_corpus`
-  takes none.
-- **`topics()` chooses `k` from the eigengap, but only when the eigengap is
-  decisive.** The A2 application:
-  Ng-Jordan-Weiss clustering over the normalized Laplacian, which on a
-  bipartite document/entity graph groups documents with the entities that
-  define them -- so a cluster reads as a topic and `top_entities` names it.
-  This is the whole-corpus map `neighborhood()` cannot give.
-  The weak point is `k`, and it is not wired straight through: the
-  architecture benchmark measured the eigengap heuristic
-  wrong on 3 of 8 architectures, k = 10 for a barbell whose answer is 2, and it
-  always returns *some* k -- so on a corpus with no topics it invents one, and
-  clusters shown without that caveat are a fabricated map. What rescues it is
-  that the failures are **undecided**, not merely wrong: the winning gap barely
-  beats the runner-up. Measured across 18 corpora with a planted topic count
-  the eigengap was correct every time at a decisiveness of 5.1-23.4, while a
-  grid, a small-world ring, an expander and one dense topic all landed at
-  1.0-1.8 -- nothing observed between 1.8 and 4.5, so `EIGENGAP_DECISIVENESS =
-  3.0` sits in open space rather than on a boundary. Under it the verdict is
-  `no_clear_structure` and **no clusters are returned**, because a map of a
-  corpus with no topics is worse than no map. An explicit `k` skips the gate
-  -- the caller has decided -- but the decisiveness is still reported.
-  **Per-cluster conductance is the second, independent check** and is why
-  clusters are never returned bare: it exposes a `k` that split a real
-  community even when the eigengap looked decisive, and it is what makes a
-  forced `k` visibly wrong (0.36-0.45 on a corpus with one topic, against
-  0.009-0.018 when the topics are real). A bad `k` from the caller raises
-  `ValueError` rather than returning `unavailable`: that verdict means the
-  measurement could not be taken, and filing a malformed request under it would
-  blame the solver for the caller. Runs on the largest component, like
-  `connectivity()` and `bottleneck()` -- components are already clusters, so on
-  a disconnected graph the eigenvectors would spend themselves rediscovering
-  the orphans `connectivity()` has already counted.
-- **`neighborhood(split=True)` names the sides for the centre, and the flag is
-  off by default.** The A4 application: one eigenvector, the cheapest of the
-  five, splitting a traced neighbourhood into
-  what clusters with the node you looked up and what is peripheral to it. Off
-  by default because it costs 1.7-3.3ms against the 1.0ms `neighborhood()`
-  itself takes -- it triples a call the console makes on every click, and a
-  caller who only wants the node list should not pay for a division it will not
-  draw. The sides are `center` / `other` rather than the sign of the
-  eigenvector, which is arbitrary: an eigenvector and its negation are equally
-  valid, so a raw sign swaps the halves between runs for nothing. `mu_2` is
-  returned because the split is always *available* and only sometimes
-  *meaningful* -- a sign cut exists for any connected graph. A trace that stays
-  inside one topic area reads ~0.2 and has divided it arbitrarily; one spanning
-  two reads an order of magnitude lower. The caller gets the number, not a
-  verdict, because the line worth drawing depends on the use. Runs on the
-  centre's component: `min_degree` pruning **can** disconnect the sweep
-  (measured at depth 3, min_degree 3), and on a disconnected graph the Fiedler
-  vector is a component indicator, so the "split" would be that stray node
-  against everything else. Detached nodes get `side: None`. In the console the
-  side rides on opacity, never colour -- colour already carries
-  document-vs-entity and that is what the graph is mostly read for.
-- **`duplicate_entities()` proposes merges and never makes one, and names
-  generate the candidates while structure is only the evidence.** The A5
-  application: `add_document` mints an entity per capitalised token, so one
-  thing arrives under several names -- `Builder` and `BUILDER` from a heading,
-  `Entity` and `Entities` from a plural.
-  **This used to rank by distance in a spectral embedding, and the measurement
-  retired that.** It returned 33,060 candidates of which **67% sat at distance
-  exactly 0.0000 with neighbourhood overlap 1.00** -- its own strongest
-  evidence. Those are pendant collisions: two entities each mentioned by the
-  same single document are structurally identical by construction, and 60% of
-  this corpus's entities have degree 1.
-  The true duplicates -- `Builder`/`Builders` and all thirty case variants --
-  were **not candidates at any rank**. Graded against ground truth, spectral
-  distance scored 0% precision and 0% recall; so did Jaccard, and so did
-  containment as a ranker. Name similarity scored **100% precision on its top
-  20**.
-  Two separate things were wrong. *A real duplicate is asymmetric*: `Builder`
-  has 29 documents to `Builders`' 4, a subset that reads containment 1.00 and
-  Jaccard 0.14, so every symmetric measure ranks the true pair below thousands
-  of unrelated ones -- which is why the evidence here is **containment**, with
-  Jaccard kept beside it so the disagreement stays visible. *And structure
-  cannot generate candidates on a real corpus at all*: tightened as far as it
-  goes -- Jaccard 1.00 with at least three shared documents -- the survivors
-  are collocations (`Nyquist`/`Frequency`,
-  `BUILDER_DEADLINE_SECONDS`/`NODE_DEADLINE_SECONDS`). The synthetic fixture
-  that justified the structural signal assigns entities to documents **at
-  random**, which makes an identical neighbourhood real evidence; a corpus is
-  the opposite, since entities of one topic are mentioned in the same
-  documents -- that is what a topic *is*. The property the test depended on is
-  the property real data lacks.
-  **What this gives up, on purpose: two names for one thing sharing no
-  characters.** `LanguageModel` for an entity already called something else is
-  not found and cannot be. That is pinned by a test, because it was *measured*
-  rather than merely unimplemented -- anyone reinstating a structural generator
-  should re-run that measurement first.
-  Pairs come in two kinds and they differ in how much they must prove. `case`
-  (the same token bar capitalisation) is certain on the name alone and carries
-  **no** structural floor -- these are the most asymmetric pairs in the corpus
-  (`BUILDER` in one document against `Builder` in 29) and any evidence
-  threshold would drop every one of the thirty. `lexical` is a likeness, so it
-  must also clear `DUPLICATE_CONTAINMENT`; that is what separates
-  `Builder`/`Builders` from two similar names for different things.
-  Comparison is blocked on a case-folded four-character prefix: 1,528
-  comparisons instead of 948,753, which took the scan from 33,060 pairs in
-  1.34s to 95 in 0.016s. It only ever proposes: which entities mean the same
-  thing is a decision about meaning that the graph cannot make.
-- **The embedding model loads on first use, not on construction.**
-  `GraphRAGKnowledgeBase.embedder` is a lazy property. Only `add_document` and
-  `search` embed; counting the corpus, listing its documents, drawing its graph
-  and exporting it do not, and those are what the console does on a timer.
-  Loading it in `__init__` meant every header poll paid for the model. The
-  first embed of a session also pays the daemon's model load, which is the one
-  cost a header poll must not take.
-- **The daemon owns the model's placement, and this project only reads it
-  back.** Embedding is a POST to the local Ollama daemon (`OllamaEmbedder`),
-  so the question "which device does the embedder run on" is answered by the
-  daemon's configuration, not by anything here -- there is no in-process
-  embedder and nothing to put on a card. What this process does owe the
-  operator is the answer read back: after each call's first batch the
-  embedder asks `config.ollama_cpu_share` how much of the model the daemon
-  kept on the CPU, and the header and the corpus line both say so when it is
-  not zero, because the reply is identical either way and a split would show
-  nowhere else. The header's embedding line names `ollama` as the device once
-  something has embedded.
-  Two knobs are this project's, and both are measured. *Batches are capped*
-  (`EMBEDDING_BATCH_SIZE` is 8), the batch `OLLAMA_EMBED_OPTIONS` was measured
-  at. *And the load is pinned to the GPU* (`OLLAMA_EMBED_OPTIONS = {"num_ctx":
-  512, "num_batch": 512, "num_gpu": 999}`): the model's default window is far
-  larger than a chunk will ever need -- a chunk never exceeds 254 tokens -- so
-  a 512-token window is the whole working set, and `num_gpu` puts every layer
-  on the cards because the daemon's own estimate does not. Measured on
-  2026-09-16: it offloaded 24 of 37 layers with 1.1 GB unused on each card, a
-  batch of 8 in 23.4s, against 6.5s with all 37 forced. The price is chosen on
-  purpose: where the model does not fit, the load errors rather than splitting
-  onto the CPU. On NVIDIA cards below compute capability 7.5 the daemon also
-  has to be Ollama's own CUDA 12 build, because Arch's `ollama-cuda` is built
-  with CUDA 13 and finds no card at all there; `cuda-embed-ollama.sh` installs
-  it, and `install.sh` runs that script.
-- **A local seat is told to put every layer on the cards, and only one model is
-  ever on them.** Two separate defects with one cause: the cards hold 6 GB
-  between them and every model here is bigger than either card, so nothing
-  about placement can be left to an estimate.
-  *The seat half.* `get_llm` built `ChatOllama` with no options at all, so
-  every locally-run seat took the daemon's own estimate -- the same estimate
-  `OLLAMA_EMBED_OPTIONS` was written to overrule for the embedder, never
-  extended to seats. Measured 2026-09-20, dolphin-2.9.1-yi-1.5-9b Q4_K_M on two
-  3 GB GTX 1060s: with nothing sent, 37% CPU / 63% GPU at 1,940 + 1,981 MiB;
-  with `num_ctx` 2048, the same 37% at 1,892 + 1,919. The window is not what
-  decides it -- the estimator leaves ~1.1 GB unused on *each* card whatever it
-  is asked for, and runs a third of the model on the CPU beside 2.2 GB of idle
-  VRAM. With `num_gpu: 999`, 100% GPU at 2,968 + 2,975 MiB and the full
-  4,096-token window kept. So `OLLAMA_SEAT_GPU_OPTIONS` sends the layer count
-  and deliberately sends no window: a cap that never moved the split would only
-  cost the seat context.
-  *The exclusion half.* qwen3-embedding is 4.7 GB and a 9B seat is 5.3 GB,
-  which is ~10 GB of a 6 GB pool. The daemon's answer to being asked for both
-  is not a split but a failed load: the journal caught one at 07:02:10 on
-  2026-09-20, `timed out waiting for llama-server to start: context canceled`
-  after twenty seconds spent walking `ngl_per_device_high[1].n_layer` down from
-  48, trying to pack every layer onto card 1 because the embedder held card 0
-  -- which is what an operator sees as one card never being touched.
-  `GPU_ARBITER` (`control.py`) serializes the two, taken by `_SeatLLM.invoke`
-  and by `_needs_the_cards` around `_encode`.
-  Four decisions in it are not interchangeable with the obvious alternatives.
-  *It is a lock, not `EMBEDDER_ACTIVITY`*, which sits beside it and counts
-  overlapping work precisely because a meter exists to draw a light; the meter
-  is entered *inside* the arbiter, so a batch queued behind a seat reads as
-  waiting rather than working. *It evicts as well as serializing*
-  (`free_the_cards_for`): the daemon keeps a runner resident five minutes after
-  its last token, so one-at-a-time in time alone still leaves a finished seat
-  holding 3 GB against the embedder's load. A `:cloud` tag is never evicted
-  because it was never loaded, and the model about to be used is kept, so this
-  cannot evict its own caller. *It is reentrant*, because `_encode` reaches
-  `_load_embedder` and a plain lock would turn any future nesting into a run
-  hung for ever with no node on the stack. *And the wait is bounded*
-  (`GPU_WAIT_SECONDS`), then proceeds anyway: a seat call abandoned by
-  `_with_deadline` holds the arbiter until its own socket timeout, and a node
-  inheriting that queue position would stall behind a call nobody is reading.
-  Holding the cards never delays a stop -- `encode` asks `should_stop` between
-  batches, which a waiting embed reaches as readily as a working one.
-  *Where the two halves differ is the failure.* `num_gpu: 999` trades a
-  graceful split for a hard failure when the model does not fit, which is right
-  for the embedder -- a corpus built on a split placement has different vectors
-  -- and wrong for a seat, where it would fail the run. qwen3.8 is 17 GB and can
-  never fit. So a seat is built through a factory, and a failure
-  `_is_gpu_fit_failure` recognises (`cudaMalloc failed: out of memory`,
-  `unable to allocate CUDA0 buffer`, `timed out waiting for llama-server`)
-  rebuilds it unforced and retries once; every other failure is the seat's own
-  and is raised as before. The rebuild is sticky for that seat's life, or a
-  machine that genuinely cannot run the model pays a fresh load per call and
-  still fails -- but a seat is built per node turn, so the forced attempt comes
-  back next turn, which is right, since what usually blocked it was a model
-  since evicted. The bound belt is carried across the rebuild: the Builder is
-  mid-turn, and a seat rebuilt without its tools cannot finish one.
-  Measured end to end on 2026-09-20: seat alone at 2,958 + 2,975 MiB, an embed
-  evicting it and taking 2,400 + 2,931, the next seat call taking them back at
-  2,958 + 2,975 -- one model resident throughout, 100% GPU, ~6s a handover. And
-  qwen3.8 forced, failing, rebuilding unforced and answering at 98% CPU in
-  70.5s rather than failing the run.
-- **There is exactly one embedding model, and a corpus belongs to it.**
-  `EMBEDDING_MODEL_NAME` is `qwen3-embedding:latest`, served by the local
-  Ollama daemon, and there is no switch: the console's embedder card reports
-  rather than offers, and `set_embedding_model` refuses by naming the one
-  model. A switch was refused mid-run and given its own corpus even when one
-  existed (`persist_dir_for` is deleted with them), because vectors from two
-  models share no space and a corpus built with one and searched with another
-  answers with noise that still scores -- the refusal is the same fact kept as
-  a property of the code rather than of the dropdown.
-  Three decisions follow from what the one model is. *The chunker cuts with
-  the model's own tokenizer* (`EMBEDDING_TOKENIZER_NAME`, Qwen3-Embedding-8B's,
-  loaded cache-first): passage size -- and the measurements tuned against it,
-  254-token chunks inside the 512-token load above -- is a property of the
-  model embedding them, and borrowing another model's tokenizer would cut
-  against boundaries the daemon does not share. *The floor is measured per
-  corpus and never borrowed*: see the floor bullet above. *And a long build
-  says how far it has got and stops when asked* (`index_project_files` takes
-  `progress` and `should_stop`, the second asked between files and between
-  batches): hours behind one unchanging line read as wedged. A stopped
-  build is finished by the next run rather than repeated, because what is
-  already embedded keeps its vectors.
-- **Online research costs nothing, and that is a constraint rather than a
-  happy accident.** `web_research` reaches the internet through DuckDuckGo's
-  keyless HTML endpoint, or a SearxNG instance the operator hosts
-  (`SEARXNG_URL`). No API key, no account, no per-call charge — every general
-  web search API that would be easier charges money, including the ones with a
-  free tier, and this project does not buy services. The result list is the
-  *only* thing taken from outside: ranking, extraction and selection are all
-  in-tree, which is why `html_text` is a from-scratch reader rather than a
-  dependency.
-  The phase has four stages and the last two are why it is ours.
-  `expand_queries` fans a goal into several searches using `lexical.tokenize`,
-  so a goal naming `BUILDER_DEADLINE_SECONDS` also searches
-  `builder deadline seconds` — a search engine has seen the second and never
-  the first. Those orderings merge through `reciprocal_rank_fusion`, the same
-  function `search` merges its dense and lexical halves with, so a page several
-  queries agree on outranks one that topped a single query. `html_text.extract`
-  reads each page by **link density plus block length**: a nav strip is short
-  and almost all anchor text, an article is long and almost none, and a block
-  is dropped only when *both* tests fail it — headings are exempt from the
-  length test, being short by nature. It reports `kept`/`dropped`/`fell_back`,
-  because an extractor that cannot be graded would be the one unmeasured link
-  in a chain tuned against printed numbers throughout.
-  Then `select_pages` decides what is *embedded*, which the engine's rank
-  deliberately does not. Every fetched page is scored with `BM25Index` against
-  the goal and kept only above a **ratio of the best page's score** — never an
-  absolute, for the reason `lexical.py` already gives: a BM25 score is
-  unbounded and corpus-relative, so a constant is a hyperparameter fitted to
-  one set of pages and meaningless on the next. Zero is the single absolute
-  floor, because zero means no shared term at all. This gate is the answer to
-  the problem the phase creates: a web document competes with the checkout's
-  own files at retrieval time, under a relevance floor calibrated
-  on a corpus containing none of them.
-  A fetched page is written under `research/web/` **before** it is embedded,
-  the same ordering and for the same reason as `store_uploaded_document`, and
-  that directory must stay inside `PROJECT_INDEX_PATTERNS` and out of
-  `PROJECT_INDEX_EXCLUDES`. Filenames are deterministic
-  (`host-path-<8 hex>.md`) so re-researching a topic overwrites in place rather
-  than growing the corpus by a near-identical document per run. Provenance —
-  URL, title, retrieval time, originating goal — goes in the document *text*
-  and never in the metadata: metadata is `_document_metadata`'s two keys,
-  shared with `index_project_files`, so a third key set only on this path would
-  vanish the moment a reindex re-read the file from the walk.
-  `search_web` distinguishes `disabled`, `error` and a genuine empty result,
-  and `research_online` reports `considered` beside `documents` — a phase that
-  read twelve pages and kept none is working correctly on a goal the web has
-  nothing to say about, and must not read as one that failed.
-  **Every query fits `WEB_QUERY_MAX_CHARS`.** DuckDuckGo refuses a long query
-  with `302` to its `/50x.html` page, which `raise_for_status` reported as a
-  bare status: on 2026-09-10 a paragraph-length goal sent 1,227-, 816- and
-  840-character queries and every search failed. The measurements behind the
-  default are at the constant. **Its bot check is a `202`** with no results,
-  which parsed as a genuine empty web; `_search_duckduckgo` recognises it by
-  its markup and raises `_SearchBlocked`, and the fan-out stops there, since
-  each further request prolongs the block.
-  **It is per-run opt-in, default off** (`research_web`, or the console's
-  *research online* box) -- set by the caller and never by an agent, exactly as
-  `expect_failures` is. That is measured rather than cautious: three gates
-  that would decide a page's place from the goal text were built and graded
-  against 13 hand-labelled pages from two real runs, and all three failed --
-  ranking fetched pages against the project's own documents, skipping the
-  phase when the corpus already answers the goal (backwards on the
-  measurement), and the relevance floor itself (3/13). No fourth threshold
-  helps, and the lambda run is why: the *wrong* pages outscored the right ones
-  on both instruments, 0.553-0.631 for AWS Lambda deployment guides against
-  0.459-0.550 for the Dolphin model pages the goal was about, because "LAMBDA"
-  meant a model on this machine and the web means AWS. The information that
-  settles it is the operator's intent, and it is in no comparison of goal text
-  to page text.
-  The cost of guessing wrong is not one bad run: a fetched page becomes a
-  permanent corpus member indistinguishable from project knowledge, and after
-  the 2026-09-11 run the five blogs it kept took every one of the top five
-  retrieval slots for that goal. `_research_online_before_the_run` carries the
-  numbers.
-  **It runs before the Architect opens, and that ordering is the design.**
-  `rpc_run_goal` calls `_research_online_before_the_run` after claiming the run
-  lock, after the corpus phase above and before `graph.stream`, so the corpus
-  is whole by the time any seat searches it and does not move again for the
-  rest of the run. This is not a way around
-  `_refuse_while_a_run_is_in_flight`; it is the only ordering that obeys it.
-  Measured end to end on 2026-09-09: 12 pages read, 8 embedded, 174 passages,
-  19.6s, and the Researcher then retrieved one of them at 0.74 -- comfortably
-  over the floor.
-  **It is handed the creating door unopened.** Storing a page is indexing, so
-  `_kb_for_indexing` is the right door here -- but resolving it on the way
-  *in*, before the phase knew whether it would run at all, left a corpus
-  holding **nothing** behind every run that researched no pages, reporting
-  `empty` where the truth was `absent`. `research_online` now takes a factory
-  and calls it on the first page that earns a place, once for the batch,
-  pinned twice in `test_corpus_absent.py`: through `rpc_run_goal` on a fresh
-  machine, and on the factory itself, which must be called never for an empty
-  selection and exactly once for a full one.
-  The phase reaches the Researcher through **the corpus and nothing else**:
-  there is deliberately no path by which a fetched page skips retrieval, so a
-  page fetched for a goal that cannot be retrieved for that goal does not
-  reach the Builder on the strength of having been fetched.
-  Every failure is swallowed into the report and none of them stops the run --
-  a goal the web cannot answer, an engine that is down, a machine with no
-  network. The feed line words the empty outcomes apart, because "switched
-  off", "we asked and it broke" and "we read twelve pages and none earned a
-  place" call for completely different things and an empty count reads
-  identically in all three.
-  **The suite must never run this.** `tests/conftest.py` switches it off for
-  every test, the same way and for the same reason it forces `StubLLM`.
-  Without that, every test starting a run fetched a dozen live pages and
-  embedded them: the suite went from 28s to 138s, a stop test whose
-  five-second wait had been generous broke, and **31 web pages** from goals
-  like `"Do a thing"` landed in the developer's own corpus as project
-  knowledge. `test_web_research.py` turns it back on and answers every request
-  from a `MockTransport`.
-- **A fetched web page is a retrieval source, not knowledge-graph material.**
-  `add_document` skips entity extraction for anything under `WEB_RESEARCH_DIR`
-  (`_is_web_document`), decided from the **path** and never from the call site
-  -- a reindex re-reads these as ordinary markdown, so a rule applied only
-  where a page is first stored would be reversed by the next rebuild, silently.
-  The capital rule is far worse on web prose than on this project's files:
-  `ENTITY_STOPWORDS` is hand-audited, and it was audited against source code
-  and numpy docstrings where the forced capitals are `Returns`, `Every`,
-  `False`. Web prose opens sentences with a different vocabulary entirely.
-  Measured on 2026-09-09, after a handful of runs: 15 fetched pages had minted
-  **551 entities no project document mentions -- 19% of the whole graph** --
-  `Although`, `Afterward`, `Again`, `Accessed`. Skipping them took the graph
-  from 2,830 entities to 2,285. The page is still chunked, embedded and fully
-  retrievable; it simply stops voting on what the entities of this project are.
-  The side effect is that such a page has no edges and is therefore an isolated
-  node -- which is exactly the symptom `connectivity()` exists to detect, and
-  the only place an entity-extraction regression shows at all. So
-  `connectivity()` excludes them and reports `web_documents` alongside, because
-  15 permanent false isolates would bury the one reading that matters.
-- **The console, its launchers and its config are in the corpus, and none of
-  them votes on entities.** `PROJECT_INDEX_PATTERNS` read only `.py`, `.md`,
-  `.txt` and `.rst`, so `frontend/index.html` -- the console itself -- could
-  not be retrieved, and asked about the Corpus tab a discussion Builder
-  proposed changes to "a React/Vue/Angular component" the project does not
-  have. Measured on 2026-09-12 against five questions about the console: that
-  file would rank first on three, and lifts one the corpus could not answer at
-  all over the relevance floor, 0.308 before and 0.383 after. So `.html`,
-  `.js`, `.css`,
-  `.sh`, `.toml`, `.yml`, `.yaml`, `.ini` and `.cfg` are indexed, and
-  `INDEXABLE_SUFFIXES` follows; the upload controls now take their list from
-  `status` rather than hard-coding one. None of them mints entities
-  (`ENTITY_FREE_SUFFIXES`, decided from the path like `_is_web_document`): the
-  seven such files here would add 72 entities the graph does not hold, 56 from
-  `frontend/index.html` alone, and they are JavaScript constants and the first
-  words of interface strings (`BRIDGE_VERDICTS`, `CLEAR_ARMED`, `Copying`,
-  `Dimming`). `connectivity()` leaves them out of its isolate count as it does
-  fetched pages, reporting them as `entity_free_sources`, and the claims census
-  skips them for the reason it skips web pages.
-- **The staleness verdict is withheld while a run or a rebuild is in flight.**
-  The research
-  phase writes each page to disk and embeds it as a separate step, so between
-  those two there is a file the walk can see and the store cannot. A startup
-  index is the same instant seen from the other phase -- it prunes the store's
-  stale rows before re-adding anything, so a poll landing inside one sees a
-  corpus mid-repair of exactly what the verdict would accuse it of. Observed
-  live: the header read `stale: 1 not indexed` mid-phase and cleared itself
-  moments later. The counts stay -- they are the truth about that instant --
-  and only the accusation is withheld, under `settling`. A verdict that
-  flickers teaches the operator to ignore the one that does not.
-- **Deleting a file does not delete the document, and git will not tell you
-  either.** Two separate gaps, and the 2026-09-09 cleanup hit both. Removing a
-  file from disk leaves its chunks in the store answering searches with text
-  that is nowhere in the project until something rebuilds -- which is what
-  `corpus_staleness`'s `extra` reports. So the sequence is delete, reindex,
-  check; not delete and assume.
-  The second gap is why this paragraph exists at all: everything removed that
-  day was **untracked**, so `git log` will never show it happened, and a
-  future reader finding these paths in an old report has nothing else to
-  consult. Removed deliberately, and not to be re-added: the bot-detection and
-  security-circumvention material (`docs/legal-boundaries.md`,
-  `docs/research/bot-detection-techniques.md`,
-  `reports/security-circumvention-blocker.md` -- the last the Architect's own
-  refusal of a goal asking for anti-bot circumvention, a record of the gate
-  working rather than of work done), which is not a line of work this project
-  takes; the dead run artifacts (`AUDIT_REPORT.md`, `CLARIFICATION_NEEDED.md`,
-  `run_exercise.py`, `ai_efficiency_report.md`); and the unrelated `files/`
-  deliverable.
-  `reports/diagnostics/` went too, and it is the case worth generalising: the
-  `.gitignore` already called those sweeps *"per-run measurements against
-  non-deterministic models, not history"*, yet five of them were sitting in the
-  corpus as indexed documents, because **the walk is a glob and not git**.
-  Anything gitignored is still retrievable unless it is also in
-  `PROJECT_INDEX_EXCLUDES`, so a transient artifact that outlives its run does
-  not merely take up disk -- it answers questions. It is in
-  `PROJECT_INDEX_EXCLUDES` now, because deleting the sweeps fixed the afternoon
-  and not the next `diagnose_seats.py` run; the deliberate `reports/*.md`
-  beside them stay indexed, and the test asserts both halves through the walk.
-- **The corpus rots in silence, so something has to compare it against the
-  project.** `corpus_health.corpus_staleness` is that comparison, and it rides
-  on `rag_stats` because the console header is where it will actually be seen.
-  It exists because of a failure with no symptom at all: measured here on
-  2026-09-09, the store held **8 documents, all of them uploads, against a walk
-  offering 103**. Every project query therefore scored under the relevance
-  floor -- `BUILDER_DEADLINE_SECONDS` returned an unrelated upload at 0.284 --
-  so `_gather_research` discarded retrieval and fell through to the
-  Researcher's seat on *every* run, which is the step-burning loop described
-  above. Nothing reported it: `rag_stats` said `indexed`, every counter was
-  non-zero and consistent with the others, and the full suite passed. The only
-  way to see it was to put two numbers side by side that nobody had ever
-  compared.
-  Three states, and they are not one request. `missing` is in the walk and not
-  in the corpus -- work written since the last reindex. `extra` is in the
-  corpus and not in the walk -- a file deleted or renamed, whose text is
-  nowhere in the project and still answers searches. `oversized` is in the walk
-  and too large to index, so **correctly** absent: it is reported *apart* from
-  `stale` because reindexing cannot change it, and a header permanently asking
-  for a rebuild that would do nothing is a warning nobody reads.
-  Both size tests are exact rather than approximate, and that is the whole
-  reliability of the thing: `index_project_files` measures *characters* while
-  `stat` counts *bytes*, and a UTF-8 file is never fewer bytes than
-  characters, so `st_size <= MAX_INDEXABLE_BYTES` already proves a file
-  indexable and settles nearly every file without a read; only the handful
-  above that line are read and measured properly. Guessing either way invents
-  an accusation -- an indexable file excluded reads as `extra`, a skipped one
-  included as `missing` -- and one standing false accusation teaches the
-  operator to ignore the whole signal.
-  It lives in its own module because writing it inside `graphrag_server`
-  pushed that file past `MAX_INDEXABLE_BYTES`: the
-  module that defines the corpus would have been dropped *from* the corpus at
-  the next reindex, silently, as the direct result of adding the check meant to
-  catch exactly that. That is why it is a separate module and stays one.
-  **Do not restate that margin as a figure.** A character count in prose goes
-  stale on the next edit -- one here claimed ~250 characters of headroom while
-  the file that shipped had 28,000 -- and `oversized` is the guard that does
-  not: it reports a file the walk offers and the indexer must skip.
-  **The limit itself was raised to 250,000 on 2026-09-11, and the old number's
-  stated reason had expired.** It said a file that large "would dominate the
-  embedding budget", which was true when a document was embedded as one vector;
-  chunking ended that, and `search` collapsing chunks onto documents ended it
-  again -- a document takes exactly one result slot however many chunks it
-  holds, measured at 1 of 5 for CLAUDE.md, which carries 7.1% of all chunks.
-  What 100,000 still did was decide the project's shape, this file having
-  reached 99.99% of it. The ceiling is not unbounded, though, and the reason
-  is at the constant: `search` fills a window of chunks *before* collapsing
-  them, so a document large enough to fill that window with itself starves
-  every other source. `INDEXABLE_WARN_RATIO` now fails the suite at 80% of the
-  limit, because `oversized` only fires once a file is already being skipped
-  -- which is the point at which the only fix left is surgery.
-  The walk is cached for `WALK_CACHE_SECONDS` since the console polls every
-  five seconds; `forget_expected_documents` drops it, and
-  `rpc_upload_document` calls it because an upload is the one writer that
-  changes what the walk would find.
-- **A sweep is one call, and the Graph tab is read one node at a time.** The
-  console used to assemble a sweep itself: `list_documents`, then a
-  `query_graph` per document -- 97 round trips on this corpus, each one a line
-  in the server log, before anything was drawn. Every document is always kept
-  and entities are kept by degree, so for any depth of one or more the union of
-  those neighbourhoods is exactly every document plus every entity with at
-  least `min_degree` edges. `GraphRAGKnowledgeBase.overview` computes that once
-  (`graph_overview`), and a test holds it equal to the old union. Documents
-  that share no entity with the rest -- fetched pages and entity-free sources
-  among them -- are left out of the drawing and counted. A page newer than its
-  server falls back to the per-document loop rather than drawing nothing.
-  Reading the result is the other half: labelling all 97 documents stacked the
-  middle of the canvas with overlapping text, so only the best-connected
-  (`LABELLED_DOCUMENTS`) keep a label until the view is zoomed in. The wheel
-  zooms about the pointer, the background pans, and hovering a node steps
-  everything but it and its neighbours back. Dragging a node after the layout
-  had settled moved nothing on screen -- the handler updated the model and only
-  the animation loop drew it -- so a drag now places the node itself.
-  The layout runs in a Web Worker (`makeLayout`, the same function on the page
-  thread if a worker cannot be made) with Barnes-Hut repulsion. On the page
-  thread it compared every pair every frame -- 41.6ms a step on a 2,000-node
-  graph against 2.1ms measured on 2026-09-18 -- so steps were rationed and a
-  full sweep got 60 of them and came out balled up.
-  `makeLayout` is sent to the worker as its source text, so it must reach
-  nothing outside itself.
-- **`query_graph` traverses undirected, and must.** Every edge in the knowledge
-  graph runs **document -> entity**, so an entity has in-edges only and a
-  *directed* walk from one reaches nothing. It traversed directed until
-  2026-09-09 and returned the entity by itself -- `neighbors` of length 1 --
-  for every entity in the corpus: `Planner` has 21 edges and reported none,
-  against a real 2-hop neighbourhood of 614 nodes. That is the Researcher's
-  `query_knowledge_graph` tool, so one half of retrieval answered every
-  relationship question with "this term connects to nothing", which reads as a
-  finding rather than as a broken traversal. `neighborhood` already took the
-  undirected view; this is the same fix, arrived at late. Both now share
-  `_resolve_node`, so the console and the
-  Researcher cannot resolve an id differently.
-- Knowledge base files under `knowledge/` (`chroma/`, `knowledge_graph.json`) are runtime artifacts; avoid committing them unless intentionally versioning an index.
-- A reindex **rebuilds** rather than accumulates: it clears the graph and
-  prunes Chroma ids that no longer qualify, so excluded or deleted files stop
-  answering searches. It does **not** re-embed what has not changed. Every
-  chunk carries a `sha` of its document's text (`_content_sha`, written by
-  `add_document` rather than by its caller), and a document that still hashes
-  to what the store holds keeps its vectors while `_add_to_graph` puts it back
-  in the graph the rebuild cleared. Embedding is the whole cost here: measured
-  warm on this project's 77 files and 1,618 chunks, 52.0s to re-embed
-  everything and 0.09s when nothing changed, of which reading every file,
-  hashing it and rebuilding the entire entity graph account for 0.1s. That is
-  what makes a rebuild something every run can
-  do for itself instead of something a person has to remember.
-- **A corpus clear empties in place and must reach disk.** `clear()` deletes
-  every Chroma id, *then* clears the graph — never the other way round, and it
-  raises rather than report a half-wipe as success, because the two halves
-  answer different questions and a corpus that disagrees with itself is worse
-  than one that is merely stale. The files under `knowledge/` are kept, holding
-  an empty store: Chroma has that directory open, and pulling it out from under
-  a live client is the worse failure. The trailing `_save_graph()` is
-  load-bearing, and `index_project_files` now ends with the same two lines for
-  the same reason. It had exactly this hole: its `graph.clear()` and its prune
-  of stale Chroma rows were persisted and invalidated only as a side effect of
-  `add_document`, so a reindex that added nothing emptied the graph in memory,
-  reported `indexed: 0` and success, and left the old `knowledge_graph.json`
-  for the next process start to reload -- the corpus it had just rebuilt came
-  back. The lexical index went the same way: built before the prune, it went
-  on answering
-  with the rows the prune deleted. Both lines are unconditional there, since a
-  reindex is the one operation after which that index must be rebuilt anyway.
-  **The floor record goes with them**, and it is a third half rather than
-  tidiness: a floor is measured on *these texts* under this embedding model, so
-  one outliving its corpus is a number about a corpus nobody can consult. Two
-  things read it afterwards --
-  `_calibrate_the_floor_before_the_run` treats a record's mere presence as
-  `known`, so the run rebuilding the corpus would never measure a floor for
-  what it built, and the console went on showing that floor over an empty
-  corpus. It is removed *after* both halves are actually empty, so a wipe that
-  raised leaves the corpus and its floor still agreeing, and `removed_floor`
-  says whether there was one.
-  **And what Clear leaves is `empty`, which is not a verdict about the
-  project.** `rag_stats` withholds the stale accusation on an emptied corpus
-  as of 2026-09-19, the way it already does under `settling`: pressing Clear
-  left the header reading `stale: 112 not indexed`, arithmetically right and
-  useless. Staleness earns its place because a drifting corpus looks exactly
-  like a healthy one; an empty corpus wears no such disguise -- it says so on
-  its own chip, and the only thing that acts on the accusation is the run that
-  would rebuild the corpus anyway. The counts stay, because they are the truth
-  about this instant, and the header names the state rather than counting to
-  zero four times.
-- **An uploaded document is a file first and a document second, and that
-  ordering is the whole design.** `store_uploaded_document` writes the upload
-  under `uploads/` and only then calls `add_document`. The corpus is a function
-  of what is on disk: `index_project_files` clears the graph and prunes every
-  stored row whose document is not in the walk, so a document embedded straight
-  into the store and nowhere else survives exactly until the next reindex,
-  which then deletes it **silently**, in a pass that reports success. Writing
-  the file is what puts an upload *inside* the
-  rebuild instead of underneath it, which is why `uploads/` must stay out of
-  `PROJECT_INDEX_EXCLUDES` — a new entry that merely contains that string would
-  end every upload one reindex later, and `test_uploads.py` checks it through
-  `iter_project_files` rather than by reading the list, because that is the way
-  it breaks. Gitignoring the directory does not hide it: the walk is a glob,
-  not git.
-  Every refusal is a `ValueError` naming what was wrong, because each
-  alternative to refusing is worse than a failed upload and none of them
-  announces itself. A `.pdf` has no text extractor here, so accepting one
-  embeds whatever its bytes decode to under a real filename. A file over
-  `MAX_INDEXABLE_BYTES` is embedded now and skipped at every rebuild after, so
-  the limit is applied here character for character against the walk's own
-  test. A name carrying a path writes outside the directory the walk looks at,
-  the same disappearance by another route, so only the last component is used
-  and `..` is refused by name (`PurePosixPath("..").name` is `".."`, not
-  `""`).
-  `INDEXABLE_SUFFIXES` is derived from `PROJECT_INDEX_PATTERNS` rather than
-  restated beside it, and a suffix is *stored* lower-cased because the walk is
-  a glob and a glob is case-sensitive here — `NOTES.MD` written as given is a
-  file the reindex cannot see. `_document_metadata` is shared with
-  `index_project_files` for the same reason: two spellings of one document is
-  two documents, one of them orphaned in the graph at the next rebuild.
-  `add_document` returns its chunk count so the console can say what a document
-  became; that number is the only thing distinguishing a file that landed whole
-  from one the embedder read the header of.
-- **Changing the corpus is refused while a run, or a rebuild, is in flight.**
-  Both remaining
-  writers — `clear_corpus` and `upload_document` — go through
-  `_refuse_while_a_run_is_in_flight()`, which refuses for a startup index too:
-  that is the same hazard without the run, since the phase holds the corpus
-  mid-rebuild for tens of seconds with nothing running. The two are worded
-  apart because what the operator does about them differs -- a run is theirs to
-  stop, a rebuild is theirs to wait out -- and a refusal offering to stop a run
-  that does not exist is the wrong instruction rather than a vague one; a run
-  started into a rebuild sets both flags, and the run's wording wins.
-  (`reindex` was the third and is gone; the rebuild now happens *before* the
-  stream starts, which is the only ordering that obeys this rule rather than
-  needing an exemption from it.) Not for consistency: because the failure
-  would be silent. An emptied corpus does not break the Researcher's search,
-  it returns no hits; a corpus midway through a rebuild returns whatever
-  fraction of itself has been re-added. Either reads as
-  `no_relevant_knowledge` and routes the run as though the knowledge base had
-  simply had nothing useful to say, with nothing raised and nothing logged, so
-  the seat can never find out it was cut off and the operator is told instead.
-  The refusal names the goal, the way `rpc_shutdown` does. `export_corpus` has
-  no such guard: reading the corpus takes nothing away from the run using it.
-  The upload is guarded for a *different* reason than the other two, and it is
-  worth keeping straight: an upload only ever adds, so it could not manufacture
-  an absence. What it cannot do is add while a search is reading — it mutates
-  the same networkx graph `neighborhood` and the lexical index iterate — and a
-  run should be answered by the corpus it started against either way.
-- **The export omits embeddings, and says so in the file.** They are most of
-  the bytes and the least portable part — a reader without the same model
-  cannot use them — and the embedder runs locally, so a reindex regenerates
-  them. The `note` field carries that so the omission is not left to be
-  discovered. The graph half is `node_link_data`, the same format
-  `_save_graph` writes, so it compares directly against
-  `knowledge/knowledge_graph.json`.
-- `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs. `"*.egg-info"` matches nothing, and a substring also over-matches: `.git` excluded `.github/` with the object store, so the CI workflow could not be retrieved until the entry became `.git/`.
-- A seat with no credentials silently becomes `StubLLM`. `get_agent_status()` is the only thing that reports the difference — keep the chip and banner wired to it.
-- **Key presence is not liveness.** A key can authenticate and the seat still be unusable (no credits, rate limit, model not on the account). `_SeatLLM` records the real outcome of each call in `_seat_failures`, and `get_agent_status()` reports that over any static check. Never re-add a presence-only check as the sole signal.
-- `stubbed` and `live` are different failures: a stubbed seat completes the run with canned text, a failing seat kills it. The console words them differently; keep it that way.
-- **A seat's thinking box says what its next call does.** A switchable model
-  is always sent the flag, off included, since omitting it means *on* for
-  `qwen3.5:397b-cloud`, Opus 5 and Sonnet 5. That is what lets it default
-  off (`DEFAULT_THINKING`): an unticked box is a seat told not to think, not
-  one left to its model's own default.
-  `thinking_support` reads support rather than listing it, and "could not
-  ask" stays unknown, never "cannot think". A Claude reply that thought is a
-  list of blocks, so nodes read replies through `_as_text`.
-- `__pycache__` directories should never be committed (they are removed from git in this repo).
-- **The container joins this machine's network rather than a network of its
-  own, and that is the whole configuration.** The console talks to three things
-  on the host -- the Ollama daemon on 127.0.0.1:11434, which serves every seat
-  and holds the one embedding model; the `postgres18` container Omarchy's
-  installer runs, published on 127.0.0.1:5432 and nowhere else, which is what
-  lets it use trust authentication; and the SearxNG `install.sh` runs on
-  127.0.0.1:8888. All three are loopback-only *on purpose*, so a bridged
-  container reaches none of them: the gateway address it would use is not an
-  address any of those ports is published on. `network_mode: host` makes the
-  URLs in `.env` mean the same thing inside the container as outside it, which
-  is why the database needs no configuration of its own. The alternative --
-  republishing PostgreSQL beyond loopback, or attaching both containers to a
-  network of their own and telling the daemon to listen past 127.0.0.1 -- pays
-  three separate costs to solve one problem, and the first of them gives up the
-  reason that database has no password.
-  **There are two bases and one configuration.** `Dockerfile` is Arch, because
-  this is an Arch/Omarchy project; `Dockerfile.kali` is Kali rolling, which
-  carries the same interpreter (3.14.7) and so resolves the same dependency
-  tree. They are separate files rather than one file with a base argument,
-  since they differ in package manager, package names and what their
-  repositories carry -- Kali packages no `gh`, which comes from GitHub's own
-  apt repository there, and without it `git_dwell` stops at `push`. Everything
-  downstream is shared, `docker/entrypoint.sh` verbatim, and compose keeps the
-  settings in one anchor so a service names only its Dockerfile and its tag.
-  The daemon itself stays on the host and is not containerized: it owns the
-  embedding model's placement on the GPU and holds the ollama.com credentials
-  the `:cloud` tags are proxied with. The image carries the console, its venv,
-  `git` and `gh` -- and the checkout arrives as a bind mount, because a corpus
-  is a function of what is on disk: `knowledge/`, the floor measured for it,
-  `runs/`, `uploads/`, `research/web/` and `projects/` all live in the tree,
-  and a container keeping them in its own layer would throw the corpus away on
-  every rebuild.
-  **`docker stop` is the console's exit button, not a kill.** SIGTERM's default
-  handler ends the process where it stands, and `rpc_run_goal` writes its
-  snapshot from a `finally` -- so the default would lose, on the one exit path
-  nobody watches, exactly the state a restarted console reattaches to.
-  `_exit_the_way_the_console_would` asks for the same exit the X asks for, so a
-  run in flight is stopped and the exit deferred to its own teardown.
+  `get_knowledge_base()` creates and is reserved for indexing;
+  `open_knowledge_base()` returns `None` and is what every read goes through.
+  The corpus is rebuilt when the console starts and again before every run
+  (`INDEX_PROJECT_BEFORE_RUN=0` switches off both), `_claim_the_rebuild` holds
+  an `flock` beside the store so two consoles cannot interleave rebuilds, and a
+  reindex rebuilds rather than accumulates while keeping the vectors of
+  unchanged documents.
+- **Changing the corpus is refused while a run or a rebuild is in flight**
+  (`clear_corpus`, `upload_document`); `export_corpus` is not, since reading
+  takes nothing away. `clear()` empties Chroma first, then the graph, then the
+  floor record, and must reach disk.
+- **An uploaded document is a file first**: `store_uploaded_document` writes
+  under `uploads/` and only then embeds, so `uploads/` must stay *out* of
+  `PROJECT_INDEX_EXCLUDES` or the next rebuild deletes the upload silently.
+- Fetched pages under `research/web/` and `ENTITY_FREE_SUFFIXES` files are
+  retrievable but mint no entities, decided from the path so a reindex cannot
+  reverse it. `connectivity()` reports them apart from real isolates.
+- **`ENTITY_STOPWORDS` is a hand-audited list, not a rule.** Re-run the
+  position-free-capital count when the vocabulary moves -- in either direction,
+  since deleting files moves it too -- and the pinned top-twenty in
+  `test_claims.py` is what tells you it has.
+- `PROJECT_INDEX_EXCLUDES` entries are matched as plain substrings, not globs.
+- **There is exactly one embedding model** (`EMBEDDING_MODEL_NAME`), a corpus
+  belongs to it, and `set_embedding_model` refuses: vectors from two models
+  share no space. The chunker cuts with that model's own tokenizer.
+- **Placement is the daemon's, and only one model is on the cards.**
+  `OLLAMA_EMBED_OPTIONS` and `OLLAMA_SEAT_GPU_OPTIONS` force every layer onto
+  the GPU, `GPU_ARBITER` (`control.py`) serializes the embedder against the
+  seats and evicts the resident model, and a seat whose forced load does not
+  fit is rebuilt unforced and retried once.
+- **The emergency stop is cooperative.** `RUN_CONTROL` is a process-global
+  checked at node tops, in the Builder's turn loop, before each verified file
+  and between supersteps -- never inside a tool batch. Every exit path writes
+  `runs/last_run.json`, and `shutdown` defers the exit to the run's own
+  `finally` under `_run_lock`.
+- **Three nested timeouts, none redundant**: `LLM_TIMEOUT_SECONDS` bounds one
+  provider call at the socket (spelled differently per provider),
+  `NODE_DEADLINE_SECONDS` / `BUILDER_DEADLINE_SECONDS` bound a node turn, and
+  `RUN_BUDGET_SECONDS` bounds the run but is checked only between supersteps.
+- The seat lights come from `ACTIVITY` and `run_progress.turns`, never
+  `run_progress["node"]`, which names the seat that just *finished*; the
+  embedder's light comes from `EMBEDDER_ACTIVITY`.
+- A seat with no credentials silently becomes `StubLLM`. Key presence is not
+  liveness: `get_agent_status()` reports the real outcome of each call
+  (`_seat_failures`), and `stubbed` and `live` failures are worded apart.
+- A seat's thinking box says what its next call does: a switchable model is
+  always sent the flag, off included, since omitting it means *on*.
+- Knowledge base files under `knowledge/` are runtime artifacts, and
+  `__pycache__` is never committed.
+- **The container joins this machine's network** (`network_mode: host`): the
+  daemon, PostgreSQL and SearxNG are all loopback-only on the host. The daemon
+  stays on the host, the checkout arrives as a bind mount, and `docker stop`
+  asks for the same exit the console's X does.
+
+## Documentation claims are tests
+
+`tests/test_claims.py` exists because prose goes stale silently: **a claim
+worth writing down is a claim worth failing a build over.** Most of its guards
+*recompute* the claim from the repository -- every cited path resolves, the
+Project Structure tree matches disk in both directions, the seat table matches
+`DEFAULT_SEATS`, the documented Python floor matches `pyproject.toml`, no
+walked file exceeds `MAX_INDEXABLE_BYTES` (and none passes
+`INDEXABLE_WARN_RATIO` of it), and CI runs the same commands the Quick
+Reference does.
+
+Two are different. A figure quoted in prose is checked against its constant
+through a small registry -- better still, name the constant and let the reader
+look it up. And the top-twenty entity audit **cannot** be a rule, so it is
+*pinned*: when it fails, a newcomer has reached the top twenty and the audit is
+asking to be redone, not reporting a bug. Its census counts only the files
+every checkout has, so `uploads/`, `projects/` and fetched pages are out.
 
 ## Troubleshooting
 
-- **Tests are slow** — The first run opens Chroma. Subsequent runs reuse the cached singleton.
-- **Mypy errors from upstream stubs** — Prefer `# type: ignore[...]` with a comment over disabling strict mode.
-- **GraphRAG returns no results** — Check whether there is a corpus at all: the console header reads `no corpus` when none has been built. One is built when the console starts and again before the Architect opens, from the directory the server was started in, so the usual causes are a server started somewhere with nothing to index or `INDEX_PROJECT_BEFORE_RUN=0`, which switches off both phases (`status.indexes_on_run` reports it). Nothing else builds one: there is no button, no script and no install step.
-- **No LLM output / canned text** — A seat pointed at Anthropic or OpenAI needs that provider's key in `.env`; without one it runs `StubLLM` and the console shows a `NO KEY` chip. No seat uses either by default. The Ollama seats need the daemon running and signed in (`ollama signin`) for `:cloud` tags.
-- **A 400 from Anthropic that looks like an auth error** — Check nothing is passing `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model; sampling parameters are rejected on those families.
-- **The embedder is on the CPU, or embedding is slow** — Placement is the Ollama daemon's, and this project only reads it back: `ollama ps` shows how much of `qwen3-embedding:latest` the daemon left on the CPU. `journalctl -u ollama` reading `skipping CUDA device` means Arch's CUDA 13 build on a card it cannot drive: run `./cuda-embed-ollama.sh`, which installs Ollama's own CUDA 12 build and proves the model lands 100% on the GPU. Every layer is forced onto the cards (`OLLAMA_EMBED_OPTIONS`), so a load that does not fit errors instead of splitting: `nvidia-smi` shows what else holds the cards, and the next embed reloads the model once they are free.
-- **A local seat runs mostly on the CPU, or one card looks untouched** — `ollama ps` names the split and `nvidia-smi` the cards. A locally-run seat is sent `num_gpu` (`OLLAMA_SEAT_GPU_OPTIONS`), so `37%/63% CPU/GPU` on a model that should fit means the forced load failed and the seat rebuilt itself unforced — `journalctl -u ollama` names the allocation that did not fit. A model genuinely larger than the cards (qwen3.8 is 17 GB against 6 GB) is *meant* to read that way; that is the fallback working, not a fault. Two models resident at once means something reached the daemon around `GPU_ARBITER` — everything in this project embeds through `_encode` and calls seats through `_SeatLLM`, so the usual cause is another process, or `ollama run` in a second terminal.
-- **The header reads `stale: N not indexed` right after the console starts** -- Read the `[Corpus]` line in `/tmp/ambiguity-console.log`: it names each file that failed to index and why. The usual cause is a model load short of GPU memory while something else briefly held a card -- on 2026-09-18, the browser the launcher opens, drawing the whole knowledge graph on the default Graph tab while the startup rebuild loaded the model. So the Graph tab is not drawn while a rebuild or a run is in flight or the embedder is working (`graphHoldReason` in `frontend/index.html`, fed by `status.indexing` and `status.run_in_flight`); it empties the SVG, says why, and redraws itself once the hold lifts. `OllamaEmbedder.encode` retries a 5xx `OLLAMA_EMBED_LOAD_RETRIES` times for exactly that, and `add_document` embeds before it deletes, so a failure that outlasts the retries leaves the old document in place instead of removing it. The next run's rebuild re-embeds it.
-- **Online research finds nothing, or reports DuckDuckGo's bot check** — Check that `SEARXNG_URL` is in `.env`: `install.sh` runs a SearxNG and adds it only once the instance answers. `systemctl --user status ambiguity-searxng` and `journalctl --user -u ambiguity-searxng` show the container. An HTTP 403 means `json` is missing from the instance's `search.formats`. Port 8888 is also Jupyter's default: if something else holds it, set `SEARXNG_PORT` in `.env` and re-run the installer.
-- **`docker` says permission denied, or nothing answers on port 5432** — The database is the one Omarchy's own installer runs, the `postgres18` container, and nothing in the app reads its `DATABASE_URL`. `install.sh` adds you to the `docker` group, which applies only after a reboot; until then `docker` needs sudo (`sudo docker logs postgres18`). It also enables `docker.service`, because Omarchy enables only the socket, and without the service the container stays down after a reboot until something runs `docker`.
-- **`install.sh` cannot pull a model or the tokenizer** — Both come from the network once: the seat and embedding models from the Ollama registry, the embedding tokenizer from Hugging Face (a few MB, no weights). A machine meant to go offline afterwards needs that step to have run at least once; afterwards both are read from cache.
-- **Graph tab is empty** — The corpus is rebuilt when the console starts and again before the Architect opens; the header says so while it is happening, and the server log says what it did. A `TypeError` on every insert used to leave the graph empty while the script still reported success; the corpus is only real if `rag_stats` shows non-zero nodes.
+- **GraphRAG returns no results** -- Check whether there is a corpus at all; the
+  header reads `no corpus` when none has been built. One is built when the
+  console starts and again before the Architect opens, from the directory the
+  server was started in, so the usual causes are a server started somewhere
+  with nothing to index, or `INDEX_PROJECT_BEFORE_RUN=0`.
+- **No LLM output / canned text** -- A seat pointed at Anthropic or OpenAI needs
+  that provider's key in `.env`; without one it runs `StubLLM` and the console
+  shows a `NO KEY` chip. Ollama seats need the daemon running and signed in
+  (`ollama signin`) for `:cloud` tags.
+- **A 400 from Anthropic that looks like an auth error** -- Something is passing
+  `temperature` to an Opus 5 / Sonnet 5 / 4.6+ model.
+- **The embedder is on the CPU, or embedding is slow** -- `ollama ps` names the
+  split. `journalctl -u ollama` reading `skipping CUDA device` means Arch's
+  CUDA 13 build on a card it cannot drive: run `./cuda-embed-ollama.sh`.
+- **A local seat runs mostly on the CPU, or one card looks untouched** --
+  the forced load failed and the seat rebuilt itself unforced; the journal names
+  the allocation that did not fit. A model larger than the cards is *meant* to
+  read that way. Two models resident at once means something reached the daemon
+  around `GPU_ARBITER`.
+- **The header reads `stale: N not indexed` right after startup** -- Read the
+  `[Corpus]` line in `/tmp/ambiguity-console.log`: it names each file that
+  failed and why, usually a model load short of GPU memory.
+- **Online research finds nothing, or reports DuckDuckGo's bot check** -- Check
+  `SEARXNG_URL` is in `.env` and the instance answers; an HTTP 403 means `json`
+  is missing from its `search.formats`.
+- **`docker` says permission denied, or nothing answers on port 5432** -- The
+  `docker` group applies only after a reboot, and Omarchy enables only the
+  socket, so `docker.service` must be enabled for the database to come back up.
+- **Tests are slow** -- The first run opens Chroma; later runs reuse the cached
+  singleton.
+
+## Where the reasoning went
+
+This file used to carry the rationale behind every rule above -- what was
+measured, what was tried and rejected, and which incident each guard came from.
+It was cut on 2026-09-20 because a memory file is loaded into every session and
+it had reached 150,060 characters. **The full text is the commit before that
+one:** `git show 2074d08:CLAUDE.md`, and `git log -p CLAUDE.md` for how each
+rule arrived. Before changing a rule above, read its paragraph there -- most of
+them record an alternative that was built, measured and rejected.
