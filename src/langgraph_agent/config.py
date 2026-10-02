@@ -8,6 +8,7 @@ per seat. The embedding model runs on the same daemon but belongs to GraphRAG,
 never to a seat.
 """
 
+import functools
 import json
 import os
 import re
@@ -228,30 +229,37 @@ def daemon_request(path: str, payload: dict[str, Any] | None = None, *, timeout:
     return OLLAMA_DAEMON.call(send)
 
 
-_ollama_tags_cache: tuple[float, list[str]] = (0.0, [])
+_ollama_tags_cache: tuple[float, list[str] | None] = (0.0, None)
 
 
-def list_ollama_models() -> list[str]:
-    """Tags the local Ollama daemon reports, cached for 30s.
+def ollama_daemon_tags() -> list[str] | None:
+    """Tags the local Ollama daemon reports, cached for 30s; None if it cannot be asked.
 
     Both the seat dropdowns and the liveness check can ask on every status poll.
-    An unreachable daemon is an empty list, never an exception.
+    An empty list is a daemon with nothing pulled, which is not an unreachable
+    one, and is cached like any answer; a failure is not cached, so a daemon
+    that comes back shows at the next poll (its circuit keeps the asking cheap).
     """
     global _ollama_tags_cache
 
     now = time.monotonic()
     cached_at, cached = _ollama_tags_cache
-    if cached and now - cached_at < 30.0:
+    if cached is not None and now - cached_at < 30.0:
         return cached
 
     try:
         payload = daemon_request("/api/tags", timeout=2.0)
         tags = sorted(str(entry["name"]) for entry in payload.get("models", []))
     except Exception:
-        tags = []
+        return None
 
     _ollama_tags_cache = (now, tags)
     return tags
+
+
+def list_ollama_models() -> list[str]:
+    """`ollama_daemon_tags()`, with an unreachable daemon as an empty list, never an exception."""
+    return ollama_daemon_tags() or []
 
 
 _ollama_caps_cache: dict[str, tuple[float, list[str] | None]] = {}
@@ -427,6 +435,34 @@ def _failure_reason(exc: Exception) -> str:
     return message[:90].strip()
 
 
+class SeatCallAbandoned(RuntimeError):
+    """A seat call ended part-way because the node waiting for it had given up."""
+
+
+@functools.cache
+def _abandonment_watch() -> Any:
+    """A callback that ends a streamed seat call between tokens once nobody waits for it.
+
+    `ChatOllama.invoke` streams, and its socket timeout bounds only the gap
+    between tokens: a call its node abandoned went on generating -- holding
+    `GPU_ARBITER`, so every other seat and the embedder waited -- for as long as
+    the model would. Raised from the token callback (`raise_error`), it closes
+    the stream, and the daemon stops generating for a client that left.
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    from langgraph_agent.control import abandoned
+
+    class _StopWhenAbandoned(BaseCallbackHandler):
+        raise_error = True
+
+        def on_llm_new_token(self, token: Any, **kwargs: Any) -> None:
+            if abandoned():
+                raise SeatCallAbandoned("its node stopped waiting for it")
+
+    return _StopWhenAbandoned()
+
+
 class _SeatLLM:
     """A seat's chat model, wrapped so its failures reach the console.
 
@@ -486,6 +522,7 @@ class _SeatLLM:
         waiting. Cloud SDKs retry their own requests, so only the circuit is
         added there.
         """
+        kwargs = self._watched(kwargs)
         if self._provider == "ollama":
             from langgraph_agent.control import RUN_CONTROL
 
@@ -499,6 +536,20 @@ class _SeatLLM:
             return circuit.call(self._inner.invoke, *args, **kwargs)
         return self._inner.invoke(*args, **kwargs)
 
+    def _watched(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """`kwargs` with the abandonment watch added to the call's callbacks.
+
+        Only for a LangChain model, whose `invoke` takes a config; a stub's does
+        not, and has nothing to stream.
+        """
+        from langchain_core.runnables import Runnable
+
+        if not isinstance(self._inner, Runnable):
+            return kwargs
+        config = dict(kwargs.get("config") or {})
+        config["callbacks"] = [*(config.get("callbacks") or []), _abandonment_watch()]
+        return {**kwargs, "config": config}
+
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         from langgraph_agent.control import GPU_ARBITER
 
@@ -511,6 +562,10 @@ class _SeatLLM:
                 free_the_cards_for(tag)
             try:
                 result = self._call(*args, **kwargs)
+            except SeatCallAbandoned:
+                # Nobody is waiting for this answer, and nothing is wrong with
+                # the seat: the node already said why it moved on.
+                raise
             except Exception as exc:
                 if local and _is_gpu_fit_failure(exc) and self._unforce():
                     healing = get_healing_logger()
@@ -943,7 +998,7 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
         live, reason, badge, stubbed = False, "ANTHROPIC_API_KEY not set", "NO KEY", True
     elif provider == "ollama":
         tags = list_ollama_models()
-        if not tags:
+        if not tags and ollama_daemon_tags() is None:
             live, reason, badge = False, "Ollama daemon unreachable", "OFFLINE"
         # Compared as tags: `qwen3.8` is `qwen3.8:latest`.
         elif not any(_same_ollama_tag(model, tag) for tag in tags):
@@ -951,7 +1006,7 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
 
     # Where the prompt goes: a `:cloud` tag's transport is local, but the
     # prompt leaves the machine.
-    remote = provider == "anthropic" or model.endswith((":cloud", "-cloud"))
+    remote = provider == "anthropic" or not is_local_ollama_model(model)
 
     # What the next call will do; None when nobody can say.
     support, thinking_note = thinking_support(provider, model)

@@ -272,7 +272,10 @@ a Builder that runs programs. No CORS header is sent; the page is same-origin.
   by the caller, never by an agent.** A discussion run binds no tools at all
   and forces online research off.
 - **Work run under `_with_deadline` must not write to state** -- the abandoned
-  worker cannot be cancelled and may finish after the node returned. The
+  worker cannot be cancelled and may finish after the node returned. It is
+  told instead (`control.abandoned`): a streamed seat call stops at its next
+  token and lets go of `GPU_ARBITER`, since the socket timeout bounds only the
+  gap between tokens. The
   Builder's deadline never abandons a tool call. A timed-out Architect can
   never rule `approved`, and a timed-out or off-format Planner must leave a
   non-empty `plan` (`_PLANNER_TIMED_OUT`, `_PLANNER_NO_STEPS`), since the gate

@@ -203,6 +203,24 @@ def test_a_dead_daemon_opens_its_circuit_and_is_then_not_asked(monkeypatch):
     assert len(calls) == config.OLLAMA_CIRCUIT_THRESHOLD, "an open circuit still asked"
 
 
+def test_a_daemon_with_nothing_pulled_is_not_called_unreachable(monkeypatch):
+    """Both used to be an empty list, so every seat on a fresh daemon read
+    OFFLINE "daemon unreachable" and sent the operator after the wrong thing."""
+    monkeypatch.setattr(config, "_seat_failures", {})
+    monkeypatch.setattr(config, "_ollama_tags_cache", (0.0, None))
+    monkeypatch.setattr(config, "daemon_request", lambda path, payload=None, *, timeout: {})
+
+    assert config.get_agent_status("planner")["badge"] == "NOT PULLED"
+
+    monkeypatch.setattr(config, "_ollama_tags_cache", (0.0, None))
+
+    def refused(path: str, payload: Any = None, *, timeout: float) -> Any:
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    monkeypatch.setattr(config, "daemon_request", refused)
+    assert config.get_agent_status("planner")["badge"] == "OFFLINE"
+
+
 def test_a_daemon_answering_with_an_error_is_up(monkeypatch):
     def urlopen(request: Any, timeout: float | None = None) -> Any:
         raise urllib.error.HTTPError(request.full_url, 404, "Not Found", None, io.BytesIO())

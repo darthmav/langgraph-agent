@@ -27,7 +27,7 @@ from typing import Any, TypeVar, cast
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from langgraph_agent.config import get_agent_llm
-from langgraph_agent.control import RUN_CONTROL
+from langgraph_agent.control import RUN_CONTROL, abandonable
 from langgraph_agent.mcp_client import (
     TERMINAL_TIMEOUT_MAX_SECONDS,
     TERMINAL_TIMEOUT_SECONDS,
@@ -74,18 +74,22 @@ class _Deadline:
 def _with_deadline(work: Callable[[], _T], seconds: float, fallback: _T) -> _T:
     """Run `work`, giving up on it after `seconds` and returning `fallback`.
 
-    Python cannot cancel a thread blocked on a socket, so an abandoned worker
-    unwinds on its own when the client timeout fires. Hence `work` must not
-    write to state -- a late finisher would land in a state the graph had moved
-    past -- and the worker is a daemon thread: a pool's threads are joined at
-    exit, so one stuck worker would hold up shutdown.
+    Python cannot cancel a thread, so an abandoned worker is told instead
+    (`control.abandoned`): a streamed seat call stops at its next token and
+    lets go of the cards, and one blocked on a silent socket unwinds when the
+    client timeout fires. Hence `work` must not write to state -- a late
+    finisher would land in a state the graph had moved past -- and the worker
+    is a daemon thread: a pool's threads are joined at exit, so one stuck
+    worker would hold up shutdown.
     """
     box: list[Any] = []
     error: list[BaseException] = []
+    given_up = threading.Event()
 
     def _run() -> None:
         try:
-            box.append(work())
+            with abandonable(given_up):
+                box.append(work())
         except BaseException as exc:  # re-raised on the caller's thread below
             error.append(exc)
 
@@ -94,6 +98,7 @@ def _with_deadline(work: Callable[[], _T], seconds: float, fallback: _T) -> _T:
     thread.join(timeout=seconds)
 
     if thread.is_alive():
+        given_up.set()
         return fallback
     if error:
         # A seat that failed outright is not a timeout; let it raise so

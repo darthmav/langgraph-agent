@@ -49,6 +49,7 @@ from langgraph_agent.config import (  # noqa: E402
     daemon_request,
     get_agent_model_info,
     get_agent_status,
+    is_local_ollama_model,
     list_ollama_models,
     ollama_base_url,
     ollama_model_capabilities,
@@ -627,7 +628,7 @@ def _seat_model_options() -> list[dict[str, str]]:
         caps = ollama_model_capabilities(tag)
         if caps is not None and "completion" not in caps:
             continue
-        cloud = tag.endswith((":cloud", "-cloud"))
+        cloud = not is_local_ollama_model(tag)
         options.append({
             "label": tag,
             "provider": "ollama",
