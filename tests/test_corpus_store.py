@@ -201,17 +201,22 @@ def test_a_server_restart_costs_one_retry_not_the_circuit(store, monkeypatch):
 
 
 def test_a_deadlock_is_retried_and_never_counts_toward_the_circuit(store, monkeypatch):
+    """A deadlock is the server answering over a working connection: it used
+    to count toward the circuit and get that connection closed as broken."""
     monkeypatch.setattr(corpus_store, "POSTGRES_RETRY_WAIT_SECONDS", 0.0)
-    calls = [0]
+    backends: list[int] = []
+    failures_seen: list[int] = []
 
     def work(conn: Any) -> str:
-        calls[0] += 1
-        if calls[0] < 3:
+        backends.append(conn.info.backend_pid)
+        failures_seen.append(_postgres_circuit()["failures"])
+        if len(backends) < 3:
             raise psycopg.errors.DeadlockDetected()
         return "done"
 
     assert store.database.run(work, name="deadlocked") == "done"
-    assert calls[0] == 3
+    assert failures_seen == [0, 0, 0]
+    assert len(set(backends)) == 1, "a healthy connection was closed as broken"
     circuit = _postgres_circuit()
     assert (circuit["state"], circuit["failures"]) == ("closed", 0)
 

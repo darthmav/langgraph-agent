@@ -294,7 +294,8 @@ a Builder that runs programs. No CORS header is sent; the page is same-origin.
   heading) against the off-domain ones in `embedding_calibration.json` --
   `None` until it has been, measured again once the corpus has changed
   (`corpus_signature`), and never borrowed between embedding models. The
-  Planner's map asks for the floor before it searches. Search is hybrid: BM25 re-ranks the dense window
+  Planner's map asks for the floor before it searches. Search is hybrid:
+  BM25 re-ranks the dense window
   (`lexical.py`), ranks fused rather than scores, so every result keeps the
   cosine the floor is read off.
 - **Documents are embedded in chunks** (`CHUNK_MAX_TOKENS` 254 against a
@@ -396,13 +397,17 @@ a Builder that runs programs. No CORS header is sent; the page is same-origin.
 
 `self_healing` wraps calls rather than living inside them: `call_with_retry`
 retries what its policy calls transient, a named `Circuit` stops calling a
-service that keeps failing until one trial call after its cooldown succeeds,
+service that keeps failing until one trial call after its cooldown succeeds
+(half-open, it admits that one and refuses the rest; it keeps the books under
+its lock and never holds it across a call, so it never serializes them),
 and every action lands in the healing journal (`get_healing_logger()`), which
 the console reads and a run's snapshot carries (each run is one healing
 session). Where it is used:
 
 - **The database is one circuit, `POSTGRES`** (`corpus_store.py`), opened only
-  by a server that cannot be reached (`database_unreachable`). A store call
+  by a server that cannot be reached (`database_unreachable`: no SQLSTATE, or a
+  connection one) -- a deadlock or serialization failure is retried and never
+  counted, and a broken connection takes the idle pool with it. A store call
   is one transaction, retried briefly while unreachable -- safe, since a
   transaction the connection dropped under was rolled back -- and a rebuild
   that meets the open circuit ends as `unavailable` naming it; the monitor
