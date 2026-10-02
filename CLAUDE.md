@@ -71,7 +71,7 @@ python example_usage.py
 │   ├── projects.py            # Generated projects: where a run writes, and opting one into the corpus
 │   └── self_healing/          # Retries, circuit breakers and the healing journal (see Self-healing)
 │       ├── logger.py          # SelfHealingLogger: severity-levelled healing log + event journal
-│       └── decorators.py      # call_with_retry, Circuit, retry_with_backoff, circuit_breaker
+│       └── decorators.py      # call_with_retry, Circuit, circuit_states, reset_circuit
 ├── prompts/
 │   ├── architect.txt          # System prompt (loaded by nodes.py)
 │   ├── planner.txt

@@ -24,6 +24,7 @@ from langgraph_agent.self_healing import (
     Circuit,
     CircuitOpenError,
     call_with_retry,
+    exception_chain,
     get_healing_logger,
 )
 
@@ -113,16 +114,6 @@ def ollama_base_url() -> str:
     return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 
 
-def _causes(exc: BaseException) -> list[BaseException]:
-    """`exc` and every exception it was raised from or during, outermost first."""
-    chain: list[BaseException] = []
-    current: BaseException | None = exc
-    while current is not None and all(current is not seen for seen in chain):
-        chain.append(current)
-        current = current.__cause__ or current.__context__
-    return chain
-
-
 def daemon_unreachable(exc: BaseException) -> bool:
     """Whether a failure means the Ollama daemon could not be reached at all.
 
@@ -132,7 +123,7 @@ def daemon_unreachable(exc: BaseException) -> bool:
     because each client wraps it differently: urllib in `URLError`, httpx in
     `ConnectError`, the ollama client in a bare `ConnectionError`.
     """
-    for cause in _causes(exc):
+    for cause in exception_chain(exc):
         if isinstance(cause, urllib.error.HTTPError):
             return False
         # urllib raises URLError only while connecting and sending, before any
@@ -150,7 +141,7 @@ def provider_unavailable(exc: BaseException) -> bool:
     Unreachable, timed out, or a 5xx (Anthropic's 529 "overloaded" included).
     A 4xx is the request or the key, and is the provider answering.
     """
-    for cause in _causes(exc):
+    for cause in exception_chain(exc):
         if daemon_unreachable(cause) or "Timeout" in type(cause).__name__:
             return True
         status = getattr(cause, "status_code", None)

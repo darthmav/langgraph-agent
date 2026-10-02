@@ -60,7 +60,12 @@ from langgraph_agent.corpus_health import (  # noqa: E402
     corpus_staleness,
     forget_cached_walk,
 )
-from langgraph_agent.corpus_store import POSTGRES, get_database, rebuild_claim  # noqa: E402
+from langgraph_agent.corpus_store import (  # noqa: E402
+    POSTGRES,
+    database_unreachable,
+    get_database,
+    rebuild_claim,
+)
 from langgraph_agent.graph import RECURSION_LIMIT  # noqa: E402
 from langgraph_agent.graphrag_server import (  # noqa: E402
     EMBEDDER_LOAD,
@@ -256,6 +261,17 @@ def rpc_rag_stats(_: dict[str, Any]) -> dict[str, Any]:
         }
 
     stats = kb_or_none.stats()
+    if stats["total_chunks"] is None:
+        # The store could not be asked: unavailable, never "empty", which
+        # would tell the operator a rebuild is what is missing.
+        state, note = "unavailable", (
+            f"The corpus database could not be asked ({stats.get('store_error')}), so "
+            "there is nothing to retrieve until it answers. The console reports it as "
+            "the postgres circuit; a run goes ahead without retrieval."
+        )
+        stats.update(corpus=state, note=note, total_chunks=0,
+                     staleness={"stale": False, "unavailable": note})
+        return stats
     stats["corpus"] = "indexed" if stats["total_chunks"] else "empty"
 
     # The corpus drifts from the archive silently: every counter above stays
@@ -1088,7 +1104,23 @@ def _rebuild_the_corpus(
                 _kb_for_indexing(), progress=progress, should_stop=should_stop
             )
     except Exception as exc:
-        return {"source": "error", "corpus": state, "note": str(exc)}
+        if isinstance(exc, CircuitOpenError) or database_unreachable(exc):
+            # The claim or the store met a database that is not answering: an
+            # outage like one met midway, which the monitor redoes the rebuild
+            # after, so it is recorded the same way.
+            failed: dict[str, Any] = {
+                "source": "unavailable", "corpus": state, "stopped": False,
+                "unavailable": str(exc),
+                "unavailable_circuit": getattr(exc, "circuit", POSTGRES.name),
+                "indexed": 0, "embedded": 0, "reused": 0, "dropped": 0, "skipped": 0,
+                "errors": [],
+            }
+        else:
+            failed = {"source": "error", "corpus": state, "note": str(exc)}
+        with _run_lock:
+            _last_rebuild.clear()
+            _last_rebuild.update(failed)
+        return failed
 
     if report.get("stopped"):
         source = "stopped_midway"
@@ -1266,6 +1298,12 @@ def _rebuild_the_corpus_before_the_run() -> dict[str, Any]:
     )
 
 
+def _passages(report: dict[str, Any]) -> str:
+    """The report's chunk count, or what stands in for one the store would not give."""
+    count = report.get("total_chunks")
+    return "an unknown number of" if count is None else str(count)
+
+
 def _corpus_feed_line(report: dict[str, Any], *, when: str = "before the run") -> str | None:
     """One line for the feed whenever a rebuild checked the corpus.
 
@@ -1281,7 +1319,7 @@ def _corpus_feed_line(report: dict[str, Any], *, when: str = "before the run") -
         return (
             f"[Corpus] The corpus already matched the archive, so nothing was "
             f"re-embedded: {report.get('indexed', 0)} document(s), "
-            f"{report.get('total_chunks', 0)} passage(s), checked in "
+            f"{_passages(report)} passage(s), checked in "
             f"{report.get('elapsed_s', 0)}s. The Researcher searches it as it "
             "stands."
         )
@@ -1310,7 +1348,7 @@ def _corpus_feed_line(report: dict[str, Any], *, when: str = "before the run") -
             )
         return (
             f"[Corpus] {was}, so the archive was indexed {when}: "
-            f"{report['indexed']} document(s), {report.get('total_chunks', 0)} "
+            f"{report['indexed']} document(s), {_passages(report)} "
             f"passage(s) in {report.get('elapsed_s', 0)}s.{note} The Researcher "
             "searches this like any other corpus."
         )
@@ -1321,7 +1359,7 @@ def _corpus_feed_line(report: dict[str, Any], *, when: str = "before the run") -
         if changed:
             parts.append(f"{changed} document(s) re-read")
         if dropped:
-            parts.append(f"{dropped} no longer in the archive dropped")
+            parts.append(f"{dropped} no longer in the archive (or no longer indexable) dropped")
         return (
             f"[Corpus] The corpus was behind the archive, so it was brought up "
             f"to date {when}: {', '.join(parts)}, {report.get('reused', 0)} "

@@ -2508,7 +2508,20 @@ $("#stats").addEventListener("click", async e => {
   poll(true);
 });
 
+// One poll at a time. The interval does not wait for a slow one -- a status
+// read held up behind a busy database -- so without this every tick stacked
+// another request on the server's threads. A poll asked for while one is in
+// flight (a chip clicked) runs once more when it ends, rather than not at all.
+let POLL_IN_FLIGHT = null, POLL_AGAIN = false;
 async function poll(quiet){
+  if(POLL_IN_FLIGHT){ POLL_AGAIN = true; return POLL_IN_FLIGHT; }
+  POLL_IN_FLIGHT = (async () => {
+    do{ POLL_AGAIN = false; await pollOnce(quiet); }while(POLL_AGAIN && !EXITING);
+  })();
+  try{ await POLL_IN_FLIGHT; }finally{ POLL_IN_FLIGHT = null; }
+}
+
+async function pollOnce(quiet){
   if(EXITING) return;
   try{
     const [st, stats, healing] = await Promise.all([
@@ -2532,6 +2545,8 @@ async function poll(quiet){
     const indexing = indexingChip(st) + healingChip(healing);
     $("#stats").innerHTML = CORPUS === "absent"
       ? `<span class="nocorpus">no corpus &mdash; ${BUILDS_ON_RUN ? "a restart or the next run rebuilds it from the archive" : "nothing indexed"}</span>`+indexing
+      : CORPUS === "unavailable"
+      ? `<span class="nocorpus" title="${esc(stats.note || "")}">corpus unavailable &mdash; the database is not answering; a run goes ahead without retrieval</span>`+indexing
       : CORPUS === "empty"
       ? `<span class="nocorpus">corpus empty &mdash; ${BUILDS_ON_RUN ? "a restart or the next run rebuilds it from the archive" : "REBUILD_CORPUS is off, so nothing will rebuild it"}</span>`+indexing
       : `<span>docs <b>${stats.total_documents}</b></span>`+
