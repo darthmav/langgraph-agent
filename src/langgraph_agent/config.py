@@ -997,8 +997,10 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
     elif provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
         live, reason, badge, stubbed = False, "ANTHROPIC_API_KEY not set", "NO KEY", True
     elif provider == "ollama":
-        tags = list_ollama_models()
-        if not tags and ollama_daemon_tags() is None:
+        # Asked once: an unreachable daemon is None, one with nothing pulled
+        # an empty list, and only the first is OFFLINE.
+        tags = ollama_daemon_tags()
+        if tags is None:
             live, reason, badge = False, "Ollama daemon unreachable", "OFFLINE"
         # Compared as tags: `qwen3.8` is `qwen3.8:latest`.
         elif not any(_same_ollama_tag(model, tag) for tag in tags):

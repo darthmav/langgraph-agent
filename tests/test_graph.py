@@ -408,7 +408,7 @@ def test_moving_a_seat_clears_its_recorded_failure(monkeypatch):
     """
     from langgraph_agent import config
 
-    monkeypatch.setattr(config, "list_ollama_models", lambda: ["kimi-k3:cloud"])
+    monkeypatch.setattr(config, "ollama_daemon_tags", lambda: ["kimi-k3:cloud"])
 
     config.set_agent_llm("architect", "anthropic", "claude-opus-5")
     config._seat_failures["architect"] = "Anthropic credit balance too low"

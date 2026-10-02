@@ -14,11 +14,12 @@ you want them.
 ## 🎨 Web Console
 
 ```bash
-# Quick launch
+# Quick launch: on first launch it builds .venv and installs the
+# dependencies, and again whenever pyproject.toml changes
 ./launch_console.sh
 
-# Or manually
-python serve.py
+# Or manually, from that venv
+.venv/bin/python serve.py
 # Open: http://localhost:8080
 ```
 
@@ -247,6 +248,15 @@ Everything it installs is free to use. Elsewhere, or by hand:
 pip install -e ".[dev]"
 ```
 
+`./launch_console.sh` does the Python half itself: on first launch it builds
+`.venv` from the first interpreter that meets `requires-python` and installs
+the project with the Builder's tools (`.[tools]`), and it reinstalls whenever
+`pyproject.toml` no longer matches the stamp the venv was installed from
+(`.venv/.ambiguity-deps`, which `install.sh` writes too) or a declared
+dependency is missing -- so a pull that changes the dependencies needs no
+step of its own. The log is `/tmp/ambiguity-install.log`. It does none of the
+system half: Ollama, its models, PostgreSQL and SearxNG are `install.sh`'s.
+
 ### Running in a container
 
 An Arch image of the console and the database its corpus lives in, as one
@@ -280,9 +290,12 @@ whether it answers, because with no daemon behind them every default seat fails
 its first call and the corpus cannot be embedded.
 
 What is shared with the host Python install: **code and `.env`, read-only,
-and nothing else.** `src/`, `serve.py`, `frontend/`, `prompts/` and
-`spectral_graph/` are mounted from the checkout so an edit shows on restart, but
-the container cannot write to them. Everything the app writes to disk --
+and nothing else.** `src/`, `pyproject.toml`, `serve.py`, `frontend/`,
+`prompts/` and `spectral_graph/` are mounted from the checkout so an edit shows
+on restart, but the container cannot write to them. The venv is the image's,
+installed at the last `--build`, so the entrypoint compares `pyproject.toml`
+with what that venv was installed from and says when a pull has changed the
+dependencies: then `docker compose up --build`. Everything the app writes to disk --
 `runs/`, `uploads/`, `research/web/`, `projects/` and the rest -- is a named
 Docker volume, and the corpus is in the stack's own database, so the container
 and a console started on the host (`./launch_console.sh`, port 8080, the host's
@@ -294,7 +307,10 @@ document, upload it through its console. It runs as uid 1000
 
 `git_dwell`'s `push`, `pr` and `merge` stages need your own credentials:
 uncomment the `~/.gitconfig` and `~/.config/gh` mounts in `docker-compose.yml`.
-Without them commits carry a fallback identity and `gh` has no account.
+Without them commits carry a fallback identity and `gh` has no account. On a
+run given a project (the console's default) the git tools act in that
+project's own repository on the `projects` volume -- the Builder `git init`s it
+-- which has no remote, so there `git_dwell` commits and stops at `push`.
 
 `docker compose stop` is the console's exit button rather than a kill -- a run
 in flight is stopped and the exit deferred until it has written its snapshot,

@@ -134,7 +134,7 @@ python example_usage.py
 ├── .dockerignore              # the venv, the caches, and every per-machine artifact
 ├── install.sh                 # Arch / Omarchy: everything, from nothing to a running console
 ├── cuda-embed-ollama.sh       # NVIDIA cards below compute 7.5: Ollama's CUDA 12 build, model 100% on the GPU
-├── launch_console.sh          # starts serve.py and waits on /api/status before opening a browser
+├── launch_console.sh          # builds .venv on first launch, starts serve.py, waits on /api/status, opens a browser
 ├── serve.py                   # Python HTTP server + API backend + the self-healing monitor
 ├── example_usage.py           # Demo script
 ├── ollama_client.py           # one prompt to the local daemon, bounded by the project's own timeout

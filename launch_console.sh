@@ -5,24 +5,105 @@ set -e
 
 cd "$(dirname "$0")"
 
-# The project's packages live in .venv (install.sh builds it). Without this,
-# `python` is whatever is first on PATH -- on Omarchy that is mise's
-# interpreter, which has none of them, so serve.py died on its first import.
-# It also puts the venv first on PATH for the Builder's own terminal commands.
-if [ -f ".venv/bin/activate" ]; then
-    # shellcheck source=/dev/null
-    . .venv/bin/activate
-fi
-
 echo "============================================"
 echo "  Ambiguity 4-Agent Console"
 echo "============================================"
 echo ""
 
+# Started from the app launcher there is no terminal to read, so a launch that
+# cannot go on also says so on the desktop when it can.
+fail() {
+    echo "✗ $1" >&2
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical "Ambiguity Console" "$1" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# The project's packages live in .venv. install.sh builds it, but a checkout
+# that never ran it -- or whose pyproject.toml has changed since -- is set up
+# here, before anything imports the project: `python` on PATH is otherwise
+# whatever comes first (on Omarchy, mise's interpreter, with none of them), and
+# serve.py died on its first import. Activated, the venv is also first on PATH
+# for the Builder's own terminal commands.
+VENV=.venv
+INSTALL_LOG=/tmp/ambiguity-install.log
+# What the venv was last installed from; install.sh writes the same stamp, so
+# the first launch after it installs nothing.
+DEPS_STAMP="$VENV/.ambiguity-deps"
+PY_FLOOR="$(sed -n 's/^requires-python *= *">=\([0-9][0-9.]*\)".*/\1/p' pyproject.toml)"
+PY_FLOOR="${PY_FLOOR:-3.12}"
+floor_ok() {
+    "$1" -c "import sys; sys.exit(sys.version_info < tuple(map(int, '$PY_FLOOR'.split('.'))))" \
+        2>/dev/null
+}
+deps_stamp() { sha256sum pyproject.toml | cut -d' ' -f1; }
+# Every runtime dependency pyproject.toml declares, plus the Builder's own
+# tools (ruff, pytest), read from the declaration rather than a list kept here.
+deps_present() {
+    "$VENV/bin/python" - 2>/dev/null <<'PY'
+import re
+import sys
+import tomllib
+from importlib import metadata
+
+project = tomllib.load(open("pyproject.toml", "rb"))["project"]
+wanted = ["langgraph-agent", *project["dependencies"],
+          *project.get("optional-dependencies", {}).get("tools", [])]
+for requirement in wanted:
+    try:
+        metadata.version(re.split(r"[\s<>=!~;\[(]", requirement, maxsplit=1)[0])
+    except metadata.PackageNotFoundError:
+        sys.exit(1)
+PY
+}
+
+# A venv whose interpreter was removed underneath it -- a mise upgrade, an Arch
+# Python minor bump -- still has a bin/python symlink, pointing at nothing.
+if ! { [ -x "$VENV/bin/python" ] && floor_ok "$VENV/bin/python"; }; then
+    if [ -e "$VENV" ]; then
+        echo "  .venv is broken or older than Python $PY_FLOOR; rebuilding it"
+        rm -rf "$VENV"
+    fi
+    # The first interpreter on PATH that is new enough and can make a venv: an
+    # interpreter without ensurepip (some distribution and tool-managed builds)
+    # is passed over rather than ending the launch.
+    BASE_PY=""
+    for candidate in python3 python python3.14 python3.13 python3.12 /usr/bin/python3; do
+        candidate="$(command -v "$candidate" 2>/dev/null)" || continue
+        floor_ok "$candidate" || continue
+        echo "  first launch: creating .venv with $("$candidate" --version 2>&1) ($candidate)"
+        if "$candidate" -m venv "$VENV" >>"$INSTALL_LOG" 2>&1; then
+            BASE_PY="$candidate"
+            break
+        fi
+        echo "  $candidate could not create a venv; trying the next interpreter"
+        rm -rf "$VENV"
+    done
+    [ -n "$BASE_PY" ] || fail "No Python >= $PY_FLOOR on PATH could build .venv (sudo pacman -S python, or ./install.sh); see $INSTALL_LOG"
+    "$VENV/bin/python" -m pip install --quiet --upgrade pip >>"$INSTALL_LOG" 2>&1 || true
+fi
+if [ "$(cat "$DEPS_STAMP" 2>/dev/null || true)" != "$(deps_stamp)" ] || ! deps_present; then
+    echo "  installing the project's dependencies into .venv (pip install -e \".[tools]\");"
+    echo "  a first install takes a few minutes -- the log is $INSTALL_LOG"
+    if "$VENV/bin/python" -m pip install --quiet -e ".[tools]" >>"$INSTALL_LOG" 2>&1 \
+            && deps_present; then
+        deps_stamp >"$DEPS_STAMP"
+        echo "✓ Dependencies installed"
+    else
+        tail -n 15 "$INSTALL_LOG" >&2 || true
+        fail "could not install the project's dependencies into .venv; see $INSTALL_LOG"
+    fi
+fi
+# shellcheck source=/dev/null
+. "$VENV/bin/activate"
+
 # Check if .env exists
 if [ ! -f ".env" ]; then
     echo "⚠️  No .env file found. Copying from .env.example..."
-    cp .env.example .env 2>/dev/null || true
+    # Owner-only, as install.sh makes it: an API key goes here if a seat is
+    # moved to a paid provider, and a copy inherits the template's mode.
+    if cp .env.example .env 2>/dev/null; then chmod 600 .env; fi
 fi
 
 # Load environment safely
@@ -47,12 +128,22 @@ URL="http://localhost:${PORT}"
 # that were running something else -- or nothing at all.
 if [ -d "src" ]; then
     PYTHONPATH=src python3 - <<'PY' 2>/dev/null || true
-from langgraph_agent.config import AGENTS, get_agent_status
+import logging
 
-for agent in AGENTS:
-    seat = get_agent_status(agent)
+# The healing journal's lines -- a daemon that is down opens its circuit
+# while the seats are read -- belong to the console's feed, not this summary,
+# which says the same thing once per seat.
+logging.disable(logging.CRITICAL)
+
+from langgraph_agent.config import AGENTS, get_agent_status  # noqa: E402
+
+seats = {agent: get_agent_status(agent) for agent in AGENTS}
+# Sized to the longest tag, as install.sh's summary is: a local tag runs to
+# 55 characters, and a fixed column ran it into the provider.
+width = max(len(seat["model"]) for seat in seats.values()) + 2
+for agent, seat in seats.items():
     flag = "" if seat["live"] else f"  !! {seat['reason']}"
-    print(f"  {agent:11}{seat['model']:22}{seat['provider']}{flag}")
+    print(f"  {agent:11}{seat['model']:<{width}}{seat['provider']}{flag}")
 PY
 fi
 
