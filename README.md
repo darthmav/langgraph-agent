@@ -172,7 +172,8 @@ fetched web pages into it, and nothing else forces anything to read it: the
 Researcher ran only when a plan happened to route there, so a confidently
 written plan meant a run that built a corpus and consulted none of it. On a goal
 the corpus answers, that hop costs a search and no model call at all — retrieval
-returns straight from GraphRAG whenever the top hit clears the relevance floor.
+returns straight from GraphRAG whenever the best hit clears the relevance floor,
+which is measured on the corpus itself and again whenever it has changed.
 Later cycles route as the Planner asks.
 
 ### The Four Agents

@@ -56,11 +56,14 @@ for agent in AGENTS:
 PY
 fi
 
+# The console's own answer, not merely an answer: any server on this port
+# replies to the request, and one that was not the console was taken for it,
+# opened in the browser, and serve.py never started.
 is_server_ready() {
     if command -v curl &> /dev/null; then
-        curl -s "${URL}/api/status" > /dev/null 2>&1
+        curl -sf --max-time 2 "${URL}/api/status" 2>/dev/null | grep -q '"indexes_on_run"'
     else
-        python3 -c "import urllib.request; urllib.request.urlopen('${URL}/api/status', timeout=1)" > /dev/null 2>&1
+        python3 -c "import sys, urllib.request; body = urllib.request.urlopen('${URL}/api/status', timeout=1).read(); sys.exit(0 if b'\"indexes_on_run\"' in body else 1)" > /dev/null 2>&1
     fi
 }
 
@@ -109,11 +112,13 @@ esac
 # and reports the corpus unavailable -- but said here, where someone is
 # looking, rather than only in the header.
 DB_URL="${DATABASE_URL:-postgresql://postgres@127.0.0.1:5432/postgres}"
+# Shown without its password, as the console shows it (`redacted_url`).
+DB_SHOWN="$(printf '%s' "${DB_URL%%\?*}" | sed -E 's#(://[^:/@]+:)[^@]*@#\1***@#')"
 if command -v psql >/dev/null 2>&1; then
     if PGCONNECT_TIMEOUT=3 psql "$DB_URL" -w -X -q -t -A -c 'select 1' >/dev/null 2>&1; then
         echo "✓ Corpus database answers"
     else
-        echo "⚠️  The corpus database does not answer at ${DB_URL%%\?*}:"
+        echo "⚠️  The corpus database does not answer at ${DB_SHOWN}:"
         echo "   docker start postgres18 (or ./install.sh); the console starts anyway"
         echo "   and reports the corpus as unavailable until it does."
     fi

@@ -43,7 +43,12 @@ from langgraph_agent.lexical import (
     lexical_order,
     reciprocal_rank_fusion,
 )
-from langgraph_agent.projects import PROJECTS_DIR, embedded_projects, held_out_of_corpus
+from langgraph_agent.projects import (
+    PROJECTS_DIR,
+    embedded_projects,
+    held_out_of_corpus,
+    skipped_dir,
+)
 from langgraph_agent.self_healing import Circuit, CircuitOpenError, call_with_retry
 
 # The embedding model that builds and searches the corpus, served by the local
@@ -1506,15 +1511,6 @@ INDEXABLE_SUFFIXES = (
     ".sh", ".toml", ".txt", ".yaml", ".yml",
 )
 
-# Directories the walk never enters, wherever they sit under a corpus root:
-# version control, virtualenvs, tool caches and build output -- what a generated
-# project accumulates without anyone writing it. Matched against whole directory
-# names (plus the `.egg-info` suffix), never as substrings, so `rebuild/` is not
-# `build/` and a project's own `src/` and `tests/` are indexed like any others.
-CORPUS_SKIP_DIRS = frozenset({
-    "__pycache__", ".git", ".venv", "venv", "node_modules",
-    ".pytest_cache", ".mypy_cache", "build", "dist",
-})
 
 # Above this size a file is not a document -- a dump, a minified bundle, a log.
 # Chunking means a long document takes one result slot however many chunks it
@@ -1700,10 +1696,6 @@ def store_uploaded_document(
     return report
 
 
-def _skipped_dir(name: str) -> bool:
-    return name in CORPUS_SKIP_DIRS or name.endswith(".egg-info")
-
-
 def iter_corpus_files(root: str = ".", roots: tuple[str, ...] | None = None) -> list[Path]:
     """The files a rebuild indexes, spelled the way it stores them.
 
@@ -1718,7 +1710,7 @@ def iter_corpus_files(root: str = ".", roots: tuple[str, ...] | None = None) -> 
     files: set[Path] = set()
     for corpus_root in CORPUS_ROOTS if roots is None else roots:
         for directory, subdirs, names in os.walk(root_path / corpus_root):
-            subdirs[:] = [name for name in subdirs if not _skipped_dir(name)]
+            subdirs[:] = [name for name in subdirs if not skipped_dir(name)]
             for name in names:
                 path = Path(directory, name)
                 if name.endswith(INDEXABLE_SUFFIXES) and not held_out_of_corpus(

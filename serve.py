@@ -383,6 +383,32 @@ def rpc_search_documents(params: dict[str, Any]) -> dict[str, Any]:
     return {"results": results, "source": "local_graphrag"}
 
 
+def _why_the_corpus_is_busy(action: str) -> str | None:
+    """Why the corpus cannot be `action` now, or None. The caller holds `_run_lock`."""
+    running = bool(_run_progress["running"])
+    goal = str(_run_progress["goal"])
+    # A run takes precedence in the wording: it is the one of the two the
+    # operator can end, and a run started into a rebuild sets both flags.
+    if running:
+        detail = f" Running: {goal}" if goal else ""
+        return (
+            f"A run is in flight and the Researcher is searching this corpus, so "
+            f"it cannot be {action} right now. Stop the run first.{detail}"
+        )
+    if _background_rebuild["running"]:
+        return (
+            f"The corpus is being rebuilt to match the archive, so it cannot be "
+            f"{action} right now. The header says how far it has got; try again "
+            f"when it stops."
+        )
+    if _corpus_change["running"]:
+        return (
+            f"The corpus is being {_corpus_change['action']} from another request, so "
+            f"it cannot be {action} right now; try again in a moment."
+        )
+    return None
+
+
 def _refuse_while_a_run_is_in_flight(action: str) -> None:
     """Refuse to change the corpus underneath a run or a rebuild.
 
@@ -390,7 +416,9 @@ def _refuse_while_a_run_is_in_flight(action: str) -> None:
     or half-rebuilt corpus reads to the Researcher as one with nothing to say,
     and the run plans around an absence made out from under it. A background
     rebuild is the same hazard without the run, worded apart because the
-    operator stops a run but waits out a rebuild.
+    operator stops a run but waits out a rebuild. A change that goes on to
+    happen holds `_changing_the_corpus` instead, which checks and claims in one
+    hold of the lock.
 
     Args:
         action: Past participle of what was refused -- "cleared", "added to".
@@ -399,24 +427,33 @@ def _refuse_while_a_run_is_in_flight(action: str) -> None:
         ValueError: naming the goal in flight, or the rebuild.
     """
     with _run_lock:
-        running = bool(_run_progress["running"])
-        goal = str(_run_progress["goal"])
-        # A run takes precedence in the wording: it is the one of the two the
-        # operator can end, and a run started into a rebuild sets both flags.
-        indexing = bool(_background_rebuild["running"])
+        why = _why_the_corpus_is_busy(action)
+    if why is not None:
+        raise ValueError(why)
 
-    if running:
-        detail = f" Running: {goal}" if goal else ""
-        raise ValueError(
-            f"A run is in flight and the Researcher is searching this corpus, so "
-            f"it cannot be {action} right now. Stop the run first.{detail}"
-        )
-    if indexing:
-        raise ValueError(
-            f"The corpus is being rebuilt to match the archive, so it cannot be "
-            f"{action} right now. The header says how far it has got; try again "
-            f"when it stops."
-        )
+
+@contextlib.contextmanager
+def _changing_the_corpus(action: str) -> Iterator[None]:
+    """Change the corpus with no run or rebuild able to start until it is done.
+
+    The refusal used to be checked and then let go of: a run claimed in the gap
+    rebuilt the corpus under an upload, and the stored graph and the one in
+    memory parted. Checked and claimed in one hold of `_run_lock`; a run asked
+    for meanwhile is refused, and a background rebuild leaves it to the next.
+
+    Raises:
+        ValueError: as `_refuse_while_a_run_is_in_flight` does.
+    """
+    with _run_lock:
+        why = _why_the_corpus_is_busy(action)
+        if why is not None:
+            raise ValueError(why)
+        _corpus_change.update(running=True, action=action)
+    try:
+        yield
+    finally:
+        with _run_lock:
+            _corpus_change.update(running=False, action="")
 
 
 def rpc_list_projects(_: dict[str, Any]) -> dict[str, Any]:
@@ -438,9 +475,9 @@ def rpc_embed_project(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(error)
     if not Path(project_dir(name)).is_dir():
         raise ValueError(f"There is no project {name!r} under projects/.")
-    _refuse_while_a_run_is_in_flight("changed")
-    set_project_embedded(name, embed)
-    forget_cached_walk()
+    with _changing_the_corpus("changed"):
+        set_project_embedded(name, embed)
+        forget_cached_walk()
     rebuilding = REBUILD_CORPUS
     if rebuilding:
         threading.Thread(
@@ -474,15 +511,15 @@ def rpc_upload_document(params: dict[str, Any]) -> dict[str, Any]:
     search is reading. One document per call, so a file the corpus cannot take
     fails alone instead of taking a batch down with it.
     """
-    _refuse_while_a_run_is_in_flight("added to")
     name = params.get("name", "")
     content = params.get("content", "")
     if not isinstance(name, str) or not isinstance(content, str):
         raise ValueError("An upload is a filename and its text; both must be strings.")
-    report = store_uploaded_document(_kb_for_indexing(), name, content)
-    # The upload is a new file, so the cached walk is behind the corpus now;
-    # forgotten, or the new document would read as `extra`.
-    forget_cached_walk()
+    with _changing_the_corpus("added to"):
+        report = store_uploaded_document(_kb_for_indexing(), name, content)
+        # The upload is a new file, so the cached walk is behind the corpus
+        # now; forgotten, or the new document would read as `extra`.
+        forget_cached_walk()
     return report
 
 
@@ -554,11 +591,11 @@ def rpc_clear_corpus(_: dict[str, Any]) -> dict[str, Any]:
     empty it would leave behind exactly the thing the operator was asking to
     be rid of.
     """
-    _refuse_while_a_run_is_in_flight("cleared")
-    kb_or_none = _open_kb()
-    if kb_or_none is None:
-        raise ValueError(f"There is no corpus to clear. {absent_corpus()[1]}")
-    return kb_or_none.clear()
+    with _changing_the_corpus("cleared"):
+        kb_or_none = _open_kb()
+        if kb_or_none is None:
+            raise ValueError(f"There is no corpus to clear. {absent_corpus()[1]}")
+        return kb_or_none.clear()
 
 
 def rpc_list_seats(_: dict[str, Any]) -> dict[str, Any]:
@@ -1080,6 +1117,9 @@ def _claim_the_rebuild(
 # block and the snapshot all key off that dict. Guarded by `_run_lock`.
 _background_rebuild: dict[str, Any] = {"running": False, "message": "", "report": {}}
 
+# An upload, a clear or an opt-in under way (`_changing_the_corpus`).
+_corpus_change: dict[str, Any] = {"running": False, "action": ""}
+
 
 def _rebuild_the_corpus(
     *,
@@ -1186,7 +1226,9 @@ def _rebuild_the_corpus_in_background(when: str = "at startup") -> dict[str, Any
     # Checked in the same hold, so a second caller finds one under way and
     # leaves it to finish the same walk.
     with _run_lock:
-        if _background_rebuild["running"]:
+        # A change under way finishes first; the next rebuild -- before the next
+        # run, or the monitor's -- catches the corpus up.
+        if _background_rebuild["running"] or _corpus_change["running"]:
             return None
         _background_rebuild["running"] = True
         _background_rebuild["message"] = "checking the archive against the corpus"
@@ -1629,6 +1671,11 @@ def rpc_run_goal(params: dict[str, Any]) -> dict[str, Any]:
         if _run_progress["running"]:
             raise ValueError(
                 "A run is already in flight. Stop it before starting another."
+            )
+        if _corpus_change["running"]:
+            raise ValueError(
+                f"The corpus is being {_corpus_change['action']} right now; start the "
+                "run when that has finished."
             )
         RUN_CONTROL.arm(run_id)
         # Under the lock `run_progress` reads the record through, so no reply

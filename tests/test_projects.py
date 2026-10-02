@@ -69,6 +69,26 @@ def test_a_project_name_is_one_plain_component(bad):
     assert project_name_error(bad)
 
 
+@pytest.mark.parametrize("taken", ["embedded.json", "Embedded.JSON", "embedded.json.tmp"])
+def test_a_project_cannot_take_the_name_of_the_opt_in_record(taken):
+    """A run into project 'embedded.json' made a directory where the record
+    lives, and the next rebuild pruned every opted-in project from the corpus."""
+    assert "reserved" in (project_name_error(taken) or "")
+
+
+def test_a_project_s_file_count_skips_what_the_walk_skips(tmp_path):
+    """It counted a project's own .venv and node_modules: tens of thousands of
+    files, on every refresh of the Corpus tab, that the corpus never reads."""
+    project = tmp_path / "projects" / "app"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "main.py").write_text("print(1)\n", encoding="utf-8")
+    for skipped in (".venv/lib", "node_modules/pkg", "build", "app.egg-info"):
+        (project / skipped).mkdir(parents=True)
+        (project / skipped / "f.txt").write_text("x", encoding="utf-8")
+
+    assert [(p["name"], p["files"]) for p in list_projects(tmp_path)] == [("app", 1)]
+
+
 def test_the_builder_may_write_only_inside_the_chosen_project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert _outside_output_dir("projects/snake/game.py", "projects/snake") is None
