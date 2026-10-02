@@ -12,6 +12,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import threading
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -293,9 +294,25 @@ def resolve_persist_dir(persist_dir: str | Path | None = None) -> Path:
     return Path(persist_dir or DEFAULT_PERSIST_DIR)
 
 
-# The questions the relevance floor is measured with, in JSON because the walk
-# never indexes JSON: indexed, the unanswerable ones would answer themselves.
+# The questions the relevance floor's unanswered side is measured with, in JSON
+# because the walk never indexes JSON: indexed, they would answer themselves.
 FLOOR_CALIBRATION_QUESTIONS = Path(__file__).with_name("embedding_calibration.json")
+
+# The search window the floor is measured through. The gates read it off a
+# search of the Researcher's width (`RESEARCH_RESULTS`, 5 by default) and the
+# Planner's map (6); the statistic, the best cosine a search returned, is the
+# dense best in either, since BM25 only re-orders the dense window.
+FLOOR_SEARCH_RESULTS = 5
+
+# Fewer questions than this that the corpus answers by construction, and it
+# cannot say where its own answers score: no floor until it has grown.
+FLOOR_MIN_ANSWERED = 3
+
+# The line a fetched page's header records its goal on (`_render_document`).
+_RESEARCHED_FOR = re.compile(r"^- Researched for: (.+)$", re.MULTILINE)
+
+# How much of a document is read to find the question it answers.
+_QUESTION_SOURCE_CHARS = 4096
 
 
 def open_store(persist_dir: str | Path | None = None) -> PgCorpusStore | None:
@@ -339,30 +356,101 @@ def relevance_floor(persist_dir: str | Path | None = None) -> float | None:
     return floor_from_calibration(floor_calibration(persist_dir))
 
 
-def calibrate_relevance_floor(kb: "GraphRAGKnowledgeBase") -> dict[str, Any]:
-    """Take the relevance floor for this corpus's embedding model, and keep it.
+def best_score(results: list[dict[str, Any]]) -> float:
+    """The number the relevance floor is measured on and compared with.
 
-    Twelve questions this corpus answers against twelve it cannot. The floor is
-    the midpoint of the gap between the lowest answered score and the highest
-    unanswered one; when the populations overlap there is no floor, since any
-    number inside the overlap would misfile some question silently.
+    The best dense cosine among a search's hits -- not the first hit's, since
+    BM25 can rank a lower-cosine passage first, and the floor would then be
+    read off a different statistic at every gate than at calibration.
     """
-    questions = json.loads(FLOOR_CALIBRATION_QUESTIONS.read_text(encoding="utf-8"))
+    return max((float(hit.get("score") or 0.0) for hit in results), default=0.0)
+
+
+def corpus_signature(kb: "GraphRAGKnowledgeBase") -> str:
+    """What the corpus holds, as one fingerprint: every document and its content hash.
+
+    A floor is a property of the embedding model on these texts; measured on
+    other ones, it is stale.
+    """
+    fingerprints = kb.collection.fingerprints()
+    digest = hashlib.sha256()
+    for doc_id in sorted(fingerprints):
+        digest.update(f"{doc_id}\0{fingerprints[doc_id]}\n".encode())
+    return digest.hexdigest()[:16]
+
+
+def _question_for(doc_id: str) -> str | None:
+    """A question the document answers by construction, or None.
+
+    A fetched page's header names the goal it was researched for; anything
+    else offers its first heading, else its first line. Under three words is no
+    question.
+    """
+    try:
+        with open(doc_id, encoding="utf-8") as handle:
+            head = handle.read(_QUESTION_SOURCE_CHARS)
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = _RESEARCHED_FOR.search(head)
+    if match:
+        question = match.group(1)
+    else:
+        lines = [line.strip() for line in head.splitlines() if line.strip()]
+        heading = next((line.lstrip("#").strip() for line in lines if line.startswith("#")), "")
+        question = heading or (lines[0] if lines else "")
+    question = " ".join(question.split())[:200]
+    return question if len(question.split()) >= 3 else None
+
+
+def answered_questions(kb: "GraphRAGKnowledgeBase", limit: int) -> list[str]:
+    """Up to `limit` distinct questions this corpus answers, spread across it."""
+    documents = sorted(
+        str(node) for node, attrs in kb.graph.nodes(data=True) if attrs.get("type") == "document"
+    )
+    questions = list(dict.fromkeys(q for q in map(_question_for, documents) if q))
+    if len(questions) <= limit:
+        return questions
+    # Evenly spaced, so one research topic filed together cannot be all of it.
+    return [questions[round(i * (len(questions) - 1) / (limit - 1))] for i in range(limit)]
+
+
+def calibrate_relevance_floor(
+    kb: "GraphRAGKnowledgeBase", top_k: int = FLOOR_SEARCH_RESULTS
+) -> dict[str, Any]:
+    """Take the relevance floor for this corpus and its embedding model, and keep it.
+
+    Questions the corpus answers by construction -- drawn from its own
+    documents -- against as many it cannot, from `embedding_calibration.json`.
+    The floor is the midpoint of the gap between the lowest answered score and
+    the highest unanswered one; when the populations overlap there is no floor,
+    since any number inside the overlap would misfile some question silently.
+    The record carries the corpus's signature, so a corpus that has changed is
+    measured again rather than judged by a floor taken on other texts.
+    """
+    unanswerable_questions = json.loads(
+        FLOOR_CALIBRATION_QUESTIONS.read_text(encoding="utf-8")
+    )["unanswerable"]
+    answered_qs = answered_questions(kb, len(unanswerable_questions))
 
     def best(question: str) -> float:
-        hits = kb.search(question, 1)
-        return round(float(hits[0].get("score") or 0.0), 3) if hits else 0.0
+        return round(best_score(kb.search(question, top_k)), 3)
 
-    answered = [best(question) for question in questions["answered"]]
-    unanswerable = [best(question) for question in questions["unanswerable"]]
-    low, high = max(unanswerable), min(answered)
     record: dict[str, Any] = {
         "model": EMBEDDING_MODEL_NAME,
-        "answered": answered,
-        "unanswerable": unanswerable,
-        "floor": round((low + high) / 2, 3) if high > low else None,
+        "corpus": corpus_signature(kb),
         "measured_at": datetime.now(UTC).isoformat(),
     }
+    if len(answered_qs) < FLOOR_MIN_ANSWERED:
+        record.update(answered=[], unanswerable=[], floor=None, too_small=len(answered_qs))
+    else:
+        answered = [best(question) for question in answered_qs]
+        unanswerable = [best(question) for question in unanswerable_questions]
+        low, high = max(unanswerable), min(answered)
+        record.update(
+            answered=answered,
+            unanswerable=unanswerable,
+            floor=round((low + high) / 2, 3) if high > low else None,
+        )
     kb.collection.set_floor_record(record)
     return record
 

@@ -75,6 +75,7 @@ from langgraph_agent.graphrag_server import (  # noqa: E402
     GraphRAGKnowledgeBase,
     absent_corpus,
     calibrate_relevance_floor,
+    corpus_signature,
     corpus_state,
     embedding_device_status,
     floor_calibration,
@@ -947,21 +948,30 @@ def rpc_shutdown(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _calibrate_the_floor_before_the_run(corpus_report: dict[str, Any]) -> dict[str, Any]:
-    """Measure the relevance floor the first time the corpus is whole.
+    """Measure the relevance floor whenever the corpus is whole and has changed.
 
     A cosine means nothing absolute and nothing across models, so the floor is
-    measured, never set: `embedding_calibration.json` holds questions the
-    corpus answers and questions it cannot, and the floor sits in the gap. A
-    model that leaves no gap gets no floor. Skipped unless the corpus phase left
-    a whole corpus.
+    measured, never set: questions the corpus answers -- drawn from its own
+    documents -- against questions it cannot (`embedding_calibration.json`),
+    and the floor sits in the gap. A corpus that leaves no gap gets no floor.
+    A record taken on the texts the corpus holds now is `known`; one taken on
+    other texts, or before records named their corpus, is measured again.
+    Skipped unless the corpus phase left a whole corpus.
     """
-    if floor_calibration() is not None:
-        return {"source": "known", "model": EMBEDDING_MODEL_NAME}
+    record = floor_calibration()
+    kb_or_none = _open_kb()
+    if record is not None and kb_or_none is not None:
+        try:
+            if record.get("corpus") == corpus_signature(kb_or_none):
+                return {"source": "known", "model": EMBEDDING_MODEL_NAME}
+        except Exception:
+            pass  # the store could not say what it holds; the checks below decide
     if RUN_CONTROL.stopped() or corpus_report.get("stopped"):
         return {"source": "stopped", "model": EMBEDDING_MODEL_NAME}
     if corpus_report.get("source") in ("error", "nothing_to_index", "unavailable"):
-        return {"source": "no_corpus", "model": EMBEDDING_MODEL_NAME}
-    kb_or_none = _open_kb()
+        # The floor a record carries is still the best there is to read off.
+        source = "known" if record is not None else "no_corpus"
+        return {"source": source, "model": EMBEDDING_MODEL_NAME}
     if kb_or_none is None or corpus_state()[0] != "indexed":
         return {"source": "no_corpus", "model": EMBEDDING_MODEL_NAME}
     with _run_lock:
@@ -980,6 +990,13 @@ def _calibration_feed_line(report: dict[str, Any]) -> str | None:
     """Said when a floor was measured or could not be: the outcomes that change retrieval."""
     source = report.get("source")
     model = report.get("model")
+    if source == "calibrated" and report.get("too_small") is not None:
+        return (
+            f"[Embedder] The corpus offers {report['too_small']} question(s) it answers by "
+            f"construction, too few to measure a relevance floor for {model} on: the "
+            "Researcher's model answers every search, and the floor is measured again "
+            "once the corpus has changed."
+        )
     if source == "calibrated":
         answered = report.get("answered") or [0.0]
         unanswerable = report.get("unanswerable") or [0.0]
@@ -991,7 +1008,8 @@ def _calibration_feed_line(report: dict[str, Any]) -> str | None:
             return (
                 f"[Embedder] {model} left no gap between the two populations ({span}), "
                 "so it has no relevance floor: the Researcher's model answers every "
-                "search and the Planner gets no corpus map."
+                "search and the Planner gets no corpus map until the corpus changes "
+                "and the floor is measured again."
             )
         return (
             f"[Embedder] Measured a relevance floor for {model}: {span}, so retrieval "

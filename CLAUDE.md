@@ -61,7 +61,7 @@ python example_usage.py
 │   ├── control.py             # RUN_CONTROL (the emergency stop), GPU_ARBITER, activity meters
 │   ├── graphrag_server.py     # GraphRAG knowledge base: entity graph + chunked vector store
 │   ├── corpus_store.py        # Where the corpus lives: PostgreSQL + pgvector, one schema per corpus
-│   ├── embedding_calibration.json # Floor questions for a new embedding model (JSON: never indexed)
+│   ├── embedding_calibration.json # The floor's off-domain questions (JSON: never indexed)
 │   ├── mcp_client.py          # The agents' tool belts, served in-process
 │   ├── lexical.py             # BM25 + rank fusion: the lexical half of search
 │   ├── web_research.py        # Online research: keyless search, our own selection gate
@@ -278,11 +278,15 @@ a Builder that runs programs. No CORS header is sent; the page is same-origin.
   the Researcher.
 - **Retrieval decides whether a seat is consulted at all.** `_gather_research`
   returns the retrieved chunks without invoking the Researcher's model whenever
-  the top hit clears `relevance_floor()`, marking any passage under it; below
-  it, the seat judges the passages that came back (`_retrieval_for_the_seat`).
-  The floor is measured per corpus into the corpus's own row in the
-  database, `None` until it has been, and never borrowed
-  between embedding models. Search is hybrid: BM25 re-ranks the dense window
+  the best hit (`best_score`, the statistic the floor is measured on) clears
+  `relevance_floor()`, marking any passage under it; below it, the seat judges
+  the passages that came back (`_retrieval_for_the_seat`). The floor is
+  measured per corpus into the corpus's own row in the database -- questions
+  drawn from the corpus's own documents (a fetched page's goal, else a
+  heading) against the off-domain ones in `embedding_calibration.json` --
+  `None` until it has been, measured again once the corpus has changed
+  (`corpus_signature`), and never borrowed between embedding models. The
+  Planner's map asks for the floor before it searches. Search is hybrid: BM25 re-ranks the dense window
   (`lexical.py`), ranks fused rather than scores, so every result keeps the
   cosine the floor is read off.
 - **Documents are embedded in chunks** (`CHUNK_MAX_TOKENS` 254 against a

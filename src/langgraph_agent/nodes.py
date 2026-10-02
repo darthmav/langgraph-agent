@@ -565,15 +565,17 @@ def _corpus_map(goal: str) -> str:
     if not goal.strip():
         return ""
     try:
-        response = _call_tool(
-            "search_knowledge_graph", {"query": goal, "top_k": PLANNER_MAP_RESULTS}
-        )
+        # The floor first: with none there is no map, and searching anyway
+        # loaded the embedder -- evicting the seat about to plan -- for nothing.
         from langgraph_agent.graphrag_server import relevance_floor
 
         floor = relevance_floor()
+        if floor is None:
+            return ""
+        response = _call_tool(
+            "search_knowledge_graph", {"query": goal, "top_k": PLANNER_MAP_RESULTS}
+        )
     except Exception:
-        return ""
-    if floor is None:
         return ""
 
     results = response.get("results", []) if isinstance(response, dict) else []
@@ -811,7 +813,9 @@ def _retrieval_for_the_seat(
             "answer `no_relevant_knowledge`."
         )
 
-    top = float(results[0].get("score") or 0.0)
+    from langgraph_agent.graphrag_server import best_score
+
+    top = best_score(results)
     if floor is None:
         verdict = (
             "This corpus has no measured relevance floor yet, so none of them "
@@ -840,7 +844,7 @@ def _retrieval_for_the_seat(
 def _retrieved_findings(results: list[dict[str, Any]], floor: float, graph: Any) -> str:
     """Retrieval that answered the plan, written up in the Researcher's format.
 
-    Only the top hit had to clear the floor. The rest ride along -- the diverse
+    Only the best hit had to clear the floor. The rest ride along -- the diverse
     hits `SEARCH_ESCALATION` widens the window for -- each marked with its side
     of the floor, so the Builder weighs a weaker passage as weaker.
     """
@@ -881,9 +885,10 @@ def _retrieved_findings(results: list[dict[str, Any]], floor: float, graph: Any)
 def _gather_research(state: AgentState) -> tuple[str, str]:
     """Retrieve for the Researcher and return `(findings, status)`.
 
-    Retrieval answers by itself when its top hit clears `relevance_floor()`;
-    otherwise the seat judges what came back. Reads state and never writes it,
-    so it can run under `_with_deadline`.
+    Retrieval answers by itself when its best hit clears `relevance_floor()`
+    (`best_score`, the statistic the floor was measured on); otherwise the seat
+    judges what came back. Reads state and never writes it, so it can run under
+    `_with_deadline`.
     """
     plan = state.get("plan", "")
     results: list[dict[str, Any]] = []
@@ -903,10 +908,10 @@ def _gather_research(state: AgentState) -> tuple[str, str]:
         if response.get("source") == "no_corpus":
             why_none = "no corpus has been built on this machine"
         # Imported late, as mcp_client does: graphrag_server pulls in the database driver.
-        from langgraph_agent.graphrag_server import relevance_floor
+        from langgraph_agent.graphrag_server import best_score, relevance_floor
 
         floor = relevance_floor()
-        accepted = floor is not None and bool(results) and results[0].get("score", 0) > floor
+        accepted = floor is not None and bool(results) and best_score(results) > floor
         if accepted and results[0].get("id"):
             # A hit's id is its document's node in the graph.
             try:
