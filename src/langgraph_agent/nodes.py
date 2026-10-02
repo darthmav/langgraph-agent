@@ -1249,8 +1249,13 @@ OUTPUT_DIR_NOTE = (
     "file under that directory, spelling the full path from the project root "
     "(for example {output_dir}/main.py) -- filesystem_write refuses any other "
     "path. Pass cwd={output_dir} to terminal_execute and run_tests when you "
-    "run what you wrote."
+    "run what you wrote. The git tools act in {output_dir}/ itself, and "
+    "git_dwell needs it to be a repository of its own (git init it first)."
 )
+
+
+# The Builder's git tools, which on a run given a project act in that project.
+_GIT_TOOL_NAMES = frozenset({"git_status", "git_diff", "git_dwell"})
 
 
 def _outside_output_dir(path: str, output_dir: str) -> str | None:
@@ -1363,6 +1368,11 @@ def _run_builder_tools(
         for call in calls:
             name = str(call.get("name", ""))
             args = dict(call.get("args") or {})
+            if output_dir and name in _GIT_TOOL_NAMES:
+                # The project's own repository, never the checkout around it:
+                # `projects/` is ignored there, so `git add -A` could only stage
+                # the operator's own work -- and the default pipeline merges.
+                args["cwd"] = output_dir
 
             if name not in BUILDER_TOOL_NAMES:
                 # Refused, not run: the client serves the Researcher's tools

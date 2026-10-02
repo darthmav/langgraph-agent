@@ -611,7 +611,9 @@ def test_a_page_that_hiccups_is_fetched_again(monkeypatch, no_waits):
 
 
 def _vcs(outcomes: list[tuple[bool, str]], calls: list[tuple[str, ...]]):
-    def run(self: MCPClient, *argv: str, timeout: float = 60.0) -> tuple[bool, str]:
+    def run(
+        self: MCPClient, *argv: str, timeout: float = 60.0, cwd: str | None = None
+    ) -> tuple[bool, str]:
         calls.append(argv)
         if argv[:2] == ("git", "push"):
             return outcomes.pop(0)

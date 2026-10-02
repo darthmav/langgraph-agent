@@ -263,7 +263,11 @@ a Builder that runs programs. No CORS header is sent; the page is same-origin.
   commit, push, pr, merge -- whatever order the caller lists them in, and it
   will not commit onto the default branch. The default pipeline ends at
   `merge` (`--squash --delete-branch`); naming `stages` without it stops at
-  `pr`. Nothing staged is a success, and `paths` commits only what it names.
+  `pr`. Nothing staged is a success, and `paths` commits only what it names
+  (a pathspec on the commit, not just on the add). On a run given a project
+  the git tools act in `projects/<name>`, and `git_dwell` refuses unless that
+  is a repository of its own: git climbs to the checkout otherwise, where
+  `projects/` is ignored and only the operator's own work could be staged.
 - **`expect_failures`, `research_web` and `discuss_only` are per-run flags set
   by the caller, never by an agent.** A discussion run binds no tools at all
   and forces online research off.
