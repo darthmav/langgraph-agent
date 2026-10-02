@@ -989,6 +989,10 @@ def get_agent_status(agent: AgentName) -> dict[str, Any]:
 class StubLLM:
     """Canned, parser-friendly answers in each seat's format, for tests and keyless seats."""
 
+    # Canned text by design: a Builder seat without tools is a fault in a real
+    # model, and the expected shape of a stub (see `_seat_pass`).
+    is_stub = True
+
     def invoke(self, messages: list[Any]) -> Any:
         """Return canned responses for testing."""
         from langchain_core.messages import AIMessage

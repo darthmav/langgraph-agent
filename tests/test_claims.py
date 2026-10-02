@@ -490,10 +490,12 @@ def test_no_capital_forced_by_position_becomes_a_hub_entity():
 
 
 # The twenty best-connected entities, as a person last read and accepted them:
-# 2026-10-02, when the embedder gained a circuit of its own and `Circuit` (the
-# self-healing class) reached a sixth document. The twentieth slot is a tie at
-# six documents, settled by name, so it took the place of `CircuitOpenError`;
-# both are real terms. The 2026-10-01 audit, when the census widened back to
+# 2026-10-02, when a Researcher's replan began counting toward the step
+# ceiling and `MAX_STEPS` (graph.py's constant) reached a seventh document;
+# `Architecture` left at the tie for the twentieth slot, six documents settled
+# by name, which `AGENTS` now holds -- all three are real terms. Earlier the
+# same day `Circuit` (the self-healing class) reached a sixth document and took
+# the place of `CircuitOpenError`. The 2026-10-01 audit, when the census widened back to
 # all the prose the checkout ships, ruled `ValueError`, `GraphRAG`, `Callable`,
 # `Verdict` and `Architecture` (the Architect's section and state field) real
 # terms, and four sentence-openers the positional guard caught joined
@@ -502,7 +504,7 @@ AUDITED_TOP_ENTITIES = frozenset({
     "Builder", "Architect", "Planner", "Researcher", "Exception", "ValueError",
     "GraphRAG", "Ollama", "Python", "AgentState", "Callable", "Search",
     "Verdict", "Anthropic", "Fiedler", "Laplacian", "RECURSION_LIMIT", "AGENTS",
-    "Architecture", "Circuit",
+    "MAX_STEPS", "Circuit",
 })
 
 

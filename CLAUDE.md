@@ -190,7 +190,7 @@ Every node reads/writes `AgentState`:
   "research_status": "ready_for_builder" | "need_replan" |
   "no_relevant_knowledge", "blockers": str, "files_changed": list[str],
   "failed_verification": list[str], "unverified": list[str],
-  "builder_cut_off": "" | "turn_cap" | "deadline", "lint_failed": list[str],
+  "builder_cut_off": "" | "turn_cap" | "deadline" | "no_tools", "lint_failed": list[str],
   "expect_failures": bool, "discuss_only": bool, "output_dir": str,
   "step_count": int,
 }
@@ -202,8 +202,9 @@ write, not how the run ended.
 
 The Architect writes `architecture` and `verdict`; the verdict is what routes
 the loop and what ends it. `step_count` is incremented by the Architect gate,
-not by the Builder — every cycle passes the gate, but a Planner/Researcher loop
-never reaches the Builder and would otherwise run uncounted.
+not by the Builder, and by a Researcher that sends the Planner back
+(`need_replan`): that loop never reaches the gate or the Builder, and would
+otherwise run uncounted. Either way `MAX_STEPS` ends the run.
 
 ## Common Tasks
 
@@ -273,9 +274,9 @@ a Builder that runs programs. No CORS header is sent; the page is same-origin.
   non-empty `plan` (`_PLANNER_TIMED_OUT`, `_PLANNER_NO_STEPS`), since the gate
   counts a step only while a plan exists.
 - **A silent Researcher is not research**: `_said_nothing` routes to the
-  Builder and names the seat's model. Every exit from `researcher_node` sets
-  `research_status`, and `_route_from_planner` forces the opening cycle through
-  the Researcher.
+  Builder and names the seat's model. Every exit from `researcher_node` but the
+  emergency stop's (which ends the run anyway) sets `research_status`, and
+  `_route_from_planner` forces the opening cycle through the Researcher.
 - **Retrieval decides whether a seat is consulted at all.** `_gather_research`
   returns the retrieved chunks without invoking the Researcher's model whenever
   the best hit (`best_score`, the statistic the floor is measured on) clears

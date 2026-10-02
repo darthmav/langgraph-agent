@@ -510,7 +510,7 @@ Per the 4-Agent System specification:
 | `files_changed`    | Builder     | Files a write tool reported writing            |
 | `failed_verification` | Builder  | Written files that failed to run, or were never run |
 | `unverified`       | Builder     | The part of `failed_verification` nobody ran   |
-| `builder_cut_off`  | Builder     | `turn_cap` \| `deadline` when a pass ended early |
+| `builder_cut_off`  | Builder     | `turn_cap` \| `deadline` when a pass ended early, `no_tools` when its model could not act |
 | `lint_failed`      | Builder     | Written Python files that still fail `ruff check` |
 | `expect_failures`  | Caller      | A file that runs and fails stops blocking approval |
 | `discuss_only`     | Caller      | No tools at all; the run proposes and changes nothing |

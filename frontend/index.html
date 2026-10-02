@@ -2148,6 +2148,8 @@ function recoveryBlock(r){
   if(r.builder_cut_off)
     parts.push(r.builder_cut_off === "turn_cap"
       ? "The Builder ran out of tool turns before it finished."
+      : r.builder_cut_off === "no_tools"
+      ? "The Builder's model cannot call tools, so nothing was built."
       : "The Builder hit its deadline before it finished.");
   if(r.lint_failed && r.lint_failed.length)
     parts.push(`Fails lint: ${r.lint_failed.join(", ")}`);

@@ -1006,6 +1006,10 @@ def researcher_node(state: AgentState) -> AgentState:
     elif research_status == "need_replan":
         state["next_agent"] = "Planner"
         state["messages"].append("[Researcher] Needs replan")
+        # A replan is a cycle the Architect's gate never sees -- the Planner
+        # and the Researcher can go round without reaching the Builder -- so
+        # it is counted here, and `MAX_STEPS` bounds this loop too.
+        state["step_count"] = state.get("step_count", 0) + 1
     elif research_status == "no_relevant_knowledge":
         state["next_agent"] = "Builder"
         state["messages"].append("[Researcher] No relevant knowledge, proceeding")
@@ -1501,6 +1505,7 @@ _VERIFY_LABELS = {
 _CUT_OFF_REASONS = {
     "turn_cap": "the Builder ran out of tool turns before it finished",
     "deadline": "the Builder hit its deadline before it finished",
+    "no_tools": "the Builder's model cannot call tools, so nothing was built",
 }
 
 
@@ -1572,6 +1577,7 @@ def _verify_written_files(
     files_changed: list[str],
     tool_log: list[str],
     deadline: _Deadline | None = None,
+    cwd: str = "",
 ) -> list[tuple[str, str, str]]:
     """Run the runnable files the Builder wrote, and report what happened.
 
@@ -1579,7 +1585,9 @@ def _verify_written_files(
     imported rather than executed (`_import_target`), both under this process's
     own interpreter, which has the project's dependencies. `deadline` bounds the
     pass as a whole, and a file past it or past the emergency stop comes back
-    "unverified" -- never "ok".
+    "unverified" -- never "ok". `cwd` is where each file runs: a project run's
+    directory, where the Builder was told to run what it wrote, so a file that
+    opens its neighbours by relative path runs the same for the proof.
 
     Returns (path, status, detail) per runnable file, where status is "ok",
     "imported", "failed" or "unverified".
@@ -1608,7 +1616,9 @@ def _verify_written_files(
         # would arrive as two arguments.
         python = shlex.quote(sys.executable)
         if target is None:
-            command, passed = f"{python} {shlex.quote(path)}", "ok"
+            # Absolute, so it names the same file from whichever `cwd` it runs in.
+            script = str(Path(path).resolve()) if cwd else path
+            command, passed = f"{python} {shlex.quote(script)}", "ok"
         else:
             root, module = target
             command, passed = f'{python} -c "import {module}"', "imported"
@@ -1629,6 +1639,7 @@ def _verify_written_files(
                         else max(1, int(min(VERIFY_TIMEOUT_SECONDS, deadline.remaining())))
                     ),
                     "env": env,
+                    **({"cwd": cwd} if cwd else {}),
                 },
             )
         except Exception as exc:
@@ -1758,11 +1769,15 @@ def _seat_pass(
     files_changed: list[str],
     tool_log: list[str],
     deadline: _Deadline,
-) -> tuple[str, bool, bool, bool]:
-    """The Builder's seat at work: (closing message, out of turns, out of time, stopped).
+) -> tuple[str, bool, bool, bool, str]:
+    """The Builder's seat at work.
 
-    A discussion run binds no tools, so it takes the path of a model that cannot
-    call any: there is no tool loop for it to act through.
+    Returns (closing message, out of turns, out of time, stopped, why it could
+    not act). A discussion run binds no tools, so it takes the path of a model
+    that cannot call any: there is no tool loop for it to act through. The last
+    element is empty unless a real model was refused its tools on a run that
+    needed them -- such a pass can only describe work, so it must not read as
+    having done it. A stub answers in canned text by design and is exempt.
     """
     discuss_only = bool(state.get("discuss_only"))
     note = (
@@ -1778,19 +1793,27 @@ def _seat_pass(
         ),
     ]
     llm = get_agent_llm("builder")
+    no_tools = ""
     try:
         tool_llm = None if discuss_only else llm.bind_tools(BUILDER_TOOLS)
-    except AttributeError:  # StubLLM, or a model without tool support
+    except AttributeError as exc:  # StubLLM, or a model without tool support
         tool_llm = None
+        if not getattr(llm, "is_stub", False):
+            no_tools = str(exc).removeprefix("bind_tools: ").removeprefix("bind_tools") or (
+                "the model offers no tool binding"
+            )
 
     if RUN_CONTROL.stopped():
-        return "", False, False, True
+        return "", False, False, True, no_tools
     if tool_llm is None:
         reply = _with_deadline(
             lambda: _as_text(llm.invoke(messages).content), deadline.remaining(), None
         )
-        return reply or "", False, reply is None, False
-    return _run_builder_tools(tool_llm, messages, files_changed, tool_log, deadline, output_dir)
+        return reply or "", False, reply is None, False, no_tools
+    return (
+        *_run_builder_tools(tool_llm, messages, files_changed, tool_log, deadline, output_dir),
+        "",
+    )
 
 
 def _prove(
@@ -1814,7 +1837,9 @@ def _prove(
         if path not in files_changed and path not in carried and Path(path).exists()
     ]
     lint = _lint_written_files(files_changed + carried + lint_carried, tool_log, deadline)
-    return _verify_written_files(files_changed + carried, tool_log, deadline), lint
+    # A discussion run writes nothing, and has no project to run in.
+    cwd = "" if state.get("discuss_only") else str(state.get("output_dir") or "")
+    return _verify_written_files(files_changed + carried, tool_log, deadline, cwd), lint
 
 
 def _proof_report(
@@ -1886,7 +1911,7 @@ def builder_node(state: AgentState) -> AgentState:
     # it leaves unspent is added to the reserve: a slow build cannot starve the
     # proof.
     loop_deadline = _Deadline(max(0.0, BUILDER_DEADLINE_SECONDS - VERIFY_RESERVE_SECONDS))
-    content, exhausted, out_of_time, stopped = _seat_pass(
+    content, exhausted, out_of_time, stopped, no_tools = _seat_pass(
         state, output_dir, files_changed, tool_log, loop_deadline
     )
     verification, lint = _prove(
@@ -1992,6 +2017,12 @@ def builder_node(state: AgentState) -> AgentState:
             f"Builder stopped after {MAX_BUILDER_TOOL_TURNS} tool turns without "
             "finishing. Narrow the plan or split it into smaller steps."
         )
+    if no_tools and not blockers:
+        blockers = (
+            f"The Builder's model cannot call tools ({no_tools}), so this pass could "
+            "not write or run anything. Seat the Builder on a model that reports "
+            "`tools` (`ollama show <tag>` lists its capabilities)."
+        )
 
     state["builder_report"] = builder_report
     state["files_changed"] = all_files_changed
@@ -2002,7 +2033,10 @@ def builder_node(state: AgentState) -> AgentState:
     # `expect_failures` and must not excuse unrun files with them.
     state["unverified"] = list(unverified)
     state["builder_cut_off"] = (
-        "turn_cap" if exhausted else "deadline" if out_of_time else ""
+        "turn_cap" if exhausted
+        else "deadline" if out_of_time
+        else "no_tools" if no_tools
+        else ""
     )
     state["lint_failed"] = lint_failed
     state["blockers"] = blockers
@@ -2035,6 +2069,11 @@ def builder_node(state: AgentState) -> AgentState:
         summary = (
             f"Stopped after {MAX_BUILDER_TOOL_TURNS} tool turns without "
             f"finishing. Files: {len(files_changed)}"
+        )
+    elif no_tools:
+        summary = (
+            f"Could not act: the Builder's model cannot call tools. "
+            f"Files: {len(files_changed)}"
         )
     elif discuss_only:
         summary = "Discussion only: proposal ready, nothing was changed"

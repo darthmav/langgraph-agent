@@ -126,3 +126,41 @@ def test_embed_project_is_refused_mid_run(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="in flight"):
         serve.rpc_embed_project({"name": "snake"})
     assert embedded_projects(tmp_path) == set()
+
+
+def test_a_project_s_files_are_verified_where_the_builder_was_told_to_run_them(
+    tmp_path, monkeypatch
+):
+    """OUTPUT_DIR_NOTE tells the Builder to run its files with cwd set to the
+    project; the proof ran them from the checkout root, so a script that opens
+    its own data file failed verification on every cycle."""
+    from langgraph_agent.nodes import _verify_written_files
+
+    monkeypatch.chdir(tmp_path)
+    project = tmp_path / "projects" / "demo"
+    project.mkdir(parents=True)
+    (project / "data.csv").write_text("a,b\n", encoding="utf-8")
+    (project / "main.py").write_text("print(open('data.csv').read())\n", encoding="utf-8")
+
+    in_project = _verify_written_files(["projects/demo/main.py"], [], None, cwd="projects/demo")
+    from_root = _verify_written_files(["projects/demo/main.py"], [], None)
+
+    assert [status for _, status, _ in in_project] == ["ok"]
+    assert [status for _, status, _ in from_root] == ["failed"]
+
+
+def test_the_proof_runs_in_the_run_s_project(monkeypatch):
+    import langgraph_agent.nodes as nodes
+
+    seen: list[str] = []
+    monkeypatch.setattr(nodes, "_lint_written_files", lambda *a: ([], [], ""))
+    monkeypatch.setattr(
+        nodes, "_verify_written_files",
+        lambda files, log, deadline, cwd="": seen.append(cwd) or [],
+    )
+    state = {"output_dir": "projects/demo", "failed_verification": [], "lint_failed": []}
+
+    nodes._prove(state, [], [], nodes._Deadline(10))  # type: ignore[arg-type]
+    nodes._prove({**state, "output_dir": ""}, [], [], nodes._Deadline(10))  # type: ignore[arg-type]
+
+    assert seen == ["projects/demo", ""]
